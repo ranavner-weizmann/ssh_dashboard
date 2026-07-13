@@ -1,0 +1,2108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SSH Dashboard — Drone Air System</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #11161c;
+    --panel: #161d25;
+    --panel-border: #263240;
+    --text: #d7e0e8;
+    --text-dim: #7c8c9b;
+    --accent: #ff7a33;
+    --accent-dim: #b35522;
+    --ok: #4caf7d;
+    --err: #e0594f;
+    --mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+    --sans: "Inter", -apple-system, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 48px 20px;
+  }
+
+  .wrap {
+    width: 100%;
+    max-width: 1440px;
+  }
+
+  .wrap.narrow {
+    max-width: 720px;
+  }
+
+  /* Top strip: the panels the user reaches for constantly (timer, notes,
+     time sync) go first so they're glanceable without scrolling. */
+  .top-strip {
+    display: grid;
+    gap: 16px;
+    align-items: start;
+    margin-bottom: 20px;
+  }
+
+  .top-strip > .panel {
+    margin-bottom: 0;
+  }
+
+  .top-strip-primary {
+    grid-template-columns: 1fr 1.2fr 1fr;
+  }
+
+  /* Main two-column work area: sensors/c-app on the left (the panels
+     actually used while a session is running), notes/log on the right
+     (write-and-review panels). Left column gets more room since the
+     runall output log benefits most from horizontal space. */
+  .main-grid {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+
+  .col {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .col > .panel {
+    margin-bottom: 0;
+  }
+
+  /* Below ~1100px there isn't enough room for two real columns without
+     squeezing the output log uncomfortably narrow - collapse back to a
+     single stacked column, same as the original layout. */
+  @media (max-width: 1100px) {
+    .top-strip-primary {
+      grid-template-columns: 1fr;
+    }
+    .main-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  /* Smaller variant for panels that hold a single action (e.g. PSDK
+     init) - less padding, button/hint sit side by side instead of the
+     hint wrapping onto its own line below a full-width button. */
+  .panel-compact {
+    padding: 16px 20px;
+  }
+  .panel-compact label {
+    margin-bottom: 10px;
+  }
+
+  .header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 28px;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+
+  h1 {
+    font-size: 26px;
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  /* Small top-right status bar - deliberately not a boxed panel, just a
+     glanceable dot + text (+ Disconnect once a session is live). */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  .btn-status-disconnect {
+    padding: 5px 12px;
+    font-size: 12px;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+
+  .narrow-panel {
+    max-width: 420px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .field {
+    margin-bottom: 14px;
+  }
+
+  label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+    font-family: var(--mono);
+  }
+
+  input[type=text], input[type=password] {
+    width: 100%;
+    background: #0d1217;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: var(--mono);
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+
+  input[type=text]:focus, input[type=password]:focus {
+    border-color: var(--accent);
+  }
+
+  #runall-log-select {
+    background: #0d1217;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: var(--mono);
+    outline: none;
+  }
+
+  #runall-log-select:focus {
+    border-color: var(--accent);
+  }
+
+  .select-input {
+    background: #0d1217;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: var(--mono);
+    outline: none;
+  }
+  .select-input:focus { border-color: var(--accent); }
+
+  .plot-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .plot-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .plot-stat-value {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 32px;
+    color: var(--text);
+  }
+
+  .plot-stat-unit {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-left: 6px;
+  }
+
+  .plot-canvas-wrap {
+    position: relative;
+    width: 100%;
+    height: 220px;
+  }
+
+  #plot-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  .plot-tooltip {
+    position: absolute;
+    display: none;
+    pointer-events: none;
+    background: #0d1217;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: nowrap;
+    transform: translate(-50%, calc(-100% - 10px));
+    z-index: 5;
+  }
+
+  .plot-tooltip .tt-value {
+    color: var(--text);
+    font-weight: 700;
+  }
+
+  .plot-tooltip .tt-time {
+    color: var(--text-dim);
+  }
+
+  .row {
+    display: flex;
+    gap: 12px;
+  }
+  .row .field { flex: 1; }
+
+  button {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 14px;
+    border: none;
+    border-radius: 6px;
+    padding: 11px 18px;
+    cursor: pointer;
+    transition: background 0.15s ease, opacity 0.15s ease;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: #1a1006;
+    width: 100%;
+  }
+  .btn-primary:hover { background: #ff8c4f; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-primary-danger {
+    background: var(--err);
+    color: #2a0a08;
+  }
+  .btn-primary-danger:hover { background: #ea6a5f; }
+
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--panel-border);
+    color: var(--text-dim);
+  }
+  .btn-ghost:hover { color: var(--text); border-color: var(--text-dim); }
+
+  .status-line {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+  }
+  .dot.connected { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.error { background: var(--err); }
+
+  .wide-output {
+    max-height: 360px;
+  }
+
+  .error-msg {
+    color: var(--err);
+    font-size: 13px;
+    margin-top: 10px;
+    font-family: var(--mono);
+  }
+
+  #connect-view, #notes-view { display: none; }
+  #connect-view.active, #notes-view.active { display: block; }
+
+  textarea {
+    width: 100%;
+    min-height: 90px;
+    background: #0d1217;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 12px;
+    font-size: 14px;
+    font-family: var(--sans);
+    resize: vertical;
+    outline: none;
+  }
+  textarea:focus { border-color: var(--accent); }
+
+  .submit-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 10px;
+  }
+  .submit-row button { width: auto; }
+
+  .hint {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 6px;
+  }
+
+  .log {
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 1px;
+    max-height: 360px;
+    overflow-y: auto;
+  }
+
+  .log-entry {
+    display: flex;
+    gap: 14px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .log-entry:last-child { border-bottom: none; }
+
+  .log-ts {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    white-space: nowrap;
+    padding-top: 1px;
+  }
+
+  .log-text {
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.4;
+  }
+
+  .empty-log {
+    color: var(--text-dim);
+    font-size: 13px;
+    text-align: center;
+    padding: 24px 0;
+  }
+
+  .btn-download {
+    width: 100%;
+    background: #1b2b3a;
+    border: 1px solid var(--accent-dim);
+    color: var(--accent);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 16px 18px;
+    border-radius: 8px;
+  }
+  .btn-download:hover {
+    background: #20344566;
+    border-color: var(--accent);
+  }
+  .btn-download:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .download-result-list {
+    margin-top: 14px;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .download-result-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--panel-border);
+    color: var(--text-dim);
+  }
+  .download-result-row:last-child { border-bottom: none; }
+  .download-result-row .ok { color: var(--ok); }
+  .download-result-row .err { color: var(--err); }
+  .download-target-path {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 10px;
+  }
+
+  .progress-bar-track {
+    display: none;
+    width: 100%;
+    height: 8px;
+    background: #0d1217;
+    border: 1px solid var(--panel-border);
+    border-radius: 5px;
+    margin-top: 12px;
+    overflow: hidden;
+  }
+  .progress-bar-track.active { display: block; }
+  .progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+    border-radius: 5px;
+    transition: width 0.3s ease;
+  }
+
+  .output-panel {
+    display: none;
+    max-height: 220px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    background: #0d1217;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 12px;
+    margin-top: 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+  }
+
+  .button-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+
+  .timer-display {
+    font-family: var(--mono);
+    font-size: 42px;
+    font-weight: 600;
+    text-align: center;
+    color: var(--text);
+    padding: 14px 0 4px 0;
+    letter-spacing: 0.02em;
+  }
+  .timer-display.done {
+    color: var(--accent);
+  }
+  .timer-preset.active {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  /* MODAL */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(8, 11, 14, 0.7);
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    padding: 20px;
+  }
+  .modal-overlay.active {
+    display: flex;
+  }
+  .modal-box {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 24px;
+    width: 100%;
+    max-width: 420px;
+  }
+  .modal-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+  .modal-body label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+    font-family: var(--mono);
+  }
+  .modal-body input[type=text] {
+    width: 100%;
+    background: #0d1217;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: var(--mono);
+    outline: none;
+  }
+  .modal-body input[type=text]:focus { border-color: var(--accent); }
+  .modal-body p {
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.5;
+    margin: 0;
+  }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 20px;
+  }
+  .modal-actions button { width: auto; }
+
+  /* TIME SYNC PANEL */
+  .time-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .time-row:last-of-type { border-bottom: none; }
+  .time-row .time-label { color: var(--text-dim); }
+  .time-row .time-value { color: var(--text); font-size: 15px; }
+  .time-row .time-value.stale { color: var(--text-dim); }
+
+  .ntp-warning {
+    display: none;
+    background: #2a2110;
+    border: 1px solid #6b4f12;
+    color: #e0b34f;
+    font-size: 12px;
+    font-family: var(--mono);
+    line-height: 1.5;
+    padding: 10px 12px;
+    border-radius: 6px;
+    margin: 12px 0;
+  }
+  .ntp-warning.active { display: block; }
+  .ntp-warning code {
+    background: #1a1508;
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  .btn-sync {
+    width: 100%;
+    background: #1b2b3a;
+    border: 1px solid var(--accent-dim);
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 13px 18px;
+    border-radius: 8px;
+    margin-top: 4px;
+  }
+  .btn-sync:hover { background: #20344566; border-color: var(--accent); }
+  .btn-sync:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-danger {
+    width: 100%;
+    background: #2a1512;
+    border: 1px solid var(--err);
+    color: var(--err);
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 13px 18px;
+    border-radius: 8px;
+    margin-top: 14px;
+  }
+  .btn-danger:hover { background: #3a1c17; border-color: #ff8078; }
+  .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="header-row">
+    <div>
+      <div class="eyebrow">drone_air_system // remote logging</div>
+      <h1>SSH Dashboard</h1>
+    </div>
+    <div class="status-bar">
+      <span class="dot" id="status-dot"></span>
+      <span id="status-text">disconnected</span>
+      <span id="header-host"></span>
+      <button class="btn-ghost btn-status-disconnect" id="header-disconnect-btn" onclick="disconnect()" style="display: none;">Disconnect</button>
+    </div>
+  </div>
+
+  <!-- CONNECT VIEW -->
+  <div id="connect-view" class="panel narrow-panel">
+    <div class="field">
+      <label for="host">ip address</label>
+      <input type="text" id="host" placeholder="192.168.1.42" value="10.7." autocomplete="off">
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="username">username</label>
+        <input type="text" id="username" placeholder="rsp" value="rsp" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="password">password</label>
+        <input type="password" id="password" placeholder="••••••••" autocomplete="off">
+      </div>
+    </div>
+
+    <button class="btn-primary" id="connect-btn" onclick="connect()">Connect</button>
+    <div class="error-msg" id="connect-error"></div>
+  </div>
+
+  <!-- NOTES VIEW -->
+  <div id="notes-view">
+    <div class="top-strip top-strip-primary">
+      <div class="panel">
+        <label style="margin-bottom: 14px;">timer</label>
+        <div class="button-row">
+          <button class="btn-ghost timer-preset" onclick="startTimerPreset(30, this)">30s</button>
+          <button class="btn-ghost timer-preset" onclick="startTimerPreset(60, this)">1m</button>
+          <button class="btn-ghost timer-preset" onclick="startTimerPreset(180, this)">3m</button>
+          <button class="btn-ghost timer-preset" onclick="startTimerPreset(300, this)">5m</button>
+        </div>
+        <div class="row" style="margin-top: 10px; align-items: flex-end;">
+          <div class="field" style="margin-bottom: 0;">
+            <label for="timer-custom-input">custom (mm:ss or seconds)</label>
+            <input type="text" id="timer-custom-input" placeholder="2:30" autocomplete="off">
+          </div>
+          <button class="btn-ghost" style="width: auto; white-space: nowrap;" onclick="startTimerCustom()">Start</button>
+        </div>
+        <div class="timer-display" id="timer-display">--:--</div>
+        <div class="button-row" style="margin-top: 0;">
+          <button class="btn-ghost" id="timer-pause-btn" onclick="toggleTimerPause()" disabled>Pause</button>
+          <button class="btn-ghost" id="timer-reset-btn" onclick="resetTimer()" disabled>Reset</button>
+        </div>
+        <div class="hint" id="timer-status"></div>
+      </div>
+
+      <div class="panel">
+        <label for="note-text">new note</label>
+        <textarea id="note-text" placeholder="What's happening on the system right now..."></textarea>
+        <div class="submit-row">
+          <button class="btn-primary" id="save-btn" onclick="saveNote()" style="width:auto;">Save note</button>
+        </div>
+        <div class="hint" id="save-status"></div>
+      </div>
+
+      <div class="panel">
+        <label style="margin-bottom: 14px;">time sync</label>
+        <div class="time-row">
+          <span class="time-label">mac</span>
+          <span class="time-value" id="mac-time-display">--:--:--</span>
+        </div>
+        <div class="time-row">
+          <span class="time-label">pi <span id="pi-time-asof"></span></span>
+          <span class="time-value stale" id="pi-time-display">checking...</span>
+        </div>
+        <div class="ntp-warning" id="ntp-warning">
+          NTP sync is active on the Pi — a manual time set won't stick.
+          Disable it first over SSH with <code>sudo timedatectl set-ntp false</code>,
+          then sync again.
+        </div>
+        <button class="btn-sync" id="sync-time-btn" onclick="syncTime()">Sync Time</button>
+        <div class="hint" id="sync-time-status"></div>
+        <button class="btn-danger" id="restart-pi-btn" onclick="openRestartModal()">Restart Pi</button>
+        <div class="hint" id="restart-status"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <label style="margin-bottom: 14px;">run sensors</label>
+      <div class="button-row">
+        <button class="btn-primary" id="runall-btn" onclick="runAllSensors()">Run All Sensors</button>
+        <button class="btn-ghost" id="stop-runall-btn" onclick="stopRunAllSensors()">Stop Run All</button>
+      </div>
+      <div class="hint" id="runall-status">Starts the remote <code>drone_air_system/uri_aplogger/runall.py</code> script using the Pi-side venv.</div>
+      <div class="button-row" style="margin-top: 8px;">
+        <label for="runall-log-select" class="hint" style="margin: 0;">Log:</label>
+        <select id="runall-log-select" onchange="onRunallLogSelectChange()">
+          <option value="controller">Controller (runall.log)</option>
+        </select>
+      </div>
+      <div id="runall-output" class="output-panel wide-output"></div>
+    </div>
+
+    <div class="panel">
+      <div class="plot-toolbar">
+        <label style="margin-bottom: 0;">live plot</label>
+        <select id="plot-sensor-select" class="select-input" onchange="onPlotSensorChange()">
+          <option value="pom">Ozone (POM)</option>
+          <option value="imet">Temperature (iMet)</option>
+          <option value="cavity">Inline Pressure (Cavity)</option>
+        </select>
+      </div>
+      <div class="plot-header">
+        <div>
+          <span class="plot-stat-value" id="plot-stat-value">--</span>
+          <span class="plot-stat-unit" id="plot-stat-unit"></span>
+        </div>
+        <div class="hint" id="plot-status"></div>
+      </div>
+      <div class="plot-canvas-wrap">
+        <canvas id="plot-canvas"></canvas>
+        <div class="plot-tooltip" id="plot-tooltip"></div>
+      </div>
+    </div>
+
+    <div class="main-grid">
+      <div class="col">
+        <div class="panel panel-compact">
+          <label style="margin-bottom: 10px;">run c app</label>
+          <div style="display: flex; align-items: center; gap: 14px; flex-wrap: wrap;">
+            <button class="btn-primary" id="capp-btn" onclick="runCApp()" style="width: auto; padding: 9px 16px; font-size: 13px;">PSDK Initialization</button>
+            <div class="hint" id="capp-status" style="margin: 0;"></div>
+          </div>
+          <div id="capp-output" class="output-panel"></div>
+        </div>
+
+        <div class="panel">
+          <button class="btn-download" id="download-btn" onclick="startDownload()">⬇ Download All Data</button>
+          <div class="progress-bar-track" id="progress-bar-track">
+            <div class="progress-bar-fill" id="progress-bar-fill"></div>
+          </div>
+          <div class="hint" id="download-status"></div>
+          <div id="download-results"></div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="panel">
+          <label style="margin-bottom: 14px;">session log</label>
+          <div class="log" id="log"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DOWNLOAD MODAL -->
+  <div id="download-modal-overlay" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-title" id="modal-title">Download all data</div>
+      <div class="modal-body" id="modal-body">
+        <label for="folder-name-input">subfolder name (inside downloaded_outputs)</label>
+        <input type="text" id="folder-name-input" placeholder="session_2026_06_18" autocomplete="off">
+        <div class="error-msg" id="modal-error"></div>
+      </div>
+      <div class="modal-actions" id="modal-actions">
+        <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn-primary" style="width:auto;" onclick="submitFolderName()">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RESTART PI MODAL -->
+  <div id="restart-modal-overlay" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-title" id="restart-modal-title">⚠ Restart the Pi?</div>
+      <div class="modal-body" id="restart-modal-body">
+        <p>This immediately reboots the remote Pi. Any running sensors or the C app will be killed, and this SSH session will drop - you'll need to reconnect once it's back up.</p>
+      </div>
+      <div class="modal-actions" id="restart-modal-actions">
+        <button class="btn-ghost" onclick="closeRestartModal()">Cancel</button>
+        <button class="btn-primary btn-primary-danger" id="confirm-restart-btn" style="width:auto;" onclick="confirmRestartPi()">Restart Pi</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const notes = [];
+
+async function refreshStatus() {
+  try {
+    const res = await fetch('/status');
+    const data = await res.json();
+    if (data.connected) {
+      showNotesView(data);
+    } else {
+      showConnectView();
+    }
+  } catch (e) {
+    showConnectView();
+  }
+}
+
+function showNotesView(data) {
+  document.getElementById('connect-view').classList.remove('active');
+  document.getElementById('notes-view').classList.add('active');
+  document.getElementById('status-dot').className = 'dot connected';
+  document.getElementById('status-text').textContent = 'connected';
+  document.getElementById('header-host').textContent = `· ${data.username}@${data.host}`;
+  document.getElementById('header-disconnect-btn').style.display = '';
+  startTimeSync();
+  startPlotPolling();
+  startConnectionHealthCheck();
+  // Covers reconnecting / reloading the page while runall.py is still
+  // running on the Pi - without this, the UI would default to "not
+  // running" with Run All enabled, inviting a second instance to be
+  // started alongside the one already going.
+  refreshRunallLogList();
+  refreshRunAllOutput();
+}
+
+function showConnectView() {
+  document.getElementById('notes-view').classList.remove('active');
+  document.getElementById('connect-view').classList.add('active');
+  document.getElementById('header-host').textContent = '';
+  document.getElementById('header-disconnect-btn').style.display = 'none';
+  stopTimeSync();
+  stopPlotPolling();
+  stopConnectionHealthCheck();
+}
+
+async function connect() {
+  // A manual connect attempt (e.g. the user typing in a different host,
+  // or just impatiently clicking Connect themselves) always wins over a
+  // pending post-restart auto-reconnect loop.
+  stopAutoReconnect();
+
+  const host = document.getElementById('host').value.trim();
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const errBox = document.getElementById('connect-error');
+  const btn = document.getElementById('connect-btn');
+  const dot = document.getElementById('status-dot');
+  const statusText = document.getElementById('status-text');
+
+  errBox.textContent = '';
+  if (!host || !username || !password) {
+    errBox.textContent = 'Fill in IP, username, and password.';
+    return;
+  }
+
+  btn.disabled = true;
+  statusText.textContent = 'connecting...';
+
+  try {
+    const res = await fetch('/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, username, password })
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      showNotesView({ host, username });
+    } else {
+      dot.classList.add('error');
+      statusText.textContent = 'connection failed';
+      errBox.textContent = data.error;
+    }
+  } catch (e) {
+    dot.classList.add('error');
+    statusText.textContent = 'connection failed';
+    errBox.textContent = 'Could not reach the local app server.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function saveNote() {
+  const textArea = document.getElementById('note-text');
+  const text = textArea.value.trim();
+  const statusEl = document.getElementById('save-status');
+  const btn = document.getElementById('save-btn');
+
+  if (!text) {
+    statusEl.textContent = 'Write something before saving.';
+    statusEl.style.color = 'var(--err)';
+    return;
+  }
+
+  btn.disabled = true;
+  statusEl.textContent = 'saving...';
+  statusEl.style.color = 'var(--text-dim)';
+
+  try {
+    const res = await fetch('/note', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      addLogEntry(data.timestamp, data.text);
+      textArea.value = '';
+      statusEl.textContent = 'Saved to remote CSV.';
+      statusEl.style.color = 'var(--ok)';
+    } else {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Failed to reach local app server.';
+    statusEl.style.color = 'var(--err)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function setRunallButtonsRunning(isRunning) {
+  document.getElementById('runall-btn').disabled = isRunning;
+  document.getElementById('stop-runall-btn').disabled = !isRunning;
+}
+
+let currentRunallLog = 'controller';
+let currentRunallRunDir = null;
+let lastLogListFetch = 0;
+
+function startRunallPolling() {
+  stopRunallPolling(); // guard against double-starting
+  refreshRunAllOutput();
+  runallPollInterval = setInterval(refreshRunAllOutput, 3000);
+}
+
+function stopRunallPolling() {
+  if (runallPollInterval) clearInterval(runallPollInterval);
+  runallPollInterval = null;
+}
+
+async function refreshRunallLogList() {
+  const select = document.getElementById('runall-log-select');
+  try {
+    const res = await fetch('/runall_logs');
+    const data = await res.json();
+    if (!data.ok) return;
+
+    currentRunallRunDir = data.run_dir || null;
+
+    const previousValue = select.value;
+    select.innerHTML = '';
+    for (const log of data.logs) {
+      const opt = document.createElement('option');
+      opt.value = log.id;
+      opt.textContent = log.label;
+      select.appendChild(opt);
+    }
+    // Keep the user's current selection if it still exists in the new
+    // list (e.g. a sensor log they were watching is still there);
+    // otherwise fall back to the controller log rather than silently
+    // landing on whatever happens to be first.
+    const stillExists = Array.from(select.options).some(o => o.value === previousValue);
+    select.value = stillExists ? previousValue : 'controller';
+    currentRunallLog = select.value;
+  } catch (e) {
+    // Non-fatal - the dropdown just won't update this cycle; output
+    // polling for the currently-selected log keeps working regardless.
+  }
+}
+
+function onRunallLogSelectChange() {
+  const select = document.getElementById('runall-log-select');
+  currentRunallLog = select.value;
+  // Switching logs should feel immediate, not wait for the next poll tick.
+  refreshRunAllOutput();
+}
+
+async function runAllSensors() {
+  const btn = document.getElementById('runall-btn');
+  const statusEl = document.getElementById('runall-status');
+  const outputEl = document.getElementById('runall-output');
+
+  btn.disabled = true;
+  statusEl.textContent = 'starting remote sensors...';
+  statusEl.style.color = 'var(--text-dim)';
+  outputEl.style.display = 'none';
+  outputEl.textContent = '';
+
+  try {
+    const res = await fetch('/run_all_sensors', { method: 'POST' });
+    const data = await res.json();
+
+    if (data.ok) {
+      statusEl.textContent = data.message;
+      statusEl.style.color = 'var(--ok)';
+      outputEl.textContent = data.stdout || data.stderr || data.output || '';
+      outputEl.style.display = outputEl.textContent ? 'block' : 'none';
+      outputEl.scrollTop = outputEl.scrollHeight;
+      setRunallButtonsRunning(true);
+      // A fresh run means a brand new output/<timestamp>/log/ folder on
+      // the Pi, so the dropdown's old entries (from a previous run, if
+      // any) are stale - reset to the controller log and re-fetch the
+      // list once sensors have had a moment to create their log files.
+      currentRunallLog = 'controller';
+      document.getElementById('runall-log-select').value = 'controller';
+      // Output now streams to the log file as it's printed (runall.py is
+      // launched with -u), so poll it periodically instead of only on a
+      // manual "Refresh Output" click - that's what actually surfaces the
+      // ongoing prints instead of them just sitting on the Pi unseen.
+      startRunallPolling();
+      setTimeout(refreshRunallLogList, 4000);
+      return; // skip the `finally` re-enable below; setRunallButtonsRunning already set the right state
+    } else {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      outputEl.textContent = data.stderr || data.stdout || data.output || '';
+      outputEl.style.display = outputEl.textContent ? 'block' : 'none';
+      outputEl.scrollTop = outputEl.scrollHeight;
+    }
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+  btn.disabled = false;
+}
+
+async function refreshRunAllOutput() {
+  const statusEl = document.getElementById('runall-status');
+  const outputEl = document.getElementById('runall-output');
+
+  // Periodically (not every tick) refresh which logs even exist, since
+  // the merger/vitals logs only appear a delay after sensors start, and
+  // we don't want the dropdown to be missing them indefinitely.
+  const now = Date.now();
+  if (now - lastLogListFetch > 15000) {
+    lastLogListFetch = now;
+    refreshRunallLogList();
+  }
+
+  const params = new URLSearchParams({ log: currentRunallLog });
+  if (currentRunallRunDir) params.set('run_dir', currentRunallRunDir);
+
+  try {
+    const res = await fetch('/runall_output?' + params.toString());
+    const data = await res.json();
+
+    if (data.ok) {
+      // Preserve scroll position unless the user is already at (or near)
+      // the bottom, so polling every few seconds doesn't yank the view
+      // away if they've scrolled up to read earlier output.
+      const wasNearBottom = outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight < 40;
+
+      outputEl.textContent = data.output || '(no output yet)';
+      outputEl.style.display = 'block';
+      if (wasNearBottom) {
+        outputEl.scrollTop = outputEl.scrollHeight;
+      }
+
+      setRunallButtonsRunning(!!data.running);
+      if (data.running) {
+        statusEl.textContent = `runall.py is running (PID ${data.pid}).`;
+        statusEl.style.color = 'var(--ok)';
+        if (!runallPollInterval) {
+          runallPollInterval = setInterval(refreshRunAllOutput, 3000);
+        }
+      } else {
+        statusEl.textContent = 'runall.py is not currently running.';
+        statusEl.style.color = 'var(--text-dim)';
+        stopRunallPolling();
+      }
+    } else {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      outputEl.textContent = data.output || '';
+      outputEl.style.display = outputEl.textContent ? 'block' : 'none';
+    }
+  } catch (e) {
+    // Non-fatal - this runs silently on a poll timer, so a transient
+    // fetch failure just means this tick's output doesn't update.
+  }
+}
+
+async function stopRunAllSensors() {
+  const btn = document.getElementById('stop-runall-btn');
+  const statusEl = document.getElementById('runall-status');
+  const outputEl = document.getElementById('runall-output');
+
+  btn.disabled = true;
+  // Stopping now verifies the process actually exits (escalating the
+  // signal if needed), which can take a few seconds - so say so up front
+  // rather than leaving the button looking stuck with no explanation.
+  statusEl.textContent = 'stopping runall.py - this shuts down vitals, the merger, and each sensor in turn, so it can take up to ~45s...';
+  statusEl.style.color = 'var(--text-dim)';
+
+  try {
+    const res = await fetch('/stop_runall', { method: 'POST' });
+    const data = await res.json();
+
+    if (data.ok) {
+      statusEl.textContent = data.message;
+      statusEl.style.color = 'var(--ok)';
+      stopRunallPolling();
+      setRunallButtonsRunning(false);
+      // One last fetch to show the final tail of output after it stopped.
+      await refreshRunAllOutput();
+    } else {
+      // Still running (even SIGKILL didn't land, or some other failure) -
+      // leave the Stop button enabled so the user can retry, and keep
+      // polling since the process is genuinely still alive.
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      btn.disabled = false;
+    }
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+    btn.disabled = false;
+  }
+}
+
+async function runCApp() {
+  const btn = document.getElementById('capp-btn');
+  const statusEl = document.getElementById('capp-status');
+  const outputEl = document.getElementById('capp-output');
+
+  btn.disabled = true;
+  // The backend now waits ~2s after launching to confirm the process
+  // actually survived, so this legitimately takes a few seconds.
+  statusEl.textContent = 'starting PSDK app (takes a few seconds to verify)...';
+  statusEl.style.color = 'var(--text-dim)';
+  outputEl.style.display = 'none';
+  outputEl.textContent = '';
+
+  try {
+    const res = await fetch('/run_c_app', { method: 'POST' });
+    const data = await res.json();
+
+    statusEl.textContent = data.ok ? data.message : data.error;
+    statusEl.style.color = data.ok ? 'var(--ok)' : 'var(--err)';
+    outputEl.textContent = data.output || '';
+    outputEl.style.display = outputEl.textContent ? 'block' : 'none';
+    outputEl.scrollTop = outputEl.scrollHeight;
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function addLogEntry(timestamp, text) {
+  notes.push({ timestamp, text });
+  renderLog();
+}
+
+function renderLog() {
+  const log = document.getElementById('log');
+  if (notes.length === 0) {
+    log.innerHTML = '<div class="empty-log">No notes yet this session.</div>';
+    return;
+  }
+  log.innerHTML = notes.map(n =>
+    `<div class="log-entry"><div class="log-ts">${n.timestamp}</div><div class="log-text">${escapeHtml(n.text)}</div></div>`
+  ).join('');
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function resetToDisconnectedUI(statusMessage) {
+  notes.length = 0;
+  renderLog();
+  stopTimeSync();
+  document.getElementById('status-dot').className = 'dot';
+  document.getElementById('status-text').textContent = statusMessage || 'disconnected';
+  document.getElementById('host').value = '10.7.';
+  document.getElementById('username').value = 'rsp';
+  document.getElementById('password').value = '';
+  showConnectView();
+}
+
+async function disconnect() {
+  stopAutoReconnect();
+  await fetch('/disconnect', { method: 'POST' });
+  resetToDisconnectedUI();
+}
+
+// ---------- Connection health check ----------
+// The backend marks state["connected"] = False whenever an SSH/SFTP call
+// actually fails (see _mark_disconnected() in app.py) - which on this kind
+// of field connection almost always means the physical link died (cable
+// pulled, Pi powered off), not a one-off command hiccup. But nothing was
+// otherwise re-polling /status after the initial page load, so the header's
+// "connected" dot could keep claiming a dead session was still live
+// indefinitely. This polls /status while the notes view is open and flips
+// the UI back to the connect screen as soon as the backend notices.
+
+let connectionHealthInterval = null;
+
+function startConnectionHealthCheck() {
+  stopConnectionHealthCheck();
+  connectionHealthInterval = setInterval(checkConnectionHealth, 6000);
+}
+
+function stopConnectionHealthCheck() {
+  if (connectionHealthInterval) clearInterval(connectionHealthInterval);
+  connectionHealthInterval = null;
+}
+
+async function checkConnectionHealth() {
+  if (!document.getElementById('notes-view').classList.contains('active')) return;
+  try {
+    const res = await fetch('/status');
+    const data = await res.json();
+    if (!data.connected) {
+      handleConnectionLost();
+    }
+  } catch (e) {
+    // The local Flask server itself being unreachable is a different,
+    // rarer failure - leave it to the per-action error handling to
+    // surface instead of guessing here.
+  }
+}
+
+function handleConnectionLost() {
+  resetToDisconnectedUI('connection lost');
+  const errBox = document.getElementById('connect-error');
+  errBox.textContent = 'Lost connection to the Pi - the cable may be unplugged or it lost power. Reconnect below.';
+  errBox.style.color = 'var(--err)';
+}
+
+// ---------- Download All Data flow ----------
+
+function openModal() {
+  document.getElementById('download-modal-overlay').classList.add('active');
+}
+
+function closeModal() {
+  document.getElementById('download-modal-overlay').classList.remove('active');
+  document.getElementById('modal-error').textContent = '';
+}
+
+function startDownload() {
+  // Reset modal to "ask for name" state
+  document.getElementById('modal-title').textContent = 'Download all data';
+  document.getElementById('modal-body').innerHTML = `
+    <label for="folder-name-input">subfolder name (inside downloaded_outputs)</label>
+    <input type="text" id="folder-name-input" placeholder="session_2026_06_18" autocomplete="off">
+    <div class="error-msg" id="modal-error"></div>
+  `;
+  document.getElementById('modal-actions').innerHTML = `
+    <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+    <button class="btn-primary" style="width:auto;" onclick="submitFolderName()">Continue</button>
+  `;
+  openModal();
+  setTimeout(() => {
+    const input = document.getElementById('folder-name-input');
+    if (input) input.focus();
+  }, 50);
+}
+
+async function submitFolderName() {
+  const input = document.getElementById('folder-name-input');
+  const name = input.value.trim();
+  const errBox = document.getElementById('modal-error');
+
+  if (!name) {
+    errBox.textContent = 'Enter a folder name.';
+    return;
+  }
+
+  try {
+    const res = await fetch('/check_download_folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      errBox.textContent = data.error;
+      return;
+    }
+
+    if (data.exists) {
+      showOverwriteConfirm(name, data.path);
+    } else {
+      closeModal();
+      runDownload(name);
+    }
+  } catch (e) {
+    errBox.textContent = 'Could not reach the local app server.';
+  }
+}
+
+function showOverwriteConfirm(name, path) {
+  document.getElementById('modal-title').textContent = 'Folder already exists';
+  document.getElementById('modal-body').innerHTML = `
+    <p><b>${escapeHtml(name)}</b> already exists in <code>downloaded_outputs</code>.<br><br>
+    Overwrite the existing files, or go back and choose a different name?</p>
+  `;
+  document.getElementById('modal-actions').innerHTML = `
+    <button class="btn-ghost" onclick="startDownload()">Choose different name</button>
+    <button class="btn-primary" style="width:auto;" onclick="confirmOverwrite('${name.replace(/'/g, "\\'")}')">Overwrite</button>
+  `;
+}
+
+function confirmOverwrite(name) {
+  closeModal();
+  runDownload(name);
+}
+
+async function runDownload(name) {
+  const btn = document.getElementById('download-btn');
+  const statusEl = document.getElementById('download-status');
+  const resultsEl = document.getElementById('download-results');
+  const track = document.getElementById('progress-bar-track');
+  const fill = document.getElementById('progress-bar-fill');
+
+  btn.disabled = true;
+  statusEl.textContent = 'Starting download...';
+  statusEl.style.color = 'var(--text-dim)';
+  resultsEl.innerHTML = '';
+  track.classList.add('active');
+  fill.style.width = '0%';
+
+  try {
+    const res = await fetch('/download_all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      track.classList.remove('active');
+      btn.disabled = false;
+      return;
+    }
+
+    pollDownloadProgress();
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+    track.classList.remove('active');
+    btn.disabled = false;
+  }
+}
+
+async function pollDownloadProgress() {
+  const btn = document.getElementById('download-btn');
+  const statusEl = document.getElementById('download-status');
+  const resultsEl = document.getElementById('download-results');
+  const track = document.getElementById('progress-bar-track');
+  const fill = document.getElementById('progress-bar-fill');
+
+  try {
+    const res = await fetch('/download_progress');
+    const p = await res.json();
+
+    const pct = p.total_files > 0 ? Math.round((p.done_files / p.total_files) * 100) : 0;
+    fill.style.width = pct + '%';
+
+    if (p.running) {
+      const sourceLabel = p.current_source ? ` (${p.current_source})` : '';
+      statusEl.textContent = `Downloading${sourceLabel}... ${p.done_files} / ${p.total_files} files (${pct}%)`;
+      statusEl.style.color = 'var(--text-dim)';
+      setTimeout(pollDownloadProgress, 400);
+      return;
+    }
+
+    // Job finished
+    btn.disabled = false;
+
+    if (p.error) {
+      statusEl.textContent = p.error;
+      statusEl.style.color = 'var(--err)';
+      track.classList.remove('active');
+      return;
+    }
+
+    fill.style.width = '100%';
+
+    const results = p.results || [];
+    const anyErrors = results.some(r => r.error);
+
+    statusEl.textContent = anyErrors
+      ? 'Download finished with some errors — see details below.'
+      : 'Download complete.';
+    statusEl.style.color = anyErrors ? 'var(--err)' : 'var(--ok)';
+
+    const rows = results.map(r => {
+      if (r.error) {
+        return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="err">error: ${escapeHtml(r.error)}</span></div>`;
+      }
+      return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="ok">${r.file_count} file(s)</span></div>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+      <div class="download-result-list">${rows}</div>
+      <div class="download-target-path">saved to: ${escapeHtml(p.target_root)}</div>
+    `;
+
+    setTimeout(() => track.classList.remove('active'), 1200);
+  } catch (e) {
+    statusEl.textContent = 'Lost connection to local app server while downloading.';
+    statusEl.style.color = 'var(--err)';
+    btn.disabled = false;
+    track.classList.remove('active');
+  }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && document.getElementById('download-modal-overlay').classList.contains('active')) {
+    const input = document.getElementById('folder-name-input');
+    if (input && document.activeElement === input) {
+      e.preventDefault();
+      submitFolderName();
+    }
+  }
+  if (e.key === 'Enter' && document.activeElement === document.getElementById('timer-custom-input')) {
+    e.preventDefault();
+    startTimerCustom();
+  }
+});
+
+// ---------- Timer ----------
+
+let timerInterval = null;
+let timerRemaining = 0;
+let timerPaused = false;
+
+function formatTimer(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function startTimerPreset(seconds, btn) {
+  document.querySelectorAll('.timer-preset').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  startTimerWithSeconds(seconds);
+}
+
+function parseTimerInput(raw) {
+  if (raw.includes(':')) {
+    const parts = raw.split(':');
+    if (parts.length !== 2) return null;
+    const m = parseInt(parts[0], 10);
+    const s = parseInt(parts[1], 10);
+    if (isNaN(m) || isNaN(s)) return null;
+    return m * 60 + s;
+  }
+  const s = parseInt(raw, 10);
+  return isNaN(s) ? null : s;
+}
+
+function startTimerCustom() {
+  const input = document.getElementById('timer-custom-input');
+  const statusEl = document.getElementById('timer-status');
+  const raw = input.value.trim();
+
+  if (!raw) {
+    statusEl.textContent = 'Enter a time (e.g. 2:30 or 90).';
+    statusEl.style.color = 'var(--err)';
+    return;
+  }
+
+  const seconds = parseTimerInput(raw);
+  if (seconds === null || seconds <= 0) {
+    statusEl.textContent = 'Could not parse that time - use mm:ss or a number of seconds.';
+    statusEl.style.color = 'var(--err)';
+    return;
+  }
+
+  document.querySelectorAll('.timer-preset').forEach(b => b.classList.remove('active'));
+  startTimerWithSeconds(seconds);
+}
+
+function startTimerWithSeconds(seconds) {
+  clearInterval(timerInterval);
+  timerRemaining = seconds;
+  timerPaused = false;
+
+  const display = document.getElementById('timer-display');
+  display.textContent = formatTimer(timerRemaining);
+  display.classList.remove('done');
+  document.getElementById('timer-status').textContent = '';
+
+  const pauseBtn = document.getElementById('timer-pause-btn');
+  pauseBtn.disabled = false;
+  pauseBtn.textContent = 'Pause';
+  document.getElementById('timer-reset-btn').disabled = false;
+
+  timerInterval = setInterval(tickTimer, 1000);
+}
+
+function tickTimer() {
+  if (timerPaused) return;
+  timerRemaining -= 1;
+  if (timerRemaining <= 0) {
+    document.getElementById('timer-display').textContent = '0:00';
+    finishTimer();
+    return;
+  }
+  document.getElementById('timer-display').textContent = formatTimer(timerRemaining);
+}
+
+function toggleTimerPause() {
+  if (!timerInterval) return;
+  timerPaused = !timerPaused;
+  document.getElementById('timer-pause-btn').textContent = timerPaused ? 'Resume' : 'Pause';
+}
+
+function resetTimer() {
+  clearInterval(timerInterval);
+  timerInterval = null;
+  timerRemaining = 0;
+  timerPaused = false;
+
+  document.querySelectorAll('.timer-preset').forEach(b => b.classList.remove('active'));
+  const display = document.getElementById('timer-display');
+  display.textContent = '--:--';
+  display.classList.remove('done');
+  document.getElementById('timer-status').textContent = '';
+
+  document.getElementById('timer-pause-btn').disabled = true;
+  document.getElementById('timer-pause-btn').textContent = 'Pause';
+  document.getElementById('timer-reset-btn').disabled = true;
+}
+
+function finishTimer() {
+  clearInterval(timerInterval);
+  timerInterval = null;
+
+  document.getElementById('timer-display').classList.add('done');
+  const statusEl = document.getElementById('timer-status');
+  statusEl.textContent = "Time's up!";
+  statusEl.style.color = 'var(--accent)';
+  document.getElementById('timer-pause-btn').disabled = true;
+
+  playTimerBeep();
+}
+
+function playTimerBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const playTone = (delay) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.value = 0.15;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + delay);
+      osc.stop(ctx.currentTime + delay + 0.25);
+    };
+    playTone(0);
+    playTone(0.35);
+    playTone(0.7);
+  } catch (e) {
+    // Web Audio unavailable - the visual "Time's up!" state still shows.
+  }
+}
+
+// ---------- Live Plot ----------
+
+let currentPlotSensor = 'pom';
+let currentPlotPoints = [];
+let plotPollInterval = null;
+let plotHoverIndex = null;
+
+const PLOT_PADDING = { top: 16, right: 16, bottom: 24, left: 46 };
+
+function onPlotSensorChange() {
+  currentPlotSensor = document.getElementById('plot-sensor-select').value;
+  currentPlotPoints = [];
+  plotHoverIndex = null;
+  fetchPlotData();
+}
+
+function startPlotPolling() {
+  stopPlotPolling();
+  fetchPlotData();
+  plotPollInterval = setInterval(fetchPlotData, 4000);
+}
+
+function stopPlotPolling() {
+  if (plotPollInterval) clearInterval(plotPollInterval);
+  plotPollInterval = null;
+}
+
+async function fetchPlotData() {
+  const statusEl = document.getElementById('plot-status');
+  try {
+    const res = await fetch('/plot_data?sensor=' + encodeURIComponent(currentPlotSensor));
+    const data = await res.json();
+
+    if (data.ok) {
+      currentPlotPoints = data.points || [];
+      document.getElementById('plot-stat-unit').textContent = data.unit || '';
+      statusEl.textContent = currentPlotPoints.length
+        ? `${data.csv_file} · ${currentPlotPoints.length} samples`
+        : 'Connected, but no samples written yet...';
+      statusEl.style.color = 'var(--text-dim)';
+    } else {
+      currentPlotPoints = [];
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+    }
+  } catch (e) {
+    currentPlotPoints = [];
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+
+  updatePlotStat();
+  drawPlot();
+}
+
+function updatePlotStat() {
+  const valueEl = document.getElementById('plot-stat-value');
+  if (!currentPlotPoints.length) {
+    valueEl.textContent = '--';
+    return;
+  }
+  valueEl.textContent = formatPlotValue(currentPlotPoints[currentPlotPoints.length - 1].v);
+}
+
+// Decimal places to display, per sensor - matched to how much precision
+// the source data actually carries, so values aren't rounded away:
+// POM's Ozone_ppb comes in with 1 decimal, iMet's temp is a hundredths-
+// of-a-degree fixed-point reading (see the /100 scale in app.py), so it
+// carries 2. The cavity's pressure_mb is already a plain float with 1
+// decimal of real precision.
+const PLOT_DECIMALS = { pom: 1, imet: 2, cavity: 1 };
+
+function formatPlotValue(v) {
+  const decimals = PLOT_DECIMALS[currentPlotSensor] ?? 1;
+  return v.toFixed(decimals);
+}
+
+function plotTimeOnly(ts) {
+  // "2026-07-06 15:15:11" -> "15:15:11"
+  const parts = String(ts).split(' ');
+  return parts.length > 1 ? parts[1] : ts;
+}
+
+function getCssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function hexToRgba(hex, alpha) {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function getPlotCanvasContext() {
+  const canvas = document.getElementById('plot-canvas');
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const targetW = Math.max(1, Math.round(rect.width * dpr));
+  const targetH = Math.max(1, Math.round(rect.height * dpr));
+  if (canvas.width !== targetW || canvas.height !== targetH) {
+    canvas.width = targetW;
+    canvas.height = targetH;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, width: rect.width, height: rect.height };
+}
+
+function plotXY(points, width, height, minV, maxV) {
+  const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
+  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+  const n = points.length;
+  const xForIndex = (i) => PLOT_PADDING.left + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const yForValue = (v) => PLOT_PADDING.top + plotH - ((v - minV) / (maxV - minV)) * plotH;
+  return { plotW, plotH, xForIndex, yForValue };
+}
+
+function drawPlot() {
+  const { ctx, width, height } = getPlotCanvasContext();
+  ctx.clearRect(0, 0, width, height);
+
+  const points = currentPlotPoints;
+  if (!points.length) {
+    ctx.fillStyle = getCssVar('--text-dim');
+    ctx.font = '13px ' + getCssVar('--sans');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('No data yet', width / 2, height / 2);
+    return;
+  }
+
+  const values = points.map(p => p.v);
+  let minV = Math.min(...values);
+  let maxV = Math.max(...values);
+  if (minV === maxV) {
+    minV -= 1;
+    maxV += 1;
+  } else {
+    const pad = (maxV - minV) * 0.1;
+    minV -= pad;
+    maxV += pad;
+  }
+
+  const { plotH, xForIndex, yForValue } = plotXY(points, width, height, minV, maxV);
+
+  // Gridlines (hairline, recessive) + Y-axis labels
+  const gridLines = 4;
+  ctx.strokeStyle = getCssVar('--panel-border');
+  ctx.lineWidth = 1;
+  ctx.fillStyle = getCssVar('--text-dim');
+  ctx.font = '11px ' + getCssVar('--mono');
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i <= gridLines; i++) {
+    const v = minV + ((maxV - minV) * i) / gridLines;
+    const y = Math.round(yForValue(v)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(PLOT_PADDING.left, y);
+    ctx.lineTo(width - PLOT_PADDING.right, y);
+    ctx.stroke();
+    ctx.fillText(formatPlotValue(v), PLOT_PADDING.left - 8, y - 0.5);
+  }
+
+  // Area fill (accent hue, ~10% opacity wash)
+  ctx.beginPath();
+  ctx.moveTo(xForIndex(0), yForValue(points[0].v));
+  points.forEach((p, i) => ctx.lineTo(xForIndex(i), yForValue(p.v)));
+  ctx.lineTo(xForIndex(points.length - 1), PLOT_PADDING.top + plotH);
+  ctx.lineTo(xForIndex(0), PLOT_PADDING.top + plotH);
+  ctx.closePath();
+  ctx.fillStyle = hexToRgba(getCssVar('--accent'), 0.1);
+  ctx.fill();
+
+  // Line (2px, round join/cap)
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = xForIndex(i);
+    const y = yForValue(p.v);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = getCssVar('--accent');
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // End-dot marker (>=8px, with a surface-color ring so it stays legible
+  // where it sits on top of the line/fill).
+  const lastIdx = points.length - 1;
+  const lastX = xForIndex(lastIdx);
+  const lastY = yForValue(points[lastIdx].v);
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 6, 0, Math.PI * 2);
+  ctx.fillStyle = getCssVar('--panel');
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+  ctx.fillStyle = getCssVar('--accent');
+  ctx.fill();
+
+  // X-axis start/end time labels
+  ctx.fillStyle = getCssVar('--text-dim');
+  ctx.font = '11px ' + getCssVar('--mono');
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+  ctx.fillText(plotTimeOnly(points[0].t), PLOT_PADDING.left, height - 6);
+  ctx.textAlign = 'right';
+  ctx.fillText(plotTimeOnly(points[lastIdx].t), width - PLOT_PADDING.right, height - 6);
+
+  // Hover crosshair - a vertical hairline snapped to the nearest sample,
+  // so the reader aims at a timestamp instead of a 2px line.
+  if (plotHoverIndex !== null && points[plotHoverIndex]) {
+    const hx = xForIndex(plotHoverIndex);
+    ctx.beginPath();
+    ctx.moveTo(hx, PLOT_PADDING.top);
+    ctx.lineTo(hx, PLOT_PADDING.top + plotH);
+    ctx.strokeStyle = getCssVar('--text-dim');
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    const hy = yForValue(points[plotHoverIndex].v);
+    ctx.beginPath();
+    ctx.arc(hx, hy, 4, 0, Math.PI * 2);
+    ctx.fillStyle = getCssVar('--panel');
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(hx, hy, 3, 0, Math.PI * 2);
+    ctx.fillStyle = getCssVar('--accent');
+    ctx.fill();
+  }
+}
+
+function setupPlotHover() {
+  const canvas = document.getElementById('plot-canvas');
+  const tooltip = document.getElementById('plot-tooltip');
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (!currentPlotPoints.length) return;
+    const rect = canvas.getBoundingClientRect();
+    const n = currentPlotPoints.length;
+    const { plotW, xForIndex } = plotXY(currentPlotPoints, rect.width, rect.height, 0, 1);
+    const relX = (e.clientX - rect.left) - PLOT_PADDING.left;
+    let idx = n === 1 ? 0 : Math.round((relX / plotW) * (n - 1));
+    idx = Math.max(0, Math.min(n - 1, idx));
+    plotHoverIndex = idx;
+    drawPlot();
+
+    const p = currentPlotPoints[idx];
+    const unit = document.getElementById('plot-stat-unit').textContent;
+    tooltip.innerHTML = '';
+    const valueEl = document.createElement('div');
+    valueEl.className = 'tt-value';
+    valueEl.textContent = `${formatPlotValue(p.v)} ${unit}`;
+    const timeEl = document.createElement('div');
+    timeEl.className = 'tt-time';
+    timeEl.textContent = plotTimeOnly(p.t);
+    tooltip.appendChild(valueEl);
+    tooltip.appendChild(timeEl);
+
+    tooltip.style.left = xForIndex(idx) + 'px';
+    tooltip.style.top = '0px';
+    tooltip.style.display = 'block';
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    plotHoverIndex = null;
+    tooltip.style.display = 'none';
+    drawPlot();
+  });
+}
+
+window.addEventListener('resize', () => {
+  if (document.getElementById('notes-view').classList.contains('active')) {
+    drawPlot();
+  }
+});
+
+setupPlotHover();
+
+// ---------- Time Sync ----------
+
+let macClockInterval = null;
+let piTimePollInterval = null;
+let runallPollInterval = null;
+
+function startTimeSync() {
+  stopTimeSync(); // guard against double-starting if called twice
+  tickMacClock();
+  macClockInterval = setInterval(tickMacClock, 1000);
+  refreshPiTime();
+  piTimePollInterval = setInterval(refreshPiTime, 15000);
+}
+
+function stopTimeSync() {
+  if (macClockInterval) clearInterval(macClockInterval);
+  if (piTimePollInterval) clearInterval(piTimePollInterval);
+  macClockInterval = null;
+  piTimePollInterval = null;
+}
+
+function tickMacClock() {
+  const now = new Date();
+  document.getElementById('mac-time-display').textContent = now.toLocaleTimeString();
+}
+
+async function refreshPiTime() {
+  const piDisplay = document.getElementById('pi-time-display');
+  const piAsOf = document.getElementById('pi-time-asof');
+  const ntpWarning = document.getElementById('ntp-warning');
+
+  try {
+    const res = await fetch('/pi_time');
+    const data = await res.json();
+
+    if (data.ok) {
+      piDisplay.textContent = data.pi_time || '(unavailable)';
+      piDisplay.classList.remove('stale');
+      piAsOf.textContent = '(as of last check)';
+      ntpWarning.classList.toggle('active', !!data.ntp_active);
+    } else {
+      piDisplay.textContent = '(not connected)';
+      piDisplay.classList.add('stale');
+      piAsOf.textContent = '';
+      ntpWarning.classList.remove('active');
+    }
+  } catch (e) {
+    piDisplay.textContent = '(error checking)';
+    piDisplay.classList.add('stale');
+  }
+}
+
+async function syncTime() {
+  const btn = document.getElementById('sync-time-btn');
+  const statusEl = document.getElementById('sync-time-status');
+
+  btn.disabled = true;
+  statusEl.textContent = 'syncing...';
+  statusEl.style.color = 'var(--text-dim)';
+
+  try {
+    const res = await fetch('/sync_time', { method: 'POST' });
+    const data = await res.json();
+
+    if (data.ok) {
+      statusEl.textContent = data.warning
+        ? `Time set, but: ${data.warning}`
+        : `Synced — Pi is now ${data.pi_time}.`;
+      statusEl.style.color = data.warning ? 'var(--err)' : 'var(--ok)';
+      refreshPiTime();
+    } else {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- Restart Pi ----------
+
+function openRestartModal() {
+  // Reset to the caution prompt every time it's opened, in case a
+  // previous restart left it showing the "reconnecting" confirmation.
+  document.getElementById('restart-modal-title').textContent = '⚠ Restart the Pi?';
+  document.getElementById('restart-modal-body').innerHTML =
+    "<p>This immediately reboots the remote Pi. Any running sensors or the C app will be killed, and this SSH session will drop - you'll need to reconnect once it's back up.</p>";
+  document.getElementById('restart-modal-actions').innerHTML = `
+    <button class="btn-ghost" onclick="closeRestartModal()">Cancel</button>
+    <button class="btn-primary btn-primary-danger" id="confirm-restart-btn" style="width:auto;" onclick="confirmRestartPi()">Restart Pi</button>
+  `;
+  document.getElementById('restart-modal-overlay').classList.add('active');
+}
+
+function closeRestartModal() {
+  document.getElementById('restart-modal-overlay').classList.remove('active');
+}
+
+function showRestartAcknowledgedModal() {
+  document.getElementById('restart-modal-title').textContent = '✓ Restart command sent';
+  document.getElementById('restart-modal-body').innerHTML =
+    "<p>The Pi is rebooting. This dashboard will automatically reconnect to it once it's back online - you don't need to do anything.</p>";
+  document.getElementById('restart-modal-actions').innerHTML =
+    '<button class="btn-primary" style="width:auto;" onclick="closeRestartModal()">OK</button>';
+}
+
+async function confirmRestartPi() {
+  const confirmBtn = document.getElementById('confirm-restart-btn');
+  const statusEl = document.getElementById('restart-status');
+
+  // Grab the credentials before resetToDisconnectedUI() clears these
+  // fields below - the Pi will be unreachable for a bit while it
+  // reboots, so once we're back on the connect screen we auto-retry
+  // /connect with these same values instead of leaving the user to
+  // babysit it and reconnect by hand once it's back up.
+  const host = document.getElementById('host').value.trim();
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+
+  confirmBtn.disabled = true;
+  try {
+    const res = await fetch('/restart_pi', { method: 'POST' });
+    const data = await res.json();
+
+    if (data.ok) {
+      resetToDisconnectedUI('restarting...');
+      startAutoReconnect(host, username, password);
+      showRestartAcknowledgedModal();
+    } else {
+      closeRestartModal();
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+    }
+  } catch (e) {
+    closeRestartModal();
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  } finally {
+    confirmBtn.disabled = false;
+  }
+}
+
+let autoReconnectInterval = null;
+const AUTO_RECONNECT_INTERVAL_MS = 8000;
+const AUTO_RECONNECT_MAX_ATTEMPTS = 45; // ~6 minutes, generous for a full Pi boot
+
+function startAutoReconnect(host, username, password) {
+  stopAutoReconnect();
+  const errBox = document.getElementById('connect-error');
+  let attempts = 0;
+
+  errBox.style.color = 'var(--text-dim)';
+  errBox.textContent = "Pi is restarting - will auto-reconnect once it's back up...";
+
+  autoReconnectInterval = setInterval(async () => {
+    // If the user has already navigated away from the connect screen
+    // (manually connected, or connect() cancelled us) there's nothing
+    // left to do here.
+    if (!document.getElementById('connect-view').classList.contains('active')) {
+      stopAutoReconnect();
+      return;
+    }
+
+    attempts++;
+    if (attempts > AUTO_RECONNECT_MAX_ATTEMPTS) {
+      stopAutoReconnect();
+      errBox.style.color = 'var(--err)';
+      errBox.textContent = "Gave up auto-reconnecting after the restart - reconnect manually once the Pi is back up.";
+      return;
+    }
+
+    try {
+      const res = await fetch('/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, username, password })
+      });
+      const data = await res.json();
+
+      if (data.ok) {
+        stopAutoReconnect();
+        document.getElementById('status-dot').className = 'dot connected';
+        document.getElementById('status-text').textContent = 'connected';
+        showNotesView({ host, username });
+        return;
+      }
+    } catch (e) {
+      // Expected while the Pi is still down/booting - keep retrying.
+    }
+    errBox.style.color = 'var(--text-dim)';
+    errBox.textContent = `Pi is restarting - will auto-reconnect once it's back up... (attempt ${attempts})`;
+  }, AUTO_RECONNECT_INTERVAL_MS);
+}
+
+function stopAutoReconnect() {
+  if (autoReconnectInterval) clearInterval(autoReconnectInterval);
+  autoReconnectInterval = null;
+}
+
+renderLog();
+refreshStatus();
+</script>
+</body>
+</html>
