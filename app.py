@@ -989,6 +989,43 @@ PLOT_SENSORS = {
         # over UART, so this one is already a plain float - no scaling.
         "scale": 1.0,
     },
+    # These four come from the vitals_summary_*.csv the vitals exporter
+    # writes at ~1Hz in the run folder root (not the per-sensor csv/
+    # subfolder) - its short column names (TECA, TECT, RHi, I) are already
+    # plain floats, and the I column is simply empty while the spectrometer
+    # isn't running, which the row parser below skips naturally.
+    "teca": {
+        "label": "Tec Current",
+        "csv_prefix": "vitals_summary_",
+        "value_column": "TECA",
+        "unit": "A",
+        "scale": 1.0,
+        "in_run_root": True,
+    },
+    "tect": {
+        "label": "Tec Temperature",
+        "csv_prefix": "vitals_summary_",
+        "value_column": "TECT",
+        "unit": "°C",
+        "scale": 1.0,
+        "in_run_root": True,
+    },
+    "rhi": {
+        "label": "RH inline",
+        "csv_prefix": "vitals_summary_",
+        "value_column": "RHi",
+        "unit": "%",
+        "scale": 1.0,
+        "in_run_root": True,
+    },
+    "intensity": {
+        "label": "Max Intensity",
+        "csv_prefix": "vitals_summary_",
+        "value_column": "I",
+        "unit": "counts",
+        "scale": 1.0,
+        "in_run_root": True,
+    },
 }
 
 
@@ -1006,8 +1043,13 @@ def _find_latest_run_dir(sftp, remote_dir):
     return sorted(entries)[-1] if entries else None
 
 
-def _find_latest_sensor_csv(sftp, remote_dir, run_dir_name, csv_prefix):
-    csv_dir = f"{remote_dir}/output/{run_dir_name}/csv"
+def _find_latest_sensor_csv(sftp, remote_dir, run_dir_name, csv_prefix, in_run_root=False):
+    # Per-sensor CSVs live in the run's csv/ subfolder; the vitals summary
+    # sits directly in the run folder root next to merged_data_*.csv.
+    if in_run_root:
+        csv_dir = f"{remote_dir}/output/{run_dir_name}"
+    else:
+        csv_dir = f"{remote_dir}/output/{run_dir_name}/csv"
     try:
         entries = sftp.listdir(csv_dir)
     except IOError:
@@ -1040,7 +1082,10 @@ def plot_data():
         if not run_dir_name:
             return jsonify({"ok": False, "error": "No run folder found yet - start Run All Sensors first."}), 404
 
-        csv_path = _find_latest_sensor_csv(sftp, remote_dir, run_dir_name, spec["csv_prefix"])
+        csv_path = _find_latest_sensor_csv(
+            sftp, remote_dir, run_dir_name, spec["csv_prefix"],
+            in_run_root=spec.get("in_run_root", False),
+        )
         if not csv_path:
             return jsonify({"ok": False, "error": f"No {spec['label']} CSV found yet in this run."}), 404
 
