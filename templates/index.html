@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>SSH Dashboard — Drone Air System</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="{{ url_for('static', filename='xterm/xterm.css') }}">
 <style>
   :root {
     --bg: #11161c;
@@ -497,6 +498,84 @@
     margin-top: 10px;
   }
 
+  .sensor-toggle-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .sensor-toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    background: #0d1217;
+  }
+
+  .sensor-toggle-row .sensor-name {
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+
+  .sensor-toggle-row .sensor-type {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-left: 8px;
+  }
+
+  .switch {
+    position: relative;
+    display: inline-block;
+    width: 38px;
+    height: 20px;
+    flex-shrink: 0;
+  }
+  .switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+  .switch-slider {
+    position: absolute;
+    inset: 0;
+    cursor: pointer;
+    background: var(--panel-border);
+    border-radius: 20px;
+    transition: background 0.15s ease;
+  }
+  .switch-slider::before {
+    content: "";
+    position: absolute;
+    height: 16px;
+    width: 16px;
+    left: 2px;
+    top: 2px;
+    background: var(--text-dim);
+    border-radius: 50%;
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .switch input:checked + .switch-slider { background: var(--accent-dim); }
+  .switch input:checked + .switch-slider::before { transform: translateX(18px); background: var(--accent); }
+  .switch input:disabled + .switch-slider { opacity: 0.4; cursor: not-allowed; }
+
+  .terminal-container {
+    margin-top: 10px;
+    height: 360px;
+    display: none;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    background: #0d1217;
+    padding: 6px;
+  }
+  .terminal-container.active { display: block; }
+  .terminal-container .xterm-viewport {
+    /* xterm.js's own scrollbar is fine, just keep it from adding extra width jitter */
+    overflow-y: auto;
+  }
+
   .timer-display {
     font-family: var(--mono);
     font-size: 30px;
@@ -750,6 +829,22 @@
     </div>
 
     <div class="panel">
+      <label style="margin-bottom: 8px;">sensors</label>
+      <div class="hint" id="sensor-config-status">Connect to load the sensor list.</div>
+      <div id="sensor-config-list" class="sensor-toggle-list"></div>
+    </div>
+
+    <div class="panel">
+      <label style="margin-bottom: 8px;">terminal</label>
+      <div class="button-row">
+        <button class="btn-primary" id="terminal-connect-btn" style="width:auto;" onclick="connectTerminal()">Open Terminal</button>
+        <button class="btn-ghost" id="terminal-disconnect-btn" style="width:auto;" onclick="disconnectTerminal()" disabled>Close Terminal</button>
+      </div>
+      <div class="hint" id="terminal-status">Opens a real interactive shell on the Pi, over the current SSH connection.</div>
+      <div id="terminal-container" class="terminal-container"></div>
+    </div>
+
+    <div class="panel">
       <div class="plot-toolbar">
         <label style="margin-bottom: 0;">live plot</label>
         <select id="plot-sensor-select" class="select-input" onchange="onPlotSensorChange()">
@@ -837,6 +932,8 @@
 
 </div>
 
+<script src="{{ url_for('static', filename='xterm/xterm.js') }}"></script>
+<script src="{{ url_for('static', filename='xterm/addon-fit.js') }}"></script>
 <script>
 const notes = [];
 
@@ -870,6 +967,7 @@ function showNotesView(data) {
   // started alongside the one already going.
   refreshRunallLogList();
   refreshRunAllOutput();
+  refreshSensorConfig();
 }
 
 function showConnectView() {
@@ -880,6 +978,10 @@ function showConnectView() {
   stopTimeSync();
   stopPlotPolling();
   stopConnectionHealthCheck();
+  disconnectTerminal();
+  document.getElementById('sensor-config-list').innerHTML = '';
+  document.getElementById('sensor-config-status').textContent = 'Connect to load the sensor list.';
+  document.getElementById('sensor-config-status').style.color = 'var(--text-dim)';
 }
 
 async function connect() {
@@ -973,6 +1075,7 @@ async function saveNote() {
 function setRunallButtonsRunning(isRunning) {
   document.getElementById('runall-btn').disabled = isRunning;
   document.getElementById('stop-runall-btn').disabled = !isRunning;
+  setSensorTogglesDisabled(isRunning);
 }
 
 let currentRunallLog = 'controller';
@@ -2117,6 +2220,214 @@ function stopAutoReconnect() {
   if (autoReconnectInterval) clearInterval(autoReconnectInterval);
   autoReconnectInterval = null;
 }
+
+// ---------- Sensor config (enable/disable toggles) ----------
+// The list of sensors is entirely driven by GET /sensor_config, which just
+// reflects whatever's currently in sensor_config.json on the Pi - so
+// sensors added/removed/renamed there show up here with no code change.
+
+let sensorConfigRunning = false;
+
+async function refreshSensorConfig() {
+  const listEl = document.getElementById('sensor-config-list');
+  const statusEl = document.getElementById('sensor-config-status');
+
+  try {
+    const res = await fetch('/sensor_config');
+    const data = await res.json();
+
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      return;
+    }
+
+    sensorConfigRunning = !!data.runall_running;
+    statusEl.textContent = sensorConfigRunning
+      ? 'Stop Run All Sensors to change which sensors are enabled.'
+      : 'Toggle a sensor, then start Run All Sensors to apply the change.';
+    statusEl.style.color = 'var(--text-dim)';
+
+    listEl.innerHTML = '';
+    for (const sensor of data.sensors) {
+      const row = document.createElement('div');
+      row.className = 'sensor-toggle-row';
+
+      const nameSpan = document.createElement('span');
+      nameSpan.innerHTML = `<span class="sensor-name">${escapeHtml(sensor.name)}</span>` +
+        `<span class="sensor-type">${escapeHtml(sensor.type)}</span>`;
+
+      const label = document.createElement('label');
+      label.className = 'switch';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = sensor.enabled;
+      input.disabled = sensorConfigRunning;
+      input.addEventListener('change', () => toggleSensor(sensor.name, input));
+      const slider = document.createElement('span');
+      slider.className = 'switch-slider';
+      label.appendChild(input);
+      label.appendChild(slider);
+
+      row.appendChild(nameSpan);
+      row.appendChild(label);
+      listEl.appendChild(row);
+    }
+  } catch (e) {
+    statusEl.textContent = 'Could not reach local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+}
+
+async function toggleSensor(name, input) {
+  const statusEl = document.getElementById('sensor-config-status');
+  const enabled = input.checked;
+  input.disabled = true;
+
+  try {
+    const res = await fetch('/sensor_config/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sensor: name, enabled })
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      input.checked = !enabled; // revert the switch to reflect what's actually on disk
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+    } else {
+      statusEl.textContent = `${name} ${enabled ? 'enabled' : 'disabled'} - takes effect next time Run All Sensors starts.`;
+      statusEl.style.color = 'var(--ok)';
+    }
+  } catch (e) {
+    input.checked = !enabled;
+    statusEl.textContent = 'Could not reach local app server.';
+    statusEl.style.color = 'var(--err)';
+  } finally {
+    input.disabled = sensorConfigRunning;
+  }
+}
+
+function setSensorTogglesDisabled(running) {
+  sensorConfigRunning = running;
+  const listEl = document.getElementById('sensor-config-list');
+  listEl.querySelectorAll('input[type=checkbox]').forEach(el => { el.disabled = running; });
+  if (listEl.children.length) {
+    const statusEl = document.getElementById('sensor-config-status');
+    statusEl.textContent = running
+      ? 'Stop Run All Sensors to change which sensors are enabled.'
+      : 'Toggle a sensor, then start Run All Sensors to apply the change.';
+    statusEl.style.color = 'var(--text-dim)';
+  }
+}
+
+// ---------- Interactive terminal (xterm.js over a WebSocket-bridged PTY) ----------
+// term/fitAddon are created once and reused across connect/disconnect
+// cycles so onData/onResize listeners aren't attached more than once
+// (which would otherwise send every keystroke to the socket N times after
+// N reconnects).
+
+let term = null;
+let fitAddon = null;
+let terminalSocket = null;
+
+function connectTerminal() {
+  if (terminalSocket) return;
+
+  const container = document.getElementById('terminal-container');
+  const statusEl = document.getElementById('terminal-status');
+  const connectBtn = document.getElementById('terminal-connect-btn');
+  const disconnectBtn = document.getElementById('terminal-disconnect-btn');
+
+  container.classList.add('active');
+
+  if (!term) {
+    term = new Terminal({
+      convertEol: true,
+      cursorBlink: true,
+      fontFamily: '"JetBrains Mono", "SF Mono", Consolas, monospace',
+      fontSize: 13,
+      theme: {
+        background: '#0d1217',
+        foreground: '#d7e0e8',
+        cursor: '#ff7a33',
+      },
+    });
+    fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(container);
+
+    term.onData((data) => {
+      if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
+        terminalSocket.send(JSON.stringify({ type: 'input', data }));
+      }
+    });
+
+    term.onResize(({ cols, rows }) => {
+      if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
+        terminalSocket.send(JSON.stringify({ type: 'resize', cols, rows }));
+      }
+    });
+  }
+
+  fitAddon.fit();
+
+  connectBtn.disabled = true;
+  statusEl.textContent = 'connecting...';
+  statusEl.style.color = 'var(--text-dim)';
+
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  terminalSocket = new WebSocket(`${proto}://${window.location.host}/terminal_ws`);
+
+  terminalSocket.onopen = () => {
+    statusEl.textContent = 'terminal connected.';
+    statusEl.style.color = 'var(--ok)';
+    disconnectBtn.disabled = false;
+    fitAddon.fit();
+    term.focus();
+    if (terminalSocket.readyState === WebSocket.OPEN) {
+      terminalSocket.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    }
+  };
+
+  terminalSocket.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'output' || msg.type === 'error') {
+        term.write(msg.data);
+      }
+    } catch (e) {
+      // Ignore malformed frames rather than breaking the whole session.
+    }
+  };
+
+  terminalSocket.onclose = () => {
+    statusEl.textContent = 'terminal disconnected.';
+    statusEl.style.color = 'var(--text-dim)';
+    connectBtn.disabled = false;
+    disconnectBtn.disabled = true;
+    terminalSocket = null;
+  };
+
+  terminalSocket.onerror = () => {
+    statusEl.textContent = 'terminal connection error.';
+    statusEl.style.color = 'var(--err)';
+  };
+}
+
+function disconnectTerminal() {
+  if (terminalSocket) {
+    terminalSocket.close();
+  }
+}
+
+window.addEventListener('resize', () => {
+  if (term && fitAddon && terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
+    fitAddon.fit();
+    terminalSocket.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+  }
+});
 
 renderLog();
 refreshStatus();

@@ -16,16 +16,20 @@ see build_app.sh / app.spec in the same project for the build steps.
 
 import csv
 import io
+import json
 import os
+import re
 import shlex
 import stat
 import sys
 import threading
+import time
 import webbrowser
 from datetime import datetime
 
 import paramiko
 from flask import Flask, render_template, request, jsonify
+from flask_sock import Sock
 
 # --- Path resolution: works both as a plain script and as a frozen
 # PyInstaller .app bundle. ---
@@ -45,8 +49,13 @@ else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
     USER_DATA_DIR = os.path.abspath(os.path.join(APP_DIR, ".."))
 
-app = Flask(__name__, template_folder=os.path.join(APP_DIR, "templates"))
+app = Flask(
+    __name__,
+    template_folder=os.path.join(APP_DIR, "templates"),
+    static_folder=os.path.join(APP_DIR, "static"),
+)
 app.secret_key = "drone-notes-local-secret"  # only used for local Flask session cookie
+sock = Sock(app)
 
 REMOTE_DIR = "/home/rsp/drone_air_system"
 NOTES_SUBFOLDER = "remote_ssh_notes"
@@ -64,6 +73,11 @@ RUN_ALL_SCRIPT = "runall.py"
 RUN_ALL_LOG = "runall.log"
 RUN_ALL_REMOTE_VENV = "/home/rsp/drone_air_system/venv"
 RUN_ALL_VENV_PYTHON = f"{RUN_ALL_REMOTE_VENV}/bin/python"
+RUN_ALL_PID_FILE = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}/runall.pid"
+
+# runall.py reads this once at startup - toggling a sensor here has no
+# effect on an already-running session, only on the next launch.
+SENSOR_CONFIG_REMOTE_PATH = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}/sensor_config.json"
 
 RUN_C_APP_REMOTE_PATH = "/home/rsp/Payload-SDK/build/bin/dji_sdk_demo_on_rpi"
 RUN_C_APP_LOG = "/home/rsp/Payload-SDK/build/bin/dji_sdk_demo_on_rpi.log"
@@ -959,6 +973,200 @@ def runall_output():
             return jsonify({"ok": False, "error": f"Could not fetch runall output: {e}"}), 500
 
 
+def _check_runall_running(ssh):
+    """
+    Reads runall.pid straight from the Pi and checks whether that PID is
+    still alive. Deliberately independent of state["runall_pid"], which is
+    only kept fresh by the /runall_output poll - on a page reload or right
+    after reconnecting, that in-memory value can be stale (still None even
+    though runall.py is actually running), which would be the wrong thing
+    to gate sensor-config edits on.
+    """
+    stdin, stdout, stderr = ssh.exec_command(
+        "if [ -f " + shlex.quote(RUN_ALL_PID_FILE) + " ]; then cat " + shlex.quote(RUN_ALL_PID_FILE) + "; fi",
+        timeout=10,
+    )
+    pid_text = stdout.read().decode("utf-8", errors="replace").strip()
+    stdout.channel.recv_exit_status()
+    if not pid_text.isdigit():
+        return False, None
+    pid = int(pid_text)
+    return _remote_pid_alive(ssh, pid), pid
+
+
+def _find_json_object_span(text, start_idx):
+    """
+    Given the index of an opening '{' in `text`, returns the index just
+    past its matching closing '}' (brace-depth scan that also tracks
+    whether we're inside a JSON string, so braces inside string values
+    don't throw off the count).
+    """
+    depth = 0
+    i = start_idx
+    in_string = False
+    escape = False
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        i += 1
+    raise ValueError("Unbalanced braces while scanning sensor_config.json")
+
+
+def _set_sensor_enabled_in_text(raw_text, sensor_name, enabled):
+    """
+    Rewrites only the "enabled": true/false value inside the named
+    sensor's block in sensor_config.json's raw text, leaving every other
+    byte untouched. A full json.load() + json.dump() round-trip would
+    silently reformat the whole file (indentation, key order, the hand-
+    tweaked spacing in a couple of sensor blocks) since this file is
+    hand-edited directly on the Pi and its formatting isn't ours to change
+    as a side effect of flipping one flag.
+
+    Raises ValueError if the sensor block or its "enabled" field can't be
+    found, so callers can turn that into a clean error response instead of
+    silently doing nothing.
+    """
+    key_pattern = re.compile(r'"' + re.escape(sensor_name) + r'"\s*:\s*\{')
+    match = key_pattern.search(raw_text)
+    if not match:
+        raise ValueError(f'Could not locate "{sensor_name}" block in sensor_config.json')
+
+    block_start = match.end() - 1  # index of the sensor's opening '{'
+    block_end = _find_json_object_span(raw_text, block_start)
+    block = raw_text[block_start:block_end]
+
+    new_value = "true" if enabled else "false"
+    new_block, count = re.subn(
+        r'("enabled"\s*:\s*)(true|false)', lambda m: m.group(1) + new_value, block, count=1
+    )
+    if count == 0:
+        raise ValueError(f'Could not find "enabled" field inside "{sensor_name}" block')
+
+    return raw_text[:block_start] + new_block + raw_text[block_end:]
+
+
+@app.route("/sensor_config")
+def sensor_config():
+    """
+    Lists every sensor defined under the "sensors" key of sensor_config.json
+    on the Pi, with its type and current enabled flag - driven entirely by
+    whatever's actually in the file, so adding/removing/renaming a sensor
+    there shows up here with no code change.
+    """
+    with state["lock"]:
+        if not state["connected"] or not state["ssh"] or not state["sftp"]:
+            return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
+
+        try:
+            with state["sftp"].open(SENSOR_CONFIG_REMOTE_PATH, "r") as f:
+                raw = f.read().decode("utf-8")
+            running, _pid = _check_runall_running(state["ssh"])
+        except Exception as e:
+            _mark_disconnected()
+            return jsonify({"ok": False, "error": f"Could not read sensor_config.json: {e}"}), 500
+
+        try:
+            parsed = json.loads(raw)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"sensor_config.json is not valid JSON: {e}"}), 500
+
+        sensors = parsed.get("sensors", {})
+        sensor_list = [
+            {
+                "name": name,
+                "type": cfg.get("type", name) if isinstance(cfg, dict) else name,
+                "enabled": bool(cfg.get("enabled", False)) if isinstance(cfg, dict) else False,
+            }
+            for name, cfg in sensors.items()
+        ]
+
+        return jsonify({"ok": True, "sensors": sensor_list, "runall_running": running})
+
+
+@app.route("/sensor_config/toggle", methods=["POST"])
+def sensor_config_toggle():
+    data = request.get_json()
+    name = (data.get("sensor") or "").strip()
+    enabled = data.get("enabled")
+
+    if not name or not isinstance(enabled, bool):
+        return jsonify({"ok": False, "error": '"sensor" and a boolean "enabled" are required.'}), 400
+
+    with state["lock"]:
+        if not state["connected"] or not state["ssh"] or not state["sftp"]:
+            return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
+
+        try:
+            running, _pid = _check_runall_running(state["ssh"])
+        except Exception as e:
+            _mark_disconnected()
+            return jsonify({"ok": False, "error": f"Could not check runall.py status: {e}"}), 500
+
+        if running:
+            return jsonify({
+                "ok": False,
+                "error": "Stop Run All Sensors before changing sensor config - runall.py only reads it at startup.",
+            }), 409
+
+        try:
+            with state["sftp"].open(SENSOR_CONFIG_REMOTE_PATH, "r") as f:
+                raw = f.read().decode("utf-8")
+        except Exception as e:
+            _mark_disconnected()
+            return jsonify({"ok": False, "error": f"Could not read sensor_config.json: {e}"}), 500
+
+        try:
+            parsed = json.loads(raw)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"sensor_config.json is not valid JSON: {e}"}), 500
+
+        if name not in parsed.get("sensors", {}):
+            return jsonify({"ok": False, "error": f"Unknown sensor: {name}"}), 400
+
+        try:
+            new_raw = _set_sensor_enabled_in_text(raw, name, enabled)
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+
+        # Belt-and-suspenders: re-parse the edited text and confirm it's
+        # still valid JSON with exactly the intended change before writing
+        # anything back - refusing to write beats corrupting the Pi's only
+        # copy of sensor_config.json.
+        try:
+            reparsed = json.loads(new_raw)
+            if reparsed["sensors"][name]["enabled"] != enabled:
+                raise ValueError("edited value doesn't match what was requested")
+        except Exception as e:
+            return jsonify({
+                "ok": False,
+                "error": f"Refusing to write - edited config failed validation: {e}",
+            }), 500
+
+        try:
+            with state["sftp"].open(SENSOR_CONFIG_REMOTE_PATH, "w") as f:
+                f.write(new_raw)
+        except Exception as e:
+            _mark_disconnected()
+            return jsonify({"ok": False, "error": f"Could not write sensor_config.json: {e}"}), 500
+
+        return jsonify({"ok": True, "sensor": name, "enabled": enabled})
+
+
 PLOT_MAX_POINTS = 300
 
 PLOT_SENSORS = {
@@ -1332,6 +1540,100 @@ def download_progress():
         })
 
 
+@sock.route("/terminal_ws")
+def terminal_ws(ws):
+    """
+    Bridges an xterm.js terminal in the browser to a real interactive shell
+    on the Pi, over a dedicated channel on the existing SSH transport (the
+    same login already used for everything else - no second password
+    prompt). Deliberately not held under state["lock"]: a shell session can
+    sit open indefinitely, and holding the lock for its whole lifetime
+    would freeze every other endpoint (notes, pi_time, runall polling) for
+    as long as the terminal stayed open.
+
+    Message protocol (both directions, JSON text frames):
+      {"type": "input", "data": "<keystrokes>"}   browser -> server
+      {"type": "resize", "cols": N, "rows": N}     browser -> server
+      {"type": "output", "data": "<shell bytes>"}  server -> browser
+      {"type": "error", "data": "<message>"}       server -> browser
+    """
+    with state["lock"]:
+        if not state["connected"] or not state["ssh"]:
+            ws.send(json.dumps({"type": "error", "data": "Not connected to remote host.\r\n"}))
+            return
+        ssh = state["ssh"]
+
+    try:
+        channel = ssh.get_transport().open_session()
+        channel.get_pty(term="xterm-256color", width=80, height=24)
+        channel.invoke_shell()
+    except Exception as e:
+        try:
+            ws.send(json.dumps({"type": "error", "data": f"Could not start terminal: {e}\r\n"}))
+        except Exception:
+            pass
+        return
+
+    channel.settimeout(0.0)
+    stop_event = threading.Event()
+
+    def reader():
+        # Polls the channel instead of blocking on recv() so it can also
+        # notice stop_event (set by the writer loop below when the browser
+        # side closes) and exit promptly instead of blocking forever on a
+        # shell that's just sitting idle.
+        try:
+            while not stop_event.is_set():
+                if channel.recv_ready():
+                    data = channel.recv(4096)
+                    if not data:
+                        break
+                    ws.send(json.dumps({"type": "output", "data": data.decode("utf-8", errors="replace")}))
+                elif channel.closed or channel.exit_status_ready():
+                    break
+                else:
+                    time.sleep(0.02)
+        except Exception:
+            pass
+        finally:
+            stop_event.set()
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+
+    try:
+        while not stop_event.is_set():
+            try:
+                message = ws.receive(timeout=1)
+            except Exception:
+                break
+            if message is None:
+                continue
+            try:
+                msg = json.loads(message)
+            except Exception:
+                continue
+            msg_type = msg.get("type")
+            if msg_type == "input":
+                channel.send(msg.get("data", ""))
+            elif msg_type == "resize":
+                try:
+                    cols = int(msg.get("cols", 80))
+                    rows = int(msg.get("rows", 24))
+                    channel.resize_pty(width=max(cols, 1), height=max(rows, 1))
+                except Exception:
+                    pass
+    finally:
+        stop_event.set()
+        try:
+            channel.close()
+        except Exception:
+            pass
+
 
 @app.route("/status")
 def status():
@@ -1379,4 +1681,9 @@ if __name__ == "__main__":
     # Delay slightly so the browser doesn't try to connect before the
     # Flask dev server is actually listening.
     threading.Timer(1.0, _open_in_safari).start()
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    # threaded=True matters now that /terminal_ws can hold a connection
+    # open indefinitely (an interactive shell session) - without it, the
+    # single-threaded dev server would serialize every request behind
+    # whichever terminal happens to be open, freezing notes/pi_time/runall
+    # polling for as long as that session lasts.
+    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
