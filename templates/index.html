@@ -7,15 +7,21 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='xterm/xterm.css') }}">
 <style>
   :root {
-    --bg: #11161c;
-    --panel: #161d25;
-    --panel-border: #263240;
-    --text: #d7e0e8;
-    --text-dim: #7c8c9b;
-    --accent: #ff7a33;
-    --accent-dim: #b35522;
-    --ok: #4caf7d;
-    --err: #e0594f;
+    /* Light, high-contrast palette (blue/gray only) - tuned for use
+       outdoors / in bright ambient light, where a dark theme washes
+       out. Dark navy text on near-white panels keeps contrast high
+       even when screen brightness is fighting direct sun. */
+    --bg: #e9edf2;
+    --panel: #ffffff;
+    --panel-border: #c3ccd7;
+    --text: #16202c;
+    --text-dim: #4c5a68;
+    --accent: #1d5fa3;
+    --accent-dim: #123f6e;
+    --accent-text: #ffffff;
+    --ok: #1f8a55;
+    --err: #c62828;
+    --surface-sunken: #e2e7ee;
     --mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
     --sans: "Inter", -apple-system, sans-serif;
   }
@@ -60,37 +66,75 @@
     grid-template-columns: 1fr 1.2fr 1fr;
   }
 
-  /* Main two-column work area: sensors/c-app on the left (the panels
-     actually used while a session is running), notes/log on the right
-     (write-and-review panels). Left column gets more room since the
-     runall output log benefits most from horizontal space. */
-  .main-grid {
+  .plot-row {
     display: grid;
-    grid-template-columns: 1.4fr 1fr;
-    gap: 14px;
-    align-items: start;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 14px;
   }
 
-  .col {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .col > .panel {
+  .plot-row > .panel {
     margin-bottom: 0;
+    /* A <canvas>'s width/height attributes (the dpr-scaled pixel buffer
+       we resize on every draw) count as its intrinsic content size for
+       grid track sizing, even though width:100% is set below. Without
+       this, the grid track grows to fit that intrinsic size, which
+       makes the next getBoundingClientRect() bigger, which grows the
+       canvas buffer further - a feedback loop that visibly inflates
+       both plots every poll cycle. min-width: 0 overrides the grid
+       item's automatic minimum size and breaks the loop. */
+    min-width: 0;
   }
 
-  /* Below ~1100px there isn't enough room for two real columns without
-     squeezing the output log uncomfortably narrow - collapse back to a
-     single stacked column, same as the original layout. */
+  /* Below ~1100px there isn't enough room for a 3-column top strip or
+     two side-by-side plots without squeezing things uncomfortably
+     narrow - collapse both back to a single stacked column. */
   @media (max-width: 1100px) {
     .top-strip-primary {
       grid-template-columns: 1fr;
     }
-    .main-grid {
+    .plot-row {
       grid-template-columns: 1fr;
     }
+  }
+
+  /* Operation / Debug tabs. */
+  .tab-bar {
+    display: flex;
+    gap: 22px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+
+  .tab-btn {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 8px 2px;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .tab-btn:hover {
+    color: var(--text);
+  }
+
+  .tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .tab-panel {
+    display: none;
+  }
+
+  .tab-panel.active {
+    display: block;
   }
 
   /* Smaller variant for panels that hold a single action (e.g. PSDK
@@ -171,7 +215,7 @@
 
   input[type=text], input[type=password] {
     width: 100%;
-    background: #0d1217;
+    background: var(--surface-sunken);
     border: 1px solid var(--panel-border);
     border-radius: 6px;
     color: var(--text);
@@ -187,7 +231,7 @@
   }
 
   #runall-log-select {
-    background: #0d1217;
+    background: var(--surface-sunken);
     border: 1px solid var(--panel-border);
     border-radius: 6px;
     color: var(--text);
@@ -202,7 +246,7 @@
   }
 
   .select-input {
-    background: #0d1217;
+    background: var(--surface-sunken);
     border: 1px solid var(--panel-border);
     border-radius: 6px;
     color: var(--text);
@@ -251,7 +295,7 @@
     height: 170px;
   }
 
-  #plot-canvas {
+  .plot-canvas-el {
     width: 100%;
     height: 100%;
     display: block;
@@ -261,7 +305,7 @@
     position: absolute;
     display: none;
     pointer-events: none;
-    background: #0d1217;
+    background: var(--surface-sunken);
     border: 1px solid var(--panel-border);
     border-radius: 6px;
     padding: 6px 10px;
@@ -301,17 +345,17 @@
 
   .btn-primary {
     background: var(--accent);
-    color: #1a1006;
+    color: var(--accent-text);
     width: 100%;
   }
-  .btn-primary:hover { background: #ff8c4f; }
+  .btn-primary:hover { background: #17518c; }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .btn-primary-danger {
     background: var(--err);
-    color: #2a0a08;
+    color: #ffffff;
   }
-  .btn-primary-danger:hover { background: #ea6a5f; }
+  .btn-primary-danger:hover { background: #a91f1f; }
 
   .btn-ghost {
     background: transparent;
@@ -355,7 +399,7 @@
   textarea {
     width: 100%;
     min-height: 64px;
-    background: #0d1217;
+    background: var(--surface-sunken);
     border: 1px solid var(--panel-border);
     border-radius: 6px;
     color: var(--text);
@@ -420,7 +464,7 @@
 
   .btn-download {
     width: 100%;
-    background: #1b2b3a;
+    background: #dce8f5;
     border: 1px solid var(--accent-dim);
     color: var(--accent);
     font-size: 13px;
@@ -430,7 +474,7 @@
     border-radius: 8px;
   }
   .btn-download:hover {
-    background: #20344566;
+    background: #cbdef1;
     border-color: var(--accent);
   }
   .btn-download:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -461,7 +505,7 @@
     display: none;
     width: 100%;
     height: 8px;
-    background: #0d1217;
+    background: var(--surface-sunken);
     border: 1px solid var(--panel-border);
     border-radius: 5px;
     margin-top: 12px;
@@ -481,7 +525,7 @@
     max-height: 160px;
     overflow-y: auto;
     white-space: pre-wrap;
-    background: #0d1217;
+    background: var(--surface-sunken);
     border: 1px solid var(--panel-border);
     border-radius: 6px;
     padding: 12px;
@@ -498,10 +542,58 @@
     margin-top: 10px;
   }
 
+  .button-row .btn-equal {
+    flex: 1;
+    width: auto;
+    min-width: 160px;
+  }
+
+  .sensor-panel {
+    max-width: 420px;
+  }
+
+  /* Data Viewer sheet - a scrollable table rather than the flex/grid
+     rows used elsewhere, since these CSVs can have dozens of columns
+     (merged_data.csv has ~80) and need to scroll in both directions
+     without blowing out the page layout. */
+  .dv-table-wrap {
+    overflow: auto;
+    max-height: 420px;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    margin-top: 4px;
+  }
+
+  .dv-table {
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .dv-table th, .dv-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--panel-border);
+    text-align: left;
+  }
+
+  .dv-table th {
+    position: sticky;
+    top: 0;
+    background: var(--surface-sunken);
+    color: var(--text-dim);
+    font-weight: 700;
+    z-index: 1;
+  }
+
+  .dv-table tbody tr:nth-child(even) {
+    background: var(--surface-sunken);
+  }
+
   .sensor-toggle-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
     margin-top: 10px;
   }
 
@@ -509,10 +601,10 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 10px;
+    padding: 6px 10px;
     border: 1px solid var(--panel-border);
     border-radius: 6px;
-    background: #0d1217;
+    background: var(--surface-sunken);
   }
 
   .sensor-toggle-row .sensor-name {
@@ -567,7 +659,7 @@
     display: none;
     border: 1px solid var(--panel-border);
     border-radius: 6px;
-    background: #0d1217;
+    background: var(--surface-sunken);
     padding: 6px;
   }
   .terminal-container.active { display: block; }
@@ -629,7 +721,7 @@
   }
   .modal-body input[type=text] {
     width: 100%;
-    background: #0d1217;
+    background: var(--surface-sunken);
     border: 1px solid var(--panel-border);
     border-radius: 6px;
     color: var(--text);
@@ -670,9 +762,9 @@
 
   .ntp-warning {
     display: none;
-    background: #2a2110;
-    border: 1px solid #6b4f12;
-    color: #e0b34f;
+    background: #fdf3d9;
+    border: 1px solid #cda23a;
+    color: #7a5c05;
     font-size: 12px;
     font-family: var(--mono);
     line-height: 1.5;
@@ -682,14 +774,32 @@
   }
   .ntp-warning.active { display: block; }
   .ntp-warning code {
-    background: #1a1508;
+    background: #f2e2b3;
     padding: 1px 5px;
     border-radius: 4px;
   }
 
+  /* Red warning shown when the Mac and Pi clocks have drifted apart -
+     distinct from .ntp-warning, which is about NTP fighting a manual
+     sync rather than the clocks currently being out of sync. */
+  .clock-drift-warning {
+    display: none;
+    background: #fbe4e2;
+    border: 1px solid var(--err);
+    color: var(--err);
+    font-size: 12px;
+    font-family: var(--mono);
+    font-weight: 700;
+    line-height: 1.5;
+    padding: 10px 12px;
+    border-radius: 6px;
+    margin: 12px 0;
+  }
+  .clock-drift-warning.active { display: block; }
+
   .btn-sync {
     width: 100%;
-    background: #1b2b3a;
+    background: #dce8f5;
     border: 1px solid var(--accent-dim);
     color: var(--accent);
     font-size: 13px;
@@ -699,12 +809,12 @@
     border-radius: 8px;
     margin-top: 4px;
   }
-  .btn-sync:hover { background: #20344566; border-color: var(--accent); }
+  .btn-sync:hover { background: #cbdef1; border-color: var(--accent); }
   .btn-sync:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .btn-danger {
     width: 100%;
-    background: #2a1512;
+    background: #fbe4e2;
     border: 1px solid var(--err);
     color: var(--err);
     font-size: 13px;
@@ -714,7 +824,7 @@
     border-radius: 8px;
     margin-top: 10px;
   }
-  .btn-danger:hover { background: #3a1c17; border-color: #ff8078; }
+  .btn-danger:hover { background: #f7d1cd; border-color: #a91f1f; }
   .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>
 </head>
@@ -730,6 +840,7 @@
       <span class="dot" id="status-dot"></span>
       <span id="status-text">disconnected</span>
       <span id="header-host"></span>
+      <span id="header-cpu"></span>
       <button class="btn-ghost btn-status-disconnect" id="header-disconnect-btn" onclick="disconnectSession()" style="display: none;">Disconnect</button>
     </div>
   </div>
@@ -757,144 +868,231 @@
 
   <!-- NOTES VIEW -->
   <div id="notes-view">
-    <div class="top-strip top-strip-primary">
-      <div class="panel">
-        <label style="margin-bottom: 8px;">timer</label>
-        <div class="button-row">
-          <button class="btn-ghost timer-preset" onclick="startTimerPreset(30, this)">30s</button>
-          <button class="btn-ghost timer-preset" onclick="startTimerPreset(60, this)">1m</button>
-          <button class="btn-ghost timer-preset" onclick="startTimerPreset(180, this)">3m</button>
-          <button class="btn-ghost timer-preset" onclick="startTimerPreset(300, this)">5m</button>
-        </div>
-        <div class="row" style="margin-top: 10px; align-items: flex-end;">
-          <div class="field" style="margin-bottom: 0;">
-            <label for="timer-custom-input">custom (mm:ss or seconds)</label>
-            <input type="text" id="timer-custom-input" placeholder="2:30" autocomplete="off">
+    <div class="tab-bar">
+      <button class="tab-btn active" id="tab-btn-operation" onclick="switchTab('operation')">Operation</button>
+      <button class="tab-btn" id="tab-btn-debug" onclick="switchTab('debug')">Debug</button>
+      <button class="tab-btn" id="tab-btn-dataviewer" onclick="switchTab('dataviewer')">Data Viewer</button>
+    </div>
+
+    <div id="tab-operation" class="tab-panel active">
+      <div class="top-strip top-strip-primary">
+        <div class="panel">
+          <label style="margin-bottom: 8px;">timer</label>
+          <div class="button-row">
+            <button class="btn-ghost timer-preset" onclick="startTimerPreset(30, this)">30s</button>
+            <button class="btn-ghost timer-preset" onclick="startTimerPreset(60, this)">1m</button>
+            <button class="btn-ghost timer-preset" onclick="startTimerPreset(180, this)">3m</button>
+            <button class="btn-ghost timer-preset" onclick="startTimerPreset(300, this)">5m</button>
           </div>
-          <button class="btn-ghost" style="width: auto; white-space: nowrap;" onclick="startTimerCustom()">Start</button>
+          <div class="row" style="margin-top: 10px; align-items: flex-end;">
+            <div class="field" style="margin-bottom: 0;">
+              <label for="timer-custom-input">custom (mm:ss or seconds)</label>
+              <input type="text" id="timer-custom-input" placeholder="2:30" autocomplete="off">
+            </div>
+            <button class="btn-ghost" style="width: auto; white-space: nowrap;" onclick="startTimerCustom()">Start</button>
+          </div>
+          <div class="timer-display" id="timer-display">--:--</div>
+          <div class="button-row" style="margin-top: 0;">
+            <button class="btn-ghost" id="timer-pause-btn" onclick="toggleTimerPause()" disabled>Pause</button>
+            <button class="btn-ghost" id="timer-reset-btn" onclick="resetTimer()" disabled>Reset</button>
+          </div>
+          <div class="hint" id="timer-status"></div>
         </div>
-        <div class="timer-display" id="timer-display">--:--</div>
-        <div class="button-row" style="margin-top: 0;">
-          <button class="btn-ghost" id="timer-pause-btn" onclick="toggleTimerPause()" disabled>Pause</button>
-          <button class="btn-ghost" id="timer-reset-btn" onclick="resetTimer()" disabled>Reset</button>
+
+        <div class="panel">
+          <label for="note-text">new note</label>
+          <textarea id="note-text" placeholder="What's happening on the system right now..."></textarea>
+          <div class="submit-row">
+            <button class="btn-primary" id="save-btn" onclick="saveNote()" style="width:auto;">Save note</button>
+          </div>
+          <div class="hint" id="save-status"></div>
         </div>
-        <div class="hint" id="timer-status"></div>
+
+        <div class="panel">
+          <label style="margin-bottom: 8px;">time sync</label>
+          <div class="time-row">
+            <span class="time-label">mac</span>
+            <span class="time-value" id="mac-time-display">--:--:--</span>
+          </div>
+          <div class="time-row">
+            <span class="time-label">pi <span id="pi-time-asof"></span></span>
+            <span class="time-value stale" id="pi-time-display">checking...</span>
+          </div>
+          <div class="clock-drift-warning" id="clock-drift-warning"></div>
+          <div class="ntp-warning" id="ntp-warning">
+            NTP sync is active on the Pi — a manual time set won't stick.
+            Disable it first over SSH with <code>sudo timedatectl set-ntp false</code>,
+            then sync again.
+          </div>
+          <button class="btn-sync" id="sync-time-btn" onclick="syncTime()">Sync Time</button>
+          <div class="hint" id="sync-time-status"></div>
+        </div>
       </div>
 
       <div class="panel">
-        <label for="note-text">new note</label>
-        <textarea id="note-text" placeholder="What's happening on the system right now..."></textarea>
-        <div class="submit-row">
-          <button class="btn-primary" id="save-btn" onclick="saveNote()" style="width:auto;">Save note</button>
-        </div>
-        <div class="hint" id="save-status"></div>
+        <label style="margin-bottom: 8px;">session log</label>
+        <div class="log" id="log"></div>
       </div>
 
       <div class="panel">
-        <label style="margin-bottom: 8px;">time sync</label>
-        <div class="time-row">
-          <span class="time-label">mac</span>
-          <span class="time-value" id="mac-time-display">--:--:--</span>
+        <label style="margin-bottom: 8px;">run sensors / psdk</label>
+        <div class="button-row">
+          <button class="btn-primary btn-equal" id="runall-btn" onclick="runAllSensors()">Run All Sensors</button>
+          <button class="btn-primary btn-equal" id="capp-btn" onclick="runCApp()">PSDK Initialization</button>
         </div>
-        <div class="time-row">
-          <span class="time-label">pi <span id="pi-time-asof"></span></span>
-          <span class="time-value stale" id="pi-time-display">checking...</span>
+        <div class="button-row" style="margin-top: 8px;">
+          <button class="btn-ghost" id="stop-runall-btn" onclick="stopRunAllSensors()">Stop Run All</button>
         </div>
-        <div class="ntp-warning" id="ntp-warning">
-          NTP sync is active on the Pi — a manual time set won't stick.
-          Disable it first over SSH with <code>sudo timedatectl set-ntp false</code>,
-          then sync again.
+        <div class="hint" id="runall-status">Starts the remote <code>drone_air_system/uri_aplogger/runall.py</code> script using the Pi-side venv.</div>
+        <div class="hint" id="capp-status"></div>
+        <div id="capp-output" class="output-panel"></div>
+      </div>
+
+      <div class="plot-row">
+        <div class="panel">
+          <div class="plot-toolbar">
+            <label style="margin-bottom: 0;">live plot</label>
+            <select id="plot-sensor-select-1" class="select-input">
+              <option value="pom">Ozone (POM)</option>
+              <option value="imet">Temperature (iMet)</option>
+              <option value="cavity">Inline Pressure (Cavity)</option>
+              <option value="teca">Tec Current</option>
+              <option value="tect">Tec Temperature</option>
+              <option value="rhi">RH inline</option>
+              <option value="intensity">Max Intensity</option>
+            </select>
+          </div>
+          <div class="plot-header">
+            <div>
+              <span class="plot-stat-value" id="plot-stat-value-1">--</span>
+              <span class="plot-stat-unit" id="plot-stat-unit-1"></span>
+            </div>
+            <div class="hint" id="plot-status-1"></div>
+          </div>
+          <div class="plot-canvas-wrap">
+            <canvas id="plot-canvas-1" class="plot-canvas-el"></canvas>
+            <div class="plot-tooltip" id="plot-tooltip-1"></div>
+          </div>
         </div>
-        <button class="btn-sync" id="sync-time-btn" onclick="syncTime()">Sync Time</button>
-        <div class="hint" id="sync-time-status"></div>
+
+        <div class="panel">
+          <div class="plot-toolbar">
+            <label style="margin-bottom: 0;">live plot</label>
+            <select id="plot-sensor-select-2" class="select-input">
+              <option value="pom">Ozone (POM)</option>
+              <option value="imet" selected>Temperature (iMet)</option>
+              <option value="cavity">Inline Pressure (Cavity)</option>
+              <option value="teca">Tec Current</option>
+              <option value="tect">Tec Temperature</option>
+              <option value="rhi">RH inline</option>
+              <option value="intensity">Max Intensity</option>
+            </select>
+          </div>
+          <div class="plot-header">
+            <div>
+              <span class="plot-stat-value" id="plot-stat-value-2">--</span>
+              <span class="plot-stat-unit" id="plot-stat-unit-2"></span>
+            </div>
+            <div class="hint" id="plot-status-2"></div>
+          </div>
+          <div class="plot-canvas-wrap">
+            <canvas id="plot-canvas-2" class="plot-canvas-el"></canvas>
+            <div class="plot-tooltip" id="plot-tooltip-2"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <button class="btn-download" id="download-btn" onclick="startDownload()">⬇ Download All Data</button>
+        <div class="progress-bar-track" id="progress-bar-track">
+          <div class="progress-bar-fill" id="progress-bar-fill"></div>
+        </div>
+        <div class="hint" id="download-status"></div>
+        <div id="download-results"></div>
+      </div>
+    </div>
+
+    <div id="tab-debug" class="tab-panel">
+      <div class="panel">
+        <label style="margin-bottom: 8px;">run sensors log</label>
+        <div class="button-row">
+          <label for="runall-log-select" class="hint" style="margin: 0;">Log:</label>
+          <select id="runall-log-select" onchange="onRunallLogSelectChange()">
+            <option value="controller">Controller (runall.log)</option>
+          </select>
+        </div>
+        <div id="runall-output" class="output-panel wide-output"></div>
+      </div>
+
+      <div class="panel">
+        <label style="margin-bottom: 8px;">terminal</label>
+        <div class="button-row">
+          <button class="btn-primary" id="terminal-connect-btn" style="width:auto;" onclick="connectTerminal()">Open Terminal</button>
+          <button class="btn-ghost" id="terminal-disconnect-btn" style="width:auto;" onclick="disconnectTerminal()" disabled>Close Terminal</button>
+        </div>
+        <div class="hint" id="terminal-status">Opens a real interactive shell on the Pi, over the current SSH connection.</div>
+        <div id="terminal-container" class="terminal-container"></div>
+      </div>
+
+      <div class="panel sensor-panel">
+        <label style="margin-bottom: 8px;">sensors</label>
+        <div class="hint" id="sensor-config-status">Connect to load the sensor list.</div>
+        <div id="sensor-config-list" class="sensor-toggle-list"></div>
+      </div>
+
+      <div class="panel">
+        <label style="margin-bottom: 8px;">danger zone</label>
         <button class="btn-danger" id="restart-pi-btn" onclick="openRestartModal()">Restart Pi</button>
         <div class="hint" id="restart-status"></div>
       </div>
     </div>
 
-    <div class="panel">
-      <label style="margin-bottom: 8px;">run sensors</label>
-      <div class="button-row">
-        <button class="btn-primary" id="runall-btn" onclick="runAllSensors()">Run All Sensors</button>
-        <button class="btn-ghost" id="stop-runall-btn" onclick="stopRunAllSensors()">Stop Run All</button>
-      </div>
-      <div class="hint" id="runall-status">Starts the remote <code>drone_air_system/uri_aplogger/runall.py</code> script using the Pi-side venv.</div>
-      <div class="button-row" style="margin-top: 8px;">
-        <label for="runall-log-select" class="hint" style="margin: 0;">Log:</label>
-        <select id="runall-log-select" onchange="onRunallLogSelectChange()">
-          <option value="controller">Controller (runall.log)</option>
-        </select>
-      </div>
-      <div id="runall-output" class="output-panel wide-output"></div>
-    </div>
-
-    <div class="panel">
-      <label style="margin-bottom: 8px;">sensors</label>
-      <div class="hint" id="sensor-config-status">Connect to load the sensor list.</div>
-      <div id="sensor-config-list" class="sensor-toggle-list"></div>
-    </div>
-
-    <div class="panel">
-      <label style="margin-bottom: 8px;">terminal</label>
-      <div class="button-row">
-        <button class="btn-primary" id="terminal-connect-btn" style="width:auto;" onclick="connectTerminal()">Open Terminal</button>
-        <button class="btn-ghost" id="terminal-disconnect-btn" style="width:auto;" onclick="disconnectTerminal()" disabled>Close Terminal</button>
-      </div>
-      <div class="hint" id="terminal-status">Opens a real interactive shell on the Pi, over the current SSH connection.</div>
-      <div id="terminal-container" class="terminal-container"></div>
-    </div>
-
-    <div class="panel">
-      <div class="plot-toolbar">
-        <label style="margin-bottom: 0;">live plot</label>
-        <select id="plot-sensor-select" class="select-input" onchange="onPlotSensorChange()">
-          <option value="pom">Ozone (POM)</option>
-          <option value="imet">Temperature (iMet)</option>
-          <option value="cavity">Inline Pressure (Cavity)</option>
-          <option value="teca">Tec Current</option>
-          <option value="tect">Tec Temperature</option>
-          <option value="rhi">RH inline</option>
-          <option value="intensity">Max Intensity</option>
-        </select>
-      </div>
-      <div class="plot-header">
-        <div>
-          <span class="plot-stat-value" id="plot-stat-value">--</span>
-          <span class="plot-stat-unit" id="plot-stat-unit"></span>
+    <div id="tab-dataviewer" class="tab-panel">
+      <div class="panel">
+        <label style="margin-bottom: 8px;">browse output folders</label>
+        <div class="button-row">
+          <select id="dv-run-select" class="select-input" onchange="onDvRunChange()">
+            <option value="">Select a run...</option>
+          </select>
+          <select id="dv-file-select" class="select-input" onchange="onDvFileChange()" disabled>
+            <option value="">Select a file...</option>
+          </select>
+          <button class="btn-ghost" style="width: auto; white-space: nowrap;" onclick="refreshDvRuns()">Refresh</button>
         </div>
-        <div class="hint" id="plot-status"></div>
+        <div class="hint" id="dv-status">Connect, then pick a run folder to explore.</div>
       </div>
-      <div class="plot-canvas-wrap">
-        <canvas id="plot-canvas"></canvas>
-        <div class="plot-tooltip" id="plot-tooltip"></div>
-      </div>
-    </div>
 
-    <div class="main-grid">
-      <div class="col">
-        <div class="panel panel-compact">
-          <label style="margin-bottom: 10px;">run c app</label>
-          <div style="display: flex; align-items: center; gap: 14px; flex-wrap: wrap;">
-            <button class="btn-primary" id="capp-btn" onclick="runCApp()" style="width: auto; padding: 9px 16px; font-size: 13px;">PSDK Initialization</button>
-            <div class="hint" id="capp-status" style="margin: 0;"></div>
+      <div class="panel">
+        <label style="margin-bottom: 8px;">sheet</label>
+        <div class="dv-table-wrap">
+          <table class="dv-table">
+            <thead><tr id="dv-table-head"></tr></thead>
+            <tbody id="dv-table-body"></tbody>
+          </table>
+        </div>
+        <div class="button-row" style="margin-top: 8px; align-items: center;">
+          <button class="btn-ghost" style="width: auto;" id="dv-prev-btn" onclick="dvGoToPage(dvState.page - 1)" disabled>◀ Prev</button>
+          <span class="hint" id="dv-page-info" style="margin: 0;"></span>
+          <button class="btn-ghost" style="width: auto;" id="dv-next-btn" onclick="dvGoToPage(dvState.page + 1)" disabled>Next ▶</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="plot-toolbar">
+          <label style="margin-bottom: 0;">plot column</label>
+          <select id="dv-column-select" class="select-input" onchange="onDvColumnChange()" disabled>
+            <option value="">Select a column...</option>
+          </select>
+        </div>
+        <div class="plot-header">
+          <div>
+            <span class="plot-stat-value" id="dv-plot-stat-value">--</span>
           </div>
-          <div id="capp-output" class="output-panel"></div>
+          <div class="hint" id="dv-plot-status"></div>
         </div>
-
-        <div class="panel">
-          <button class="btn-download" id="download-btn" onclick="startDownload()">⬇ Download All Data</button>
-          <div class="progress-bar-track" id="progress-bar-track">
-            <div class="progress-bar-fill" id="progress-bar-fill"></div>
-          </div>
-          <div class="hint" id="download-status"></div>
-          <div id="download-results"></div>
-        </div>
-      </div>
-
-      <div class="col">
-        <div class="panel">
-          <label style="margin-bottom: 8px;">session log</label>
-          <div class="log" id="log"></div>
+        <div class="plot-canvas-wrap">
+          <canvas id="dv-plot-canvas" class="plot-canvas-el"></canvas>
+          <div class="plot-tooltip" id="dv-plot-tooltip"></div>
         </div>
       </div>
     </div>
@@ -968,12 +1166,23 @@ function showNotesView(data) {
   refreshRunallLogList();
   refreshRunAllOutput();
   refreshSensorConfig();
+  refreshDvRuns();
+}
+
+const TAB_NAMES = ['operation', 'debug', 'dataviewer'];
+
+function switchTab(name) {
+  TAB_NAMES.forEach((n) => {
+    document.getElementById('tab-' + n).classList.toggle('active', n === name);
+    document.getElementById('tab-btn-' + n).classList.toggle('active', n === name);
+  });
 }
 
 function showConnectView() {
   document.getElementById('notes-view').classList.remove('active');
   document.getElementById('connect-view').classList.add('active');
   document.getElementById('header-host').textContent = '';
+  document.getElementById('header-cpu').textContent = '';
   document.getElementById('header-disconnect-btn').style.display = 'none';
   stopTimeSync();
   stopPlotPolling();
@@ -982,6 +1191,16 @@ function showConnectView() {
   document.getElementById('sensor-config-list').innerHTML = '';
   document.getElementById('sensor-config-status').textContent = 'Connect to load the sensor list.';
   document.getElementById('sensor-config-status').style.color = 'var(--text-dim)';
+
+  document.getElementById('dv-run-select').innerHTML = '<option value="">Select a run...</option>';
+  document.getElementById('dv-file-select').innerHTML = '<option value="">Select a file...</option>';
+  document.getElementById('dv-file-select').disabled = true;
+  dvState.run = null;
+  dvState.file = null;
+  document.getElementById('dv-status').textContent = 'Connect, then pick a run folder to explore.';
+  document.getElementById('dv-status').style.color = 'var(--text-dim)';
+  dvClearTable();
+  dvClearPlot();
 }
 
 async function connect() {
@@ -1736,68 +1955,12 @@ function playTimerBeep() {
 }
 
 // ---------- Live Plot ----------
-
-let currentPlotSensor = 'pom';
-let currentPlotPoints = [];
-let plotPollInterval = null;
-let plotHoverIndex = null;
+// Two independent plot instances (side by side), each with its own
+// sensor selection, poll loop, and canvas - built from one factory so
+// adding/removing a plot is a one-line change rather than a duplicated
+// copy of every function below.
 
 const PLOT_PADDING = { top: 16, right: 16, bottom: 24, left: 46 };
-
-function onPlotSensorChange() {
-  currentPlotSensor = document.getElementById('plot-sensor-select').value;
-  currentPlotPoints = [];
-  plotHoverIndex = null;
-  fetchPlotData();
-}
-
-function startPlotPolling() {
-  stopPlotPolling();
-  fetchPlotData();
-  plotPollInterval = setInterval(fetchPlotData, 4000);
-}
-
-function stopPlotPolling() {
-  if (plotPollInterval) clearInterval(plotPollInterval);
-  plotPollInterval = null;
-}
-
-async function fetchPlotData() {
-  const statusEl = document.getElementById('plot-status');
-  try {
-    const res = await fetch('/plot_data?sensor=' + encodeURIComponent(currentPlotSensor));
-    const data = await res.json();
-
-    if (data.ok) {
-      currentPlotPoints = data.points || [];
-      document.getElementById('plot-stat-unit').textContent = data.unit || '';
-      statusEl.textContent = currentPlotPoints.length
-        ? `${data.csv_file} · ${currentPlotPoints.length} samples`
-        : 'Connected, but no samples written yet...';
-      statusEl.style.color = 'var(--text-dim)';
-    } else {
-      currentPlotPoints = [];
-      statusEl.textContent = data.error;
-      statusEl.style.color = 'var(--err)';
-    }
-  } catch (e) {
-    currentPlotPoints = [];
-    statusEl.textContent = 'Could not reach the local app server.';
-    statusEl.style.color = 'var(--err)';
-  }
-
-  updatePlotStat();
-  drawPlot();
-}
-
-function updatePlotStat() {
-  const valueEl = document.getElementById('plot-stat-value');
-  if (!currentPlotPoints.length) {
-    valueEl.textContent = '--';
-    return;
-  }
-  valueEl.textContent = formatPlotValue(currentPlotPoints[currentPlotPoints.length - 1].v);
-}
 
 // Decimal places to display, per sensor - matched to how much precision
 // the source data actually carries, so values aren't rounded away:
@@ -1809,11 +1972,6 @@ function updatePlotStat() {
 // is plenty to read a trend; TECT has 3; RHi is written with 1; the
 // spectrometer's max intensity is an integer count.
 const PLOT_DECIMALS = { pom: 1, imet: 2, cavity: 1, teca: 3, tect: 2, rhi: 1, intensity: 0 };
-
-function formatPlotValue(v) {
-  const decimals = PLOT_DECIMALS[currentPlotSensor] ?? 1;
-  return v.toFixed(decimals);
-}
 
 function plotTimeOnly(ts) {
   // "2026-07-06 15:15:11" -> "15:15:11"
@@ -1833,8 +1991,21 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function getPlotCanvasContext() {
-  const canvas = document.getElementById('plot-canvas');
+function plotXY(points, width, height, minV, maxV) {
+  const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
+  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+  const n = points.length;
+  const xForIndex = (i) => PLOT_PADDING.left + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const yForValue = (v) => PLOT_PADDING.top + plotH - ((v - minV) / (maxV - minV)) * plotH;
+  return { plotW, plotH, xForIndex, yForValue };
+}
+
+// Shared by both the live plots (createPlotController) and the Data
+// Viewer's historical plot (createStaticPlotController) - the canvas
+// resize/draw/hover mechanics are identical either way, only where the
+// points come from (a 4s poll vs. a one-shot fetch) differs.
+
+function getCanvasContext(canvas) {
   const rect = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const targetW = Math.max(1, Math.round(rect.width * dpr));
@@ -1848,26 +2019,16 @@ function getPlotCanvasContext() {
   return { ctx, width: rect.width, height: rect.height };
 }
 
-function plotXY(points, width, height, minV, maxV) {
-  const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
-  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
-  const n = points.length;
-  const xForIndex = (i) => PLOT_PADDING.left + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
-  const yForValue = (v) => PLOT_PADDING.top + plotH - ((v - minV) / (maxV - minV)) * plotH;
-  return { plotW, plotH, xForIndex, yForValue };
-}
-
-function drawPlot() {
-  const { ctx, width, height } = getPlotCanvasContext();
+function drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue, emptyMessage) {
+  const { ctx, width, height } = getCanvasContext(canvas);
   ctx.clearRect(0, 0, width, height);
 
-  const points = currentPlotPoints;
   if (!points.length) {
     ctx.fillStyle = getCssVar('--text-dim');
     ctx.font = '13px ' + getCssVar('--sans');
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('No data yet', width / 2, height / 2);
+    ctx.fillText(emptyMessage || 'No data yet', width / 2, height / 2);
     return;
   }
 
@@ -1900,7 +2061,7 @@ function drawPlot() {
     ctx.moveTo(PLOT_PADDING.left, y);
     ctx.lineTo(width - PLOT_PADDING.right, y);
     ctx.stroke();
-    ctx.fillText(formatPlotValue(v), PLOT_PADDING.left - 8, y - 0.5);
+    ctx.fillText(formatValue(v), PLOT_PADDING.left - 8, y - 0.5);
   }
 
   // Area fill (accent hue, ~10% opacity wash)
@@ -1951,8 +2112,8 @@ function drawPlot() {
 
   // Hover crosshair - a vertical hairline snapped to the nearest sample,
   // so the reader aims at a timestamp instead of a 2px line.
-  if (plotHoverIndex !== null && points[plotHoverIndex]) {
-    const hx = xForIndex(plotHoverIndex);
+  if (hoverIndex !== null && points[hoverIndex]) {
+    const hx = xForIndex(hoverIndex);
     ctx.beginPath();
     ctx.moveTo(hx, PLOT_PADDING.top);
     ctx.lineTo(hx, PLOT_PADDING.top + plotH);
@@ -1960,7 +2121,7 @@ function drawPlot() {
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    const hy = yForValue(points[plotHoverIndex].v);
+    const hy = yForValue(points[hoverIndex].v);
     ctx.beginPath();
     ctx.arc(hx, hy, 4, 0, Math.PI * 2);
     ctx.fillStyle = getCssVar('--panel');
@@ -1972,27 +2133,26 @@ function drawPlot() {
   }
 }
 
-function setupPlotHover() {
-  const canvas = document.getElementById('plot-canvas');
-  const tooltip = document.getElementById('plot-tooltip');
-
+// getPoints/formatTooltipValue are callbacks (rather than fixed values)
+// since the caller's data can change out from under a long-lived hover
+// listener (a new poll landing, or the user picking a different file).
+function attachPlotHover(canvas, tooltip, getPoints, formatTooltipValue, onHoverIndexChange) {
   canvas.addEventListener('mousemove', (e) => {
-    if (!currentPlotPoints.length) return;
+    const points = getPoints();
+    if (!points.length) return;
     const rect = canvas.getBoundingClientRect();
-    const n = currentPlotPoints.length;
-    const { plotW, xForIndex } = plotXY(currentPlotPoints, rect.width, rect.height, 0, 1);
+    const n = points.length;
+    const { plotW, xForIndex } = plotXY(points, rect.width, rect.height, 0, 1);
     const relX = (e.clientX - rect.left) - PLOT_PADDING.left;
     let idx = n === 1 ? 0 : Math.round((relX / plotW) * (n - 1));
     idx = Math.max(0, Math.min(n - 1, idx));
-    plotHoverIndex = idx;
-    drawPlot();
+    onHoverIndexChange(idx);
 
-    const p = currentPlotPoints[idx];
-    const unit = document.getElementById('plot-stat-unit').textContent;
+    const p = points[idx];
     tooltip.innerHTML = '';
     const valueEl = document.createElement('div');
     valueEl.className = 'tt-value';
-    valueEl.textContent = `${formatPlotValue(p.v)} ${unit}`;
+    valueEl.textContent = formatTooltipValue(p.v);
     const timeEl = document.createElement('div');
     timeEl.className = 'tt-time';
     timeEl.textContent = plotTimeOnly(p.t);
@@ -2005,19 +2165,409 @@ function setupPlotHover() {
   });
 
   canvas.addEventListener('mouseleave', () => {
-    plotHoverIndex = null;
     tooltip.style.display = 'none';
-    drawPlot();
+    onHoverIndexChange(null);
   });
+}
+
+function createPlotController(suffix, defaultSensor) {
+  const selectEl = document.getElementById('plot-sensor-select' + suffix);
+  const statValueEl = document.getElementById('plot-stat-value' + suffix);
+  const statUnitEl = document.getElementById('plot-stat-unit' + suffix);
+  const statusEl = document.getElementById('plot-status' + suffix);
+  const canvas = document.getElementById('plot-canvas' + suffix);
+  const tooltip = document.getElementById('plot-tooltip' + suffix);
+
+  let currentSensor = defaultSensor;
+  let points = [];
+  let pollInterval = null;
+  let hoverIndex = null;
+
+  function formatValue(v) {
+    const decimals = PLOT_DECIMALS[currentSensor] ?? 1;
+    return v.toFixed(decimals);
+  }
+
+  function draw() {
+    drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue);
+  }
+
+  function updateStat() {
+    if (!points.length) {
+      statValueEl.textContent = '--';
+      return;
+    }
+    statValueEl.textContent = formatValue(points[points.length - 1].v);
+  }
+
+  async function fetchData() {
+    try {
+      const res = await fetch('/plot_data?sensor=' + encodeURIComponent(currentSensor));
+      const data = await res.json();
+
+      if (data.ok) {
+        points = data.points || [];
+        statUnitEl.textContent = data.unit || '';
+        statusEl.textContent = points.length
+          ? `${data.csv_file} · ${points.length} samples`
+          : 'Connected, but no samples written yet...';
+        statusEl.style.color = 'var(--text-dim)';
+      } else {
+        points = [];
+        statusEl.textContent = data.error;
+        statusEl.style.color = 'var(--err)';
+      }
+    } catch (e) {
+      points = [];
+      statusEl.textContent = 'Could not reach the local app server.';
+      statusEl.style.color = 'var(--err)';
+    }
+
+    updateStat();
+    draw();
+  }
+
+  function onSensorChange() {
+    currentSensor = selectEl.value;
+    points = [];
+    hoverIndex = null;
+    fetchData();
+  }
+
+  function startPolling() {
+    stopPolling();
+    fetchData();
+    pollInterval = setInterval(fetchData, 4000);
+  }
+
+  function stopPolling() {
+    if (pollInterval) clearInterval(pollInterval);
+    pollInterval = null;
+  }
+
+  attachPlotHover(
+    canvas, tooltip,
+    () => points,
+    (v) => `${formatValue(v)} ${statUnitEl.textContent}`,
+    (idx) => { hoverIndex = idx; draw(); },
+  );
+
+  selectEl.addEventListener('change', onSensorChange);
+
+  return { startPolling, stopPolling, draw };
+}
+
+function createStaticPlotController(canvasId, tooltipId) {
+  const canvas = document.getElementById(canvasId);
+  const tooltip = document.getElementById(tooltipId);
+
+  let points = [];
+  let decimals = 1;
+  let hoverIndex = null;
+  let emptyMessage = 'Pick a numeric column to plot';
+
+  function formatValue(v) {
+    return v.toFixed(decimals);
+  }
+
+  function draw() {
+    drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue, emptyMessage);
+  }
+
+  attachPlotHover(
+    canvas, tooltip,
+    () => points,
+    formatValue,
+    (idx) => { hoverIndex = idx; draw(); },
+  );
+
+  return {
+    setData(newPoints, newDecimals) {
+      points = newPoints;
+      decimals = (typeof newDecimals === 'number') ? newDecimals : 1;
+      hoverIndex = null;
+      emptyMessage = 'Pick a numeric column to plot';
+      draw();
+    },
+    setEmptyMessage(message) {
+      points = [];
+      hoverIndex = null;
+      emptyMessage = message;
+      draw();
+    },
+    draw,
+  };
+}
+
+const plotControllers = [
+  createPlotController('-1', 'pom'),
+  createPlotController('-2', 'imet'),
+];
+
+function startPlotPolling() {
+  plotControllers.forEach(p => p.startPolling());
+}
+
+function stopPlotPolling() {
+  plotControllers.forEach(p => p.stopPolling());
 }
 
 window.addEventListener('resize', () => {
   if (document.getElementById('notes-view').classList.contains('active')) {
-    drawPlot();
+    plotControllers.forEach(p => p.draw());
+    dvPlot.draw();
   }
 });
 
-setupPlotHover();
+// ---------- Data Viewer ----------
+// Browses every run folder on the Pi (not just the latest one, unlike
+// the live plots) - pick a run, pick a CSV in it, page through it as a
+// sheet, and plot any numeric column against the file's own time column.
+// Nothing here polls; every fetch is triggered by an explicit user pick.
+
+const dvState = {
+  run: null,
+  file: null,
+  page: 1,
+  totalPages: 1,
+  columns: [],
+  columnNumeric: [],
+};
+
+const dvPlot = createStaticPlotController('dv-plot-canvas', 'dv-plot-tooltip');
+
+function dvFormatRunLabel(name) {
+  // "20260706_185920" -> "2026-07-06 18:59:20"
+  const m = name.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/);
+  return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}` : name;
+}
+
+function dvFormatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function refreshDvRuns() {
+  const runSelect = document.getElementById('dv-run-select');
+  const statusEl = document.getElementById('dv-status');
+
+  runSelect.innerHTML = '<option value="">Select a run...</option>';
+  document.getElementById('dv-file-select').innerHTML = '<option value="">Select a file...</option>';
+  document.getElementById('dv-file-select').disabled = true;
+  dvState.run = null;
+  dvState.file = null;
+  dvClearTable();
+  dvClearPlot();
+
+  try {
+    const res = await fetch('/data_viewer/runs');
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      return;
+    }
+    data.runs.forEach((name) => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = dvFormatRunLabel(name);
+      runSelect.appendChild(opt);
+    });
+    statusEl.textContent = data.runs.length
+      ? `${data.runs.length} run folder${data.runs.length === 1 ? '' : 's'} found - pick one to explore.`
+      : 'No run folders found yet on the Pi - start Run All Sensors first.';
+    statusEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+}
+
+async function onDvRunChange() {
+  const run = document.getElementById('dv-run-select').value;
+  dvState.run = run || null;
+  dvState.file = null;
+  dvClearTable();
+  dvClearPlot();
+
+  const fileSelect = document.getElementById('dv-file-select');
+  fileSelect.innerHTML = '<option value="">Select a file...</option>';
+  fileSelect.disabled = true;
+  if (!run) return;
+
+  const statusEl = document.getElementById('dv-status');
+  try {
+    const res = await fetch('/data_viewer/files?run=' + encodeURIComponent(run));
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      return;
+    }
+    if (!data.files.length) {
+      statusEl.textContent = 'No CSV files found in this run folder.';
+      statusEl.style.color = 'var(--text-dim)';
+      return;
+    }
+    data.files.forEach((f) => {
+      const opt = document.createElement('option');
+      opt.value = f.path;
+      opt.textContent = `${f.path} (${dvFormatSize(f.size)})`;
+      fileSelect.appendChild(opt);
+    });
+    fileSelect.disabled = false;
+    statusEl.textContent = `${data.files.length} CSV file${data.files.length === 1 ? '' : 's'} in this run - pick one.`;
+    statusEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+}
+
+function onDvFileChange() {
+  const file = document.getElementById('dv-file-select').value;
+  dvState.file = file || null;
+  dvClearPlot();
+  if (!file) {
+    dvClearTable();
+    return;
+  }
+  dvGoToPage(1);
+}
+
+async function dvGoToPage(page) {
+  if (!dvState.run || !dvState.file || page < 1) return;
+  const statusEl = document.getElementById('dv-status');
+
+  try {
+    const url = `/data_viewer/table?run=${encodeURIComponent(dvState.run)}` +
+      `&file=${encodeURIComponent(dvState.file)}&page=${page}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      return;
+    }
+
+    dvState.page = data.page;
+    dvState.totalPages = data.total_pages;
+    dvState.columns = data.columns;
+    dvState.columnNumeric = data.column_numeric;
+
+    dvRenderTable(data);
+    dvRenderColumnSelect();
+    statusEl.textContent = `${data.total_rows} row${data.total_rows === 1 ? '' : 's'} total.`;
+    statusEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+}
+
+function dvRenderTable(data) {
+  const head = document.getElementById('dv-table-head');
+  const body = document.getElementById('dv-table-body');
+
+  head.innerHTML = '';
+  data.columns.forEach((col) => {
+    const th = document.createElement('th');
+    th.textContent = col;
+    head.appendChild(th);
+  });
+
+  body.innerHTML = '';
+  data.rows.forEach((row) => {
+    const tr = document.createElement('tr');
+    row.forEach((cell) => {
+      const td = document.createElement('td');
+      td.textContent = cell;
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+
+  document.getElementById('dv-page-info').textContent = `Page ${data.page} of ${data.total_pages}`;
+  document.getElementById('dv-prev-btn').disabled = data.page <= 1;
+  document.getElementById('dv-next-btn').disabled = data.page >= data.total_pages;
+}
+
+function dvClearTable() {
+  document.getElementById('dv-table-head').innerHTML = '';
+  document.getElementById('dv-table-body').innerHTML = '';
+  document.getElementById('dv-page-info').textContent = '';
+  document.getElementById('dv-prev-btn').disabled = true;
+  document.getElementById('dv-next-btn').disabled = true;
+  document.getElementById('dv-column-select').innerHTML = '<option value="">Select a column...</option>';
+  document.getElementById('dv-column-select').disabled = true;
+}
+
+function dvRenderColumnSelect() {
+  const columnSelect = document.getElementById('dv-column-select');
+  columnSelect.innerHTML = '<option value="">Select a column...</option>';
+
+  // Column 0 is always the time axis (see /data_viewer/plot), so it's
+  // never itself offered as something to plot - and only numeric
+  // columns (column_numeric, computed server-side over the whole file)
+  // are worth offering at all.
+  for (let i = 1; i < dvState.columns.length; i++) {
+    if (!dvState.columnNumeric[i]) continue;
+    const opt = document.createElement('option');
+    opt.value = dvState.columns[i];
+    opt.textContent = dvState.columns[i];
+    columnSelect.appendChild(opt);
+  }
+
+  columnSelect.disabled = columnSelect.options.length <= 1;
+}
+
+async function onDvColumnChange() {
+  const column = document.getElementById('dv-column-select').value;
+  const statusEl = document.getElementById('dv-plot-status');
+  const valueEl = document.getElementById('dv-plot-stat-value');
+
+  if (!column) {
+    dvClearPlot();
+    return;
+  }
+
+  statusEl.textContent = 'Loading...';
+  statusEl.style.color = 'var(--text-dim)';
+
+  try {
+    const url = `/data_viewer/plot?run=${encodeURIComponent(dvState.run)}` +
+      `&file=${encodeURIComponent(dvState.file)}&column=${encodeURIComponent(column)}`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      dvPlot.setEmptyMessage('Could not load this column.');
+      valueEl.textContent = '--';
+      return;
+    }
+
+    dvPlot.setData(data.points, data.decimals);
+    valueEl.textContent = data.points.length
+      ? data.points[data.points.length - 1].v.toFixed(data.decimals)
+      : '--';
+    statusEl.textContent = data.points.length
+      ? `${data.points.length} points plotted against "${data.time_column}".`
+      : 'No numeric values found in this column.';
+    statusEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+}
+
+function dvClearPlot() {
+  dvPlot.setEmptyMessage('Pick a numeric column to plot');
+  document.getElementById('dv-plot-status').textContent = '';
+  document.getElementById('dv-plot-stat-value').textContent = '--';
+}
 
 // ---------- Time Sync ----------
 
@@ -2045,10 +2595,14 @@ function tickMacClock() {
   document.getElementById('mac-time-display').textContent = now.toLocaleTimeString();
 }
 
+const CLOCK_DRIFT_WARN_SECONDS = 2;
+
 async function refreshPiTime() {
   const piDisplay = document.getElementById('pi-time-display');
   const piAsOf = document.getElementById('pi-time-asof');
   const ntpWarning = document.getElementById('ntp-warning');
+  const driftWarning = document.getElementById('clock-drift-warning');
+  const cpuDisplay = document.getElementById('header-cpu');
 
   try {
     const res = await fetch('/pi_time');
@@ -2059,15 +2613,33 @@ async function refreshPiTime() {
       piDisplay.classList.remove('stale');
       piAsOf.textContent = '(as of last check)';
       ntpWarning.classList.toggle('active', !!data.ntp_active);
+      cpuDisplay.textContent = (data.cpu_percent === null || data.cpu_percent === undefined)
+        ? ''
+        : `· cpu ${data.cpu_percent}%`;
+
+      if (typeof data.pi_epoch === 'number') {
+        const driftSeconds = Math.abs((Date.now() / 1000) - data.pi_epoch);
+        const outOfSync = driftSeconds > CLOCK_DRIFT_WARN_SECONDS;
+        driftWarning.textContent = outOfSync
+          ? `⚠ Mac and Pi clocks are ~${Math.round(driftSeconds)}s apart — run Sync Time.`
+          : '';
+        driftWarning.classList.toggle('active', outOfSync);
+      } else {
+        driftWarning.classList.remove('active');
+      }
     } else {
       piDisplay.textContent = '(not connected)';
       piDisplay.classList.add('stale');
       piAsOf.textContent = '';
       ntpWarning.classList.remove('active');
+      driftWarning.classList.remove('active');
+      cpuDisplay.textContent = '';
     }
   } catch (e) {
     piDisplay.textContent = '(error checking)';
     piDisplay.classList.add('stale');
+    driftWarning.classList.remove('active');
+    cpuDisplay.textContent = '';
   }
 }
 
@@ -2349,9 +2921,9 @@ function connectTerminal() {
       fontFamily: '"JetBrains Mono", "SF Mono", Consolas, monospace',
       fontSize: 13,
       theme: {
-        background: '#0d1217',
-        foreground: '#d7e0e8',
-        cursor: '#ff7a33',
+        background: '#e2e7ee',
+        foreground: '#16202c',
+        cursor: '#1d5fa3',
       },
     });
     fitAddon = new FitAddon.FitAddon();

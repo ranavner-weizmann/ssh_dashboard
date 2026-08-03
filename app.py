@@ -17,6 +17,7 @@ see build_app.sh / app.spec in the same project for the build steps.
 import csv
 import io
 import json
+import math
 import os
 import re
 import shlex
@@ -24,7 +25,6 @@ import stat
 import sys
 import threading
 import time
-import webbrowser
 from datetime import datetime
 
 import paramiko
@@ -328,11 +328,27 @@ def _run_sudo_command(ssh, password, command, timeout=15):
     return success, out_text, err_text
 
 
+def _parse_cpu_percent(top_output):
+    """
+    Parses `top -bn1`'s "%Cpu(s):  3.2 us, ..., 95.0 id, ..." summary line
+    into a single busy-percent figure (100 - idle). Field order in that
+    line can vary, so this greps for the "id" figure by name rather than
+    a fixed column index. Returns None (instead of raising) if the line
+    isn't found/parseable - CPU usage is a nice-to-have for the status
+    bar and shouldn't block the time-sync info that shares this SSH call.
+    """
+    match = re.search(r"([\d.]+)\s*id", top_output)
+    if not match:
+        return None
+    return round(100 - float(match.group(1)), 1)
+
+
 def _get_pi_time_info(ssh):
     """
-    Reads the Pi's current date/time and whether NTP sync is active via
-    timedatectl. Returns a dict; raises on SSH/command failure so callers
-    can report a clear connection-level error.
+    Reads the Pi's current date/time, whether NTP sync is active (via
+    timedatectl), and its current CPU usage (via top). Returns a dict;
+    raises on SSH/command failure so callers can report a clear
+    connection-level error.
 
     NTP being active matters because if systemd-timesyncd (or chronyd) is
     running and synced, a manual `timedatectl set-time` either gets
@@ -345,10 +361,21 @@ def _get_pi_time_info(ssh):
     # fetching a Unix epoch and converting it through this Mac's timezone -
     # if the Mac and Pi are ever in different timezones (e.g. while
     # traveling), an epoch-based conversion would silently display the
-    # wrong wall-clock time for the Pi.
+    # wrong wall-clock time for the Pi. The CPU line is bundled into the
+    # same round trip (behind a marker line) rather than a separate poll,
+    # since this already runs every 15s regardless - but it runs FIRST,
+    # before the epoch is captured. `top -bn1` isn't instant, and the
+    # frontend compares that epoch against its own clock only after the
+    # full SSH round trip completes; capturing the epoch any earlier than
+    # "last thing this command does" would silently bake top's runtime
+    # (plus the time to ship the rest of the output back) into the
+    # apparent clock drift, even when the two clocks are actually in sync.
     stdin, stdout, stderr = ssh.exec_command(
+        "top -bn1 | grep -m1 '^%Cpu'; "
+        "echo '---time---'; "
         "timedatectl show --property=NTP --property=NTPSynchronized; "
-        "date '+%Y-%m-%d %H:%M:%S %Z'",
+        "date '+%Y-%m-%d %H:%M:%S %Z'; "
+        "date +%s",
         timeout=10,
     )
     exit_status = stdout.channel.recv_exit_status()
@@ -358,17 +385,24 @@ def _get_pi_time_info(ssh):
     if exit_status != 0:
         raise RuntimeError(err_text or "timedatectl/date command failed on the remote host.")
 
+    cpu_part, _, time_part = out_text.partition("---time---")
+
     info = {}
     pi_datetime_str = None
-    for line in out_text.splitlines():
+    pi_epoch = None
+    for line in time_part.splitlines():
         line = line.strip()
         if not line:
             continue
         if "=" in line and not line[0].isdigit():
             key, _, value = line.partition("=")
             info[key.strip()] = value.strip()
+        elif line.isdigit():
+            # The `date +%s` output line - a plain Unix timestamp, used by
+            # the frontend to detect clock drift against the Mac's clock.
+            pi_epoch = int(line)
         else:
-            # The `date` output line: "2026-06-26 20:46:58 IDT"
+            # The pretty `date` output line: "2026-06-26 20:46:58 IDT"
             pi_datetime_str = line
 
     ntp_active = info.get("NTP") == "yes"
@@ -376,8 +410,10 @@ def _get_pi_time_info(ssh):
 
     return {
         "pi_time": pi_datetime_str,
+        "pi_epoch": pi_epoch,
         "ntp_active": ntp_active,
         "ntp_synchronized": ntp_synced,
+        "cpu_percent": _parse_cpu_percent(cpu_part),
     }
 
 
@@ -1332,6 +1368,262 @@ def plot_data():
     })
 
 
+# ---------- Data Viewer (browse every run folder on the Pi) ----------
+
+DATA_VIEWER_PAGE_SIZE = 50
+
+# Run folders are plain timestamps (e.g. "20260706_185920") written by
+# runall.py - this is deliberately strict (not just "no dotdot") since
+# both this and the file relpath validator below feed straight into an
+# SFTP path built from client-controlled query params.
+_RUN_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+def _valid_run_name(run_name):
+    return bool(run_name) and bool(_RUN_NAME_RE.match(run_name))
+
+
+def _valid_csv_relpath(relpath):
+    """
+    Only allows the two shapes real files actually live at: a bare
+    "<name>.csv" in the run folder's root (vitals_summary/merged_data),
+    or "csv/<name>.csv" in its csv/ subfolder (per-sensor logs) - see
+    _find_latest_sensor_csv above, which reads from these same two
+    locations. Anything else (nested paths, "..", backslashes) is
+    rejected before it ever reaches sftp.open().
+    """
+    if not relpath or not relpath.endswith(".csv") or ".." in relpath or "\\" in relpath:
+        return False
+    parts = relpath.split("/")
+    if len(parts) == 1:
+        return True
+    return len(parts) == 2 and parts[0] == "csv"
+
+
+@app.route("/data_viewer/runs")
+def data_viewer_runs():
+    """
+    Lists every run folder under uri_aplogger/output on the Pi, newest
+    first - the full flight history, not just the latest run /plot_data
+    reads from.
+    """
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
+        sftp = state["sftp"]
+        output_dir = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}/output"
+        try:
+            entries = sftp.listdir(output_dir)
+        except IOError:
+            return jsonify({"ok": True, "runs": []})
+
+        runs = []
+        for name in entries:
+            if not _valid_run_name(name):
+                continue
+            try:
+                if stat.S_ISDIR(sftp.stat(f"{output_dir}/{name}").st_mode):
+                    runs.append(name)
+            except IOError:
+                continue
+
+    return jsonify({"ok": True, "runs": sorted(runs, reverse=True)})
+
+
+def _list_run_csv_files(sftp, run_dir):
+    """
+    Returns [(relpath, size_bytes), ...] for every .csv file directly in
+    the run folder root (vitals_summary/merged_data) and in its csv/
+    subfolder (per-sensor logs) - the same two locations
+    _find_latest_sensor_csv already knows about.
+    """
+    files = []
+    try:
+        for name in sftp.listdir(run_dir):
+            if name.endswith(".csv"):
+                files.append((name, sftp.stat(f"{run_dir}/{name}").st_size))
+    except IOError:
+        pass
+    try:
+        for name in sftp.listdir(f"{run_dir}/csv"):
+            if name.endswith(".csv"):
+                files.append((f"csv/{name}", sftp.stat(f"{run_dir}/csv/{name}").st_size))
+    except IOError:
+        pass
+    return sorted(files)
+
+
+@app.route("/data_viewer/files")
+def data_viewer_files():
+    run_name = (request.args.get("run") or "").strip()
+    if not _valid_run_name(run_name):
+        return jsonify({"ok": False, "error": "Invalid run name."}), 400
+
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
+        run_dir = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}/output/{run_name}"
+        files = _list_run_csv_files(state["sftp"], run_dir)
+
+    return jsonify({
+        "ok": True,
+        "run": run_name,
+        "files": [{"path": path, "size": size} for path, size in files],
+    })
+
+
+def _read_remote_csv(run_name, relpath):
+    """
+    Shared by the table and plot endpoints: validates run/file, reads
+    the CSV over SFTP, and returns its raw decoded text. Returns
+    (raw_text, None) on success or (None, (json_response, status)) on
+    any failure, so callers can just `return err` and stop.
+    """
+    if not _valid_run_name(run_name):
+        return None, (jsonify({"ok": False, "error": "Invalid run name."}), 400)
+    if not _valid_csv_relpath(relpath):
+        return None, (jsonify({"ok": False, "error": "Invalid file path."}), 400)
+
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return None, (jsonify({"ok": False, "error": "Not connected to remote host."}), 400)
+        csv_path = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}/output/{run_name}/{relpath}"
+        try:
+            with state["sftp"].open(csv_path, "r") as f:
+                raw = f.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            _mark_disconnected()
+            return None, (jsonify({"ok": False, "error": f"Could not read {relpath}: {e}"}), 500)
+
+    return raw, None
+
+
+@app.route("/data_viewer/table")
+def data_viewer_table():
+    """
+    Returns one page (DATA_VIEWER_PAGE_SIZE rows) of the requested CSV,
+    plus its full column list and, for each column, whether it's
+    numeric - computed over every row (not just this page), since the
+    whole file is already in memory to compute total_rows/total_pages
+    anyway. The frontend uses that flag to decide which columns are
+    worth offering in the plot dropdown.
+    """
+    run_name = (request.args.get("run") or "").strip()
+    relpath = (request.args.get("file") or "").strip()
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except ValueError:
+        page = 1
+
+    raw, err = _read_remote_csv(run_name, relpath)
+    if err:
+        return err
+
+    all_rows = list(csv.reader(io.StringIO(raw)))
+    if not all_rows:
+        return jsonify({
+            "ok": True, "run": run_name, "file": relpath,
+            "columns": [], "column_numeric": [], "rows": [],
+            "total_rows": 0, "page": 1, "page_size": DATA_VIEWER_PAGE_SIZE, "total_pages": 1,
+        })
+
+    columns = all_rows[0]
+    data_rows = all_rows[1:]
+    total_rows = len(data_rows)
+    total_pages = max(1, math.ceil(total_rows / DATA_VIEWER_PAGE_SIZE))
+    page = min(page, total_pages)
+    start = (page - 1) * DATA_VIEWER_PAGE_SIZE
+    page_rows = data_rows[start:start + DATA_VIEWER_PAGE_SIZE]
+
+    # A column counts as numeric (and so gets offered in the plot's
+    # column dropdown) if at least half of its non-empty values parse as
+    # a float. Checked against the whole file rather than just this
+    # page - many of these CSVs (especially merged_data's per-sensor
+    # columns) are mostly blank except when that specific sensor
+    # happened to report on that particular merged row.
+    column_numeric = []
+    for col_idx in range(len(columns)):
+        seen = numeric = 0
+        for row in data_rows:
+            if col_idx >= len(row):
+                continue
+            val = row[col_idx].strip()
+            if not val:
+                continue
+            seen += 1
+            try:
+                float(val)
+                numeric += 1
+            except ValueError:
+                pass
+        column_numeric.append(seen > 0 and (numeric / seen) >= 0.5)
+
+    return jsonify({
+        "ok": True,
+        "run": run_name,
+        "file": relpath,
+        "columns": columns,
+        "column_numeric": column_numeric,
+        "rows": page_rows,
+        "total_rows": total_rows,
+        "page": page,
+        "page_size": DATA_VIEWER_PAGE_SIZE,
+        "total_pages": total_pages,
+    })
+
+
+@app.route("/data_viewer/plot")
+def data_viewer_plot():
+    """
+    Returns every parseable (timestamp, value) pair for one column of
+    the requested CSV - full resolution, not trimmed like /plot_data's
+    live view, since this is a static historical file rather than an
+    ever-growing live one. The first column is always used as the time
+    axis; every real CSV these tools write (vitals_summary, merged_data,
+    and each per-sensor log) leads with a Timestamp-like column.
+    """
+    run_name = (request.args.get("run") or "").strip()
+    relpath = (request.args.get("file") or "").strip()
+    column = (request.args.get("column") or "").strip()
+
+    raw, err = _read_remote_csv(run_name, relpath)
+    if err:
+        return err
+    if not column:
+        return jsonify({"ok": False, "error": "A column is required."}), 400
+
+    reader = csv.DictReader(io.StringIO(raw))
+    fieldnames = reader.fieldnames or []
+    if column not in fieldnames:
+        return jsonify({"ok": False, "error": f'Column "{column}" not found in this file.'}), 400
+    time_column = fieldnames[0]
+
+    points = []
+    max_decimals = 0
+    for row in reader:
+        ts = row.get(time_column)
+        raw_val = (row.get(column) or "").strip()
+        if not ts or not raw_val:
+            continue
+        try:
+            value = float(raw_val)
+        except ValueError:
+            continue
+        points.append({"t": ts, "v": value})
+        if "." in raw_val:
+            max_decimals = max(max_decimals, min(4, len(raw_val.split(".")[-1])))
+
+    return jsonify({
+        "ok": True,
+        "run": run_name,
+        "file": relpath,
+        "column": column,
+        "time_column": time_column,
+        "points": points,
+        "decimals": max_decimals,
+    })
+
+
 @app.route("/run_c_app", methods=["POST"])
 def run_c_app():
     with state["lock"]:
@@ -1664,23 +1956,7 @@ def disconnect():
     return jsonify({"ok": True})
 
 
-def _open_in_safari():
-    """
-    Opens http://127.0.0.1:5000 in Safari specifically (not just whatever
-    the default browser is). Falls back to the system default browser if
-    Safari isn't registered/available (e.g. running this on non-macOS).
-    """
-    url = "http://127.0.0.1:5000"
-    try:
-        webbrowser.get("safari").open(url)
-    except webbrowser.Error:
-        webbrowser.open(url)
-
-
 if __name__ == "__main__":
-    # Delay slightly so the browser doesn't try to connect before the
-    # Flask dev server is actually listening.
-    threading.Timer(1.0, _open_in_safari).start()
     # threaded=True matters now that /terminal_ws can hold a connection
     # open indefinitely (an interactive shell session) - without it, the
     # single-threaded dev server would serialize every request behind
