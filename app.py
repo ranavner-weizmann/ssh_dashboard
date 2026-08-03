@@ -8,7 +8,12 @@ Also supports downloading the full data set (logger output, drone data,
 and notes) from the remote machine into a local folder.
 
 Run with:  python app.py
-Then open: http://127.0.0.1:5000
+Then open: http://127.0.0.1:5050
+
+(Deliberately not port 5000 - macOS's AirPlay Receiver listens there by
+default and intercepts the connection before Flask ever sees it, which
+shows up as an inexplicable 403 in the browser rather than a connection
+error.)
 
 Can also be packaged as a double-clickable macOS .app with PyInstaller;
 see build_app.sh / app.spec in the same project for the build steps.
@@ -25,6 +30,7 @@ import stat
 import sys
 import threading
 import time
+import webbrowser
 from datetime import datetime
 
 import paramiko
@@ -1956,10 +1962,32 @@ def disconnect():
     return jsonify({"ok": True})
 
 
+def _open_in_chrome():
+    """
+    Opens http://127.0.0.1:5050 in a new Chrome tab specifically (not
+    just whatever the default browser is). Falls back to the system
+    default browser if Chrome isn't registered/available.
+
+    Uses `tell application "chrome" to open location ...` (via
+    webbrowser's macOS AppleScript backend) rather than `open -a
+    "Google Chrome" url` - the AppleScript "open location" Apple Event
+    is what makes Chrome open a fresh new tab in the frontmost window
+    each time, instead of just re-focusing an existing matching tab.
+    """
+    url = "http://127.0.0.1:5050"
+    try:
+        webbrowser.get("chrome").open(url)
+    except webbrowser.Error:
+        webbrowser.open(url)
+
+
 if __name__ == "__main__":
+    # Delay slightly so the browser doesn't try to connect before the
+    # Flask dev server is actually listening.
+    threading.Timer(1.0, _open_in_chrome).start()
     # threaded=True matters now that /terminal_ws can hold a connection
     # open indefinitely (an interactive shell session) - without it, the
     # single-threaded dev server would serialize every request behind
     # whichever terminal happens to be open, freezing notes/pi_time/runall
     # polling for as long as that session lasts.
-    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
+    app.run(host="127.0.0.1", port=5050, debug=False, threaded=True)
