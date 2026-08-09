@@ -614,6 +614,29 @@ def run_all_sensors():
         if not state["connected"] or not state["ssh"]:
             return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
 
+        # Check the pidfile on the Pi itself rather than trusting
+        # state["runall_pid"] - that's only kept fresh by the /runall_output
+        # poll, so it can still say "not running" even though runall.py is
+        # genuinely running (started from another dashboard session, or by
+        # hand over SSH). Launching a second instance on top of a live one
+        # isn't safe: both would fight over the same serial ports/USB
+        # devices, so this has to block it regardless of how the first one
+        # was started.
+        try:
+            already_running, live_pid = _check_runall_running(state["ssh"])
+        except Exception as e:
+            _mark_disconnected()
+            return jsonify({"ok": False, "error": f"Could not check runall.py status: {e}"}), 500
+
+        if already_running:
+            state["runall_pid"] = live_pid
+            return jsonify({
+                "ok": False,
+                "already_running": True,
+                "error": f"runall.py is already running (PID {live_pid}) - stop it before starting again.",
+                "pid": live_pid,
+            }), 409
+
         try:
             success, out_text, err_text = _run_remote_runall(state["ssh"])
         except Exception as e:
@@ -813,12 +836,26 @@ def stop_runall():
     with state["lock"]:
         if not state["connected"] or not state["ssh"]:
             return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
-
-        pid = state.get("runall_pid")
-        if not pid:
-            return jsonify({"ok": False, "error": "No runall.py process is currently tracked."}), 400
-
         ssh = state["ssh"]
+        pid = state.get("runall_pid")
+
+    if not pid:
+        # state["runall_pid"] is only kept fresh by the /runall_output poll,
+        # so it can still be empty right after connecting even though
+        # runall.py is genuinely running (started elsewhere). Read the
+        # pidfile straight off the Pi before giving up, so Stop works
+        # regardless of how/who started it.
+        try:
+            running, live_pid = _check_runall_running(ssh)
+        except Exception as e:
+            with state["lock"]:
+                _mark_disconnected()
+            return jsonify({"ok": False, "error": f"Could not check runall.py status: {e}"}), 500
+        if not running:
+            return jsonify({"ok": False, "error": "runall.py is not currently running."}), 400
+        pid = live_pid
+        with state["lock"]:
+            state["runall_pid"] = pid
 
     # Deliberately outside the lock: a clean SIGINT shutdown of runall.py
     # (vitals -> merger -> each sensor) can legitimately take up to ~45s,

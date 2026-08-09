@@ -1293,12 +1293,13 @@ function showNotesView(data) {
   startTimeSync();
   startPlotPolling();
   startConnectionHealthCheck();
-  // Covers reconnecting / reloading the page while runall.py is still
-  // running on the Pi - without this, the UI would default to "not
-  // running" with Run All enabled, inviting a second instance to be
-  // started alongside the one already going.
   refreshRunallLogList();
-  refreshRunAllOutput();
+  // Keeps polling runall.py's live status for as long as you're connected
+  // (not just right after this page loads) - see the comment in
+  // refreshRunAllOutput() for why: it's what notices runall.py running
+  // (or not) regardless of how/when it was actually started, so Run/Stop
+  // stay accurate and a reload or reconnect never shows a stale guess.
+  startRunallPolling();
   refreshSensorConfig();
   refreshDvRuns();
 }
@@ -1321,6 +1322,7 @@ function showConnectView() {
   stopTimeSync();
   stopPlotPolling();
   stopConnectionHealthCheck();
+  stopRunallPolling();
   disconnectTerminal();
   document.getElementById('sensor-config-list').innerHTML = '';
   document.getElementById('sensor-config-status').textContent = 'Connect to load the sensor list.';
@@ -1518,6 +1520,16 @@ async function runAllSensors() {
       startRunallPolling();
       setTimeout(refreshRunallLogList, 4000);
       return; // skip the `finally` re-enable below; setRunallButtonsRunning already set the right state
+    } else if (data.already_running) {
+      // Someone/something else already has it running (another dashboard
+      // session, or started by hand over SSH) - the backend refused to
+      // launch a second instance on top of it. Reflect that as "running",
+      // not as an error: the button should end up disabled either way.
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--ok)';
+      setRunallButtonsRunning(true);
+      startRunallPolling();
+      return;
     } else {
       statusEl.textContent = data.error;
       statusEl.style.color = 'var(--err)';
@@ -1568,14 +1580,16 @@ async function refreshRunAllOutput() {
       if (data.running) {
         statusEl.textContent = `runall.py is running (PID ${data.pid}).`;
         statusEl.style.color = 'var(--ok)';
-        if (!runallPollInterval) {
-          runallPollInterval = setInterval(refreshRunAllOutput, 3000);
-        }
       } else {
         statusEl.textContent = 'runall.py is not currently running.';
         statusEl.style.color = 'var(--text-dim)';
-        stopRunallPolling();
       }
+      // Deliberately doesn't stop polling here just because it's not
+      // running right now - this poll (see startRunallPolling, kicked off
+      // as soon as the notes view opens) is what notices runall.py getting
+      // started by someone/something else, so it needs to keep running
+      // the whole time you're connected, not just while a run is believed
+      // to be in progress.
     } else {
       statusEl.textContent = data.error;
       statusEl.style.color = 'var(--err)';
@@ -1607,9 +1621,11 @@ async function stopRunAllSensors() {
     if (data.ok) {
       statusEl.textContent = data.message;
       statusEl.style.color = 'var(--ok)';
-      stopRunallPolling();
       setRunallButtonsRunning(false);
-      // One last fetch to show the final tail of output after it stopped.
+      // Deliberately leaves the poll running rather than stopping it -
+      // see the comment in refreshRunAllOutput(): it needs to keep
+      // watching for as long as you're connected, in case runall.py gets
+      // started again by something other than this dashboard.
       await refreshRunAllOutput();
     } else {
       // Still running (even SIGKILL didn't land, or some other failure) -
