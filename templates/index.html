@@ -1690,7 +1690,7 @@ function resetToDisconnectedUI(statusMessage) {
   showConnectView();
 }
 
-async function disconnectSession() {
+function disconnectSession() {
   stopAutoReconnect();
   stopRunallPolling();
   // Reset the UI first, then tell the backend - the old order awaited the
@@ -1699,11 +1699,14 @@ async function disconnectSession() {
   // appeared to do nothing at all. Disconnecting locally should never be
   // hostage to the remote side answering.
   resetToDisconnectedUI();
-  try {
-    await fetch('/disconnect', { method: 'POST' });
-  } catch (e) {
-    // Best-effort - the backend also notices dead links on its own.
-  }
+  // sendBeacon, not fetch: a fetch() this page kicks off and doesn't wait
+  // on gets silently cancelled the instant the page navigates away, which
+  // is exactly what a quick refresh right after clicking Disconnect does -
+  // the backend never actually received the request, so state["connected"]
+  // stayed true and the reloaded page reopened the "disconnected" session
+  // right back up. sendBeacon is built for this: it's explicitly
+  // guaranteed to still be sent even if the page unloads immediately after.
+  navigator.sendBeacon('/disconnect');
 }
 
 // ---------- Connection health check ----------
