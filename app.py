@@ -1276,6 +1276,34 @@ PLOT_SENSORS = {
         "scale": 1.0,
         "in_run_root": True,
     },
+    "trisonica": {
+        "label": "Wind Speed (Trisonica)",
+        "csv_prefix": "trisonica_data_",
+        "value_column": "Wind_Speed",
+        "unit": "m/s",
+        "scale": 1.0,
+    },
+    "pops": {
+        "label": "Particle Conc. (POPS)",
+        "csv_prefix": "pops_data_",
+        "value_column": "PartCon",
+        "unit": "#/cm³",
+        "scale": 1.0,
+    },
+    "partector2pro": {
+        "label": "Particle Conc. (Partector2Pro)",
+        "csv_prefix": "partector2pro_data_",
+        "value_column": "number_cm3",
+        "unit": "#/cm³",
+        "scale": 1.0,
+    },
+    "miniaeth": {
+        "label": "Black Carbon (MiniAeth)",
+        "csv_prefix": "miniaeth_data_",
+        "value_column": "IR_BCc",
+        "unit": "ng/m³",
+        "scale": 1.0,
+    },
 }
 
 
@@ -1657,11 +1685,28 @@ def run_c_app():
         })
 
 
-def sftp_count_files(sftp, remote_dir):
+def _local_file_matches(local_path, remote_size):
     """
-    Recursively count files (not directories) under remote_dir.
-    Returns 0 if remote_dir doesn't exist (missing sources don't error here;
-    that's handled the same way during the actual download).
+    True if local_path already exists and is the same size as the remote
+    file - the signal this app uses to decide a file doesn't need
+    re-downloading. These logger CSVs are append-only, so a size match is
+    a reliable (and cheap - no extra SFTP round trip beyond the listing we
+    already fetch) stand-in for "unchanged".
+    """
+    try:
+        return os.path.getsize(local_path) == remote_size
+    except OSError:
+        return False
+
+
+def sftp_count_files(sftp, remote_dir, local_dir=None):
+    """
+    Recursively count files (not directories) under remote_dir that still
+    need downloading - i.e. don't already exist locally with a matching
+    size (see _local_file_matches). Pass local_dir=None to count every
+    file unconditionally. Returns 0 if remote_dir doesn't exist (missing
+    sources don't error here; that's handled the same way during the
+    actual download).
     """
     count = 0
     try:
@@ -1671,29 +1716,34 @@ def sftp_count_files(sftp, remote_dir):
 
     for entry in entries:
         remote_path = f"{remote_dir}/{entry.filename}"
+        local_path = os.path.join(local_dir, entry.filename) if local_dir else None
         if stat.S_ISDIR(entry.st_mode):
-            count += sftp_count_files(sftp, remote_path)
-        else:
+            count += sftp_count_files(sftp, remote_path, local_path)
+        elif not (local_path and _local_file_matches(local_path, entry.st_size)):
             count += 1
     return count
 
 
 def sftp_download_dir(sftp, remote_dir, local_dir, on_file_done=None):
     """
-    Recursively download remote_dir (and all its contents) into local_dir.
-    Returns (file_count, error_or_none). Skips silently if remote_dir
-    doesn't exist (treated as 0 files, no error) so a missing source
-    doesn't block the others. Calls on_file_done() after each successful
-    file download, for progress tracking.
+    Recursively download remote_dir (and all its contents) into local_dir,
+    skipping any file that already exists locally with a matching size
+    (see _local_file_matches) - so downloading the same target folder
+    again only pulls new or changed files instead of the whole tree.
+    Returns (downloaded_count, skipped_count, error_or_none). Skips
+    silently if remote_dir doesn't exist (treated as 0 files, no error) so
+    a missing source doesn't block the others. Calls on_file_done() after
+    each successful download, for progress tracking.
     """
-    file_count = 0
+    downloaded = 0
+    skipped = 0
 
     try:
         entries = sftp.listdir_attr(remote_dir)
     except FileNotFoundError:
-        return 0, None
+        return 0, 0, None
     except IOError:
-        return 0, None
+        return 0, 0, None
 
     os.makedirs(local_dir, exist_ok=True)
 
@@ -1702,20 +1752,23 @@ def sftp_download_dir(sftp, remote_dir, local_dir, on_file_done=None):
         local_path = os.path.join(local_dir, entry.filename)
 
         if stat.S_ISDIR(entry.st_mode):
-            sub_count, err = sftp_download_dir(sftp, remote_path, local_path, on_file_done)
+            sub_down, sub_skip, err = sftp_download_dir(sftp, remote_path, local_path, on_file_done)
             if err:
-                return file_count, err
-            file_count += sub_count
+                return downloaded, skipped, err
+            downloaded += sub_down
+            skipped += sub_skip
+        elif _local_file_matches(local_path, entry.st_size):
+            skipped += 1
         else:
             try:
                 sftp.get(remote_path, local_path)
-                file_count += 1
+                downloaded += 1
                 if on_file_done:
                     on_file_done()
             except Exception as e:
-                return file_count, f"Failed downloading {remote_path}: {e}"
+                return downloaded, skipped, f"Failed downloading {remote_path}: {e}"
 
-    return file_count, None
+    return downloaded, skipped, None
 
 
 @app.route("/check_download_folder", methods=["POST"])
@@ -1741,11 +1794,18 @@ def _run_download_job(sftp, target_root, name):
     """
     try:
         with state["lock"]:
-            # Phase 1: count total files across all sources (for the progress bar denominator)
+            # Phase 1: count files across all sources that still need
+            # downloading - i.e. don't already exist in target_root with a
+            # matching size - for the progress bar denominator. Files
+            # already present locally are excluded here rather than just
+            # fast-forwarded through in phase 2, so the progress bar (and
+            # "X / Y files") reflects the actual work left to do on a
+            # repeat download into the same folder.
             total = 0
-            for remote_subpath, _ in DOWNLOAD_SOURCES:
+            for remote_subpath, local_name in DOWNLOAD_SOURCES:
                 remote_full = f"{REMOTE_DIR}/{remote_subpath}"
-                total += sftp_count_files(sftp, remote_full)
+                local_full = os.path.join(target_root, local_name)
+                total += sftp_count_files(sftp, remote_full, local_full)
 
             with download_state["lock"]:
                 download_state["total_files"] = total
@@ -1764,11 +1824,12 @@ def _run_download_job(sftp, target_root, name):
                 remote_full = f"{REMOTE_DIR}/{remote_subpath}"
                 local_full = os.path.join(target_root, local_name)
 
-                count, err = sftp_download_dir(sftp, remote_full, local_full, on_file_done)
+                downloaded, skipped, err = sftp_download_dir(sftp, remote_full, local_full, on_file_done)
                 results.append({
                     "source": remote_subpath,
                     "local_folder": local_name,
-                    "file_count": count,
+                    "file_count": downloaded,
+                    "skipped_count": skipped,
                     "error": err,
                 })
 

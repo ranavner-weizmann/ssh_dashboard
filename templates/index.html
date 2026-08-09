@@ -953,13 +953,17 @@
           <div class="plot-toolbar">
             <label style="margin-bottom: 0;">live plot</label>
             <select id="plot-sensor-select-1" class="select-input">
-              <option value="pom">Ozone (POM)</option>
+              <option value="pom" selected>Ozone (POM)</option>
               <option value="imet">Temperature (iMet)</option>
               <option value="cavity">Inline Pressure (Cavity)</option>
               <option value="teca">Tec Current</option>
               <option value="tect">Tec Temperature</option>
               <option value="rhi">RH inline</option>
               <option value="intensity">Max Intensity</option>
+              <option value="trisonica">Wind Speed (Trisonica)</option>
+              <option value="pops">Particle Conc. (POPS)</option>
+              <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="miniaeth">Black Carbon (MiniAeth)</option>
             </select>
           </div>
           <div class="plot-header">
@@ -986,6 +990,10 @@
               <option value="tect">Tec Temperature</option>
               <option value="rhi">RH inline</option>
               <option value="intensity">Max Intensity</option>
+              <option value="trisonica">Wind Speed (Trisonica)</option>
+              <option value="pops">Particle Conc. (POPS)</option>
+              <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="miniaeth">Black Carbon (MiniAeth)</option>
             </select>
           </div>
           <div class="plot-header">
@@ -998,6 +1006,66 @@
           <div class="plot-canvas-wrap">
             <canvas id="plot-canvas-2" class="plot-canvas-el"></canvas>
             <div class="plot-tooltip" id="plot-tooltip-2"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="plot-toolbar">
+            <label style="margin-bottom: 0;">live plot</label>
+            <select id="plot-sensor-select-3" class="select-input">
+              <option value="pom">Ozone (POM)</option>
+              <option value="imet">Temperature (iMet)</option>
+              <option value="cavity">Inline Pressure (Cavity)</option>
+              <option value="teca">Tec Current</option>
+              <option value="tect">Tec Temperature</option>
+              <option value="rhi">RH inline</option>
+              <option value="intensity">Max Intensity</option>
+              <option value="trisonica" selected>Wind Speed (Trisonica)</option>
+              <option value="pops">Particle Conc. (POPS)</option>
+              <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="miniaeth">Black Carbon (MiniAeth)</option>
+            </select>
+          </div>
+          <div class="plot-header">
+            <div>
+              <span class="plot-stat-value" id="plot-stat-value-3">--</span>
+              <span class="plot-stat-unit" id="plot-stat-unit-3"></span>
+            </div>
+            <div class="hint" id="plot-status-3"></div>
+          </div>
+          <div class="plot-canvas-wrap">
+            <canvas id="plot-canvas-3" class="plot-canvas-el"></canvas>
+            <div class="plot-tooltip" id="plot-tooltip-3"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="plot-toolbar">
+            <label style="margin-bottom: 0;">live plot</label>
+            <select id="plot-sensor-select-4" class="select-input">
+              <option value="pom">Ozone (POM)</option>
+              <option value="imet">Temperature (iMet)</option>
+              <option value="cavity">Inline Pressure (Cavity)</option>
+              <option value="teca">Tec Current</option>
+              <option value="tect">Tec Temperature</option>
+              <option value="rhi">RH inline</option>
+              <option value="intensity">Max Intensity</option>
+              <option value="trisonica">Wind Speed (Trisonica)</option>
+              <option value="pops" selected>Particle Conc. (POPS)</option>
+              <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="miniaeth">Black Carbon (MiniAeth)</option>
+            </select>
+          </div>
+          <div class="plot-header">
+            <div>
+              <span class="plot-stat-value" id="plot-stat-value-4">--</span>
+              <span class="plot-stat-unit" id="plot-stat-unit-4"></span>
+            </div>
+            <div class="hint" id="plot-status-4"></div>
+          </div>
+          <div class="plot-canvas-wrap">
+            <canvas id="plot-canvas-4" class="plot-canvas-el"></canvas>
+            <div class="plot-tooltip" id="plot-tooltip-4"></div>
           </div>
         </div>
       </div>
@@ -1057,7 +1125,7 @@
           <select id="dv-file-select" class="select-input" onchange="onDvFileChange()" disabled>
             <option value="">Select a file...</option>
           </select>
-          <button class="btn-ghost" style="width: auto; white-space: nowrap;" onclick="refreshDvRuns()">Refresh</button>
+          <button class="btn-ghost" style="width: auto; white-space: nowrap;" onclick="refreshDvRuns(true)">Refresh</button>
         </div>
         <div class="hint" id="dv-status">Connect, then pick a run folder to explore.</div>
       </div>
@@ -1684,11 +1752,11 @@ function showOverwriteConfirm(name, path) {
   document.getElementById('modal-title').textContent = 'Folder already exists';
   document.getElementById('modal-body').innerHTML = `
     <p><b>${escapeHtml(name)}</b> already exists in <code>downloaded_outputs</code>.<br><br>
-    Overwrite the existing files, or go back and choose a different name?</p>
+    Files already there will be reused as-is; only new or changed files will actually be downloaded. Continue into this folder, or go back and choose a different name?</p>
   `;
   document.getElementById('modal-actions').innerHTML = `
     <button class="btn-ghost" onclick="startDownload()">Choose different name</button>
-    <button class="btn-primary" style="width:auto;" onclick="confirmOverwrite('${name.replace(/'/g, "\\'")}')">Overwrite</button>
+    <button class="btn-primary" style="width:auto;" onclick="confirmOverwrite('${name.replace(/'/g, "\\'")}')">Continue</button>
   `;
 }
 
@@ -1782,7 +1850,8 @@ async function pollDownloadProgress() {
       if (r.error) {
         return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="err">error: ${escapeHtml(r.error)}</span></div>`;
       }
-      return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="ok">${r.file_count} file(s)</span></div>`;
+      const skipLabel = r.skipped_count ? `, ${r.skipped_count} unchanged (skipped)` : '';
+      return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="ok">${r.file_count} downloaded${skipLabel}</span></div>`;
     }).join('');
 
     resultsEl.innerHTML = `
@@ -1971,7 +2040,10 @@ const PLOT_PADDING = { top: 16, right: 16, bottom: 24, left: 46 };
 // The vitals-summary columns: TECA carries ~6 decimals of current but 3
 // is plenty to read a trend; TECT has 3; RHi is written with 1; the
 // spectrometer's max intensity is an integer count.
-const PLOT_DECIMALS = { pom: 1, imet: 2, cavity: 1, teca: 3, tect: 2, rhi: 1, intensity: 0 };
+const PLOT_DECIMALS = {
+  pom: 1, imet: 2, cavity: 1, teca: 3, tect: 2, rhi: 1, intensity: 0,
+  trisonica: 2, pops: 1, partector2pro: 0, miniaeth: 1,
+};
 
 function plotTimeOnly(ts) {
   // "2026-07-06 15:15:11" -> "15:15:11"
@@ -2302,6 +2374,8 @@ function createStaticPlotController(canvasId, tooltipId) {
 const plotControllers = [
   createPlotController('-1', 'pom'),
   createPlotController('-2', 'imet'),
+  createPlotController('-3', 'trisonica'),
+  createPlotController('-4', 'pops'),
 ];
 
 function startPlotPolling() {
@@ -2348,17 +2422,31 @@ function dvFormatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-async function refreshDvRuns() {
+async function refreshDvRuns(preserveSelection = false) {
   const runSelect = document.getElementById('dv-run-select');
   const statusEl = document.getElementById('dv-status');
 
-  runSelect.innerHTML = '<option value="">Select a run...</option>';
-  document.getElementById('dv-file-select').innerHTML = '<option value="">Select a file...</option>';
-  document.getElementById('dv-file-select').disabled = true;
-  dvState.run = null;
-  dvState.file = null;
-  dvClearTable();
-  dvClearPlot();
+  // The "Refresh" button (preserveSelection=true) re-fetches the run and
+  // file lists (so a run that just appeared shows up) but keeps whatever
+  // run/file/page/column were already picked, instead of dropping back to
+  // the dropdown-selection screen every time - the whole point being to
+  // pick up newly-appended rows in the file you're already looking at
+  // without re-choosing it. Plain page-load calls this with no argument,
+  // which keeps the original reset-everything behavior.
+  const keepRun = preserveSelection ? dvState.run : null;
+  const keepFile = preserveSelection ? dvState.file : null;
+  const keepPage = preserveSelection ? dvState.page : 1;
+  const keepColumn = preserveSelection ? document.getElementById('dv-column-select').value : null;
+
+  if (!preserveSelection) {
+    runSelect.innerHTML = '<option value="">Select a run...</option>';
+    document.getElementById('dv-file-select').innerHTML = '<option value="">Select a file...</option>';
+    document.getElementById('dv-file-select').disabled = true;
+    dvState.run = null;
+    dvState.file = null;
+    dvClearTable();
+    dvClearPlot();
+  }
 
   try {
     const res = await fetch('/data_viewer/runs');
@@ -2368,12 +2456,27 @@ async function refreshDvRuns() {
       statusEl.style.color = 'var(--err)';
       return;
     }
+
+    runSelect.innerHTML = '<option value="">Select a run...</option>';
     data.runs.forEach((name) => {
       const opt = document.createElement('option');
       opt.value = name;
       opt.textContent = dvFormatRunLabel(name);
       runSelect.appendChild(opt);
     });
+
+    if (keepRun && data.runs.includes(keepRun)) {
+      runSelect.value = keepRun;
+      await onDvRunChange(keepFile, keepPage, keepColumn);
+      return;
+    }
+
+    document.getElementById('dv-file-select').innerHTML = '<option value="">Select a file...</option>';
+    document.getElementById('dv-file-select').disabled = true;
+    dvState.run = null;
+    dvState.file = null;
+    dvClearTable();
+    dvClearPlot();
     statusEl.textContent = data.runs.length
       ? `${data.runs.length} run folder${data.runs.length === 1 ? '' : 's'} found - pick one to explore.`
       : 'No run folders found yet on the Pi - start Run All Sensors first.';
@@ -2384,7 +2487,7 @@ async function refreshDvRuns() {
   }
 }
 
-async function onDvRunChange() {
+async function onDvRunChange(keepFile = null, keepPage = 1, keepColumn = null) {
   const run = document.getElementById('dv-run-select').value;
   dvState.run = run || null;
   dvState.file = null;
@@ -2417,6 +2520,19 @@ async function onDvRunChange() {
       fileSelect.appendChild(opt);
     });
     fileSelect.disabled = false;
+
+    const filePaths = data.files.map((f) => f.path);
+    if (keepFile && filePaths.includes(keepFile)) {
+      fileSelect.value = keepFile;
+      dvState.file = keepFile;
+      await dvGoToPage(keepPage || 1);
+      if (keepColumn && dvState.columns.includes(keepColumn)) {
+        document.getElementById('dv-column-select').value = keepColumn;
+        await onDvColumnChange();
+      }
+      return;
+    }
+
     statusEl.textContent = `${data.files.length} CSV file${data.files.length === 1 ? '' : 's'} in this run - pick one.`;
     statusEl.style.color = 'var(--text-dim)';
   } catch (e) {

@@ -70,12 +70,14 @@ downloaded_outputs/<your subfolder name>/
 you use this feature.
 
 - If the subfolder name you choose already exists, the dashboard asks
-   whether to **overwrite** the existing files or **choose a different name**.
-- Every click re-downloads everything from scratch (no incremental sync),
-   so this may take a while for large folders.
-- A progress bar shows real progress: the app first counts all files across
-   the three sources, then updates the bar as each file finishes downloading
-   (the browser polls the local app for status roughly twice a second).
+   whether to **continue** into it or **choose a different name**.
+- Downloads are incremental: a file already present locally with the same
+   size as the remote copy is skipped, so re-downloading into the same
+   subfolder only pulls new or changed files instead of starting over.
+- A progress bar shows real progress: the app first counts the files that
+   still need downloading (excluding ones already matched locally), then
+   updates the bar as each one finishes (the browser polls the local app
+   for status roughly twice a second).
 - If one of the three remote source folders doesn't exist, it's skipped
    silently (0 files) rather than failing the whole download — check the
    per-folder results shown after the download finishes to confirm what
