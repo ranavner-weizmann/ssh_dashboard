@@ -1304,7 +1304,23 @@ PLOT_SENSORS = {
         "unit": "ng/m³",
         "scale": 1.0,
     },
+    # Unlike every sensor above, drone telemetry doesn't live inside a
+    # uri_aplogger run folder - it's written by the separate PSDK C app
+    # straight into data_from_drone/ as flat telemetry_*.csv files, so it
+    # needs the different "drone_telemetry" lookup in /plot_data below.
+    # Its own CSV also spells the time column "timestamp" (lowercase),
+    # unlike every uri_aplogger sensor's "Timestamp".
+    "altitude_agl": {
+        "label": "Altitude AGL (Drone)",
+        "unit": "m",
+        "scale": 1.0,
+        "value_column": "altitude_agl_m",
+        "time_column": "timestamp",
+        "source": "drone_telemetry",
+    },
 }
+
+DRONE_TELEMETRY_DIR = f"{REMOTE_DIR}/data_from_drone"
 
 
 def _find_latest_run_dir(sftp, remote_dir):
@@ -1336,6 +1352,31 @@ def _find_latest_sensor_csv(sftp, remote_dir, run_dir_name, csv_prefix, in_run_r
     return f"{csv_dir}/{matches[-1]}" if matches else None
 
 
+def _find_latest_drone_telemetry_csv(sftp):
+    """
+    Returns the path to the most recently *written* telemetry_*.csv in
+    data_from_drone/, or None if there isn't one yet. That folder is flat
+    (no per-run subfolders like uri_aplogger/output), so this can't reuse
+    _find_latest_run_dir/_find_latest_sensor_csv.
+
+    Picked by mtime rather than the timestamp embedded in the filename -
+    unlike the uri_aplogger run folder names (a trustworthy sort key since
+    runall.py stamps them itself right when it starts), a handful of these
+    files carry stale filename timestamps left over from before the Pi's
+    clock was fixed, so mtime is the only reliable way to find the file
+    actually being written to by the current flight.
+    """
+    try:
+        entries = sftp.listdir_attr(DRONE_TELEMETRY_DIR)
+    except IOError:
+        return None
+    matches = [e for e in entries if e.filename.startswith("telemetry_") and e.filename.endswith(".csv")]
+    if not matches:
+        return None
+    latest = max(matches, key=lambda e: e.st_mtime)
+    return f"{DRONE_TELEMETRY_DIR}/{latest.filename}"
+
+
 @app.route("/plot_data")
 def plot_data():
     """
@@ -1353,19 +1394,25 @@ def plot_data():
         if not state["connected"] or not state["sftp"]:
             return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
 
-        remote_dir = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}"
         sftp = state["sftp"]
+        run_dir_name = None
 
-        run_dir_name = _find_latest_run_dir(sftp, remote_dir)
-        if not run_dir_name:
-            return jsonify({"ok": False, "error": "No run folder found yet - start Run All Sensors first."}), 404
+        if spec.get("source") == "drone_telemetry":
+            csv_path = _find_latest_drone_telemetry_csv(sftp)
+            if not csv_path:
+                return jsonify({"ok": False, "error": "No drone telemetry CSV found yet in data_from_drone."}), 404
+        else:
+            remote_dir = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}"
+            run_dir_name = _find_latest_run_dir(sftp, remote_dir)
+            if not run_dir_name:
+                return jsonify({"ok": False, "error": "No run folder found yet - start Run All Sensors first."}), 404
 
-        csv_path = _find_latest_sensor_csv(
-            sftp, remote_dir, run_dir_name, spec["csv_prefix"],
-            in_run_root=spec.get("in_run_root", False),
-        )
-        if not csv_path:
-            return jsonify({"ok": False, "error": f"No {spec['label']} CSV found yet in this run."}), 404
+            csv_path = _find_latest_sensor_csv(
+                sftp, remote_dir, run_dir_name, spec["csv_prefix"],
+                in_run_root=spec.get("in_run_root", False),
+            )
+            if not csv_path:
+                return jsonify({"ok": False, "error": f"No {spec['label']} CSV found yet in this run."}), 404
 
         try:
             with sftp.open(csv_path, "r") as f:
@@ -1376,10 +1423,11 @@ def plot_data():
 
     reader = csv.DictReader(io.StringIO(raw))
     value_column = spec["value_column"]
+    time_column = spec.get("time_column", "Timestamp")
     scale = spec["scale"]
     points = []
     for row in reader:
-        ts = row.get("Timestamp")
+        ts = row.get(time_column)
         raw_val = row.get(value_column)
         if not ts or raw_val is None:
             continue

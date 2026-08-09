@@ -964,6 +964,7 @@
               <option value="pops">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
               <option value="miniaeth">Black Carbon (MiniAeth)</option>
+              <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
           </div>
           <div class="plot-header">
@@ -994,6 +995,7 @@
               <option value="pops">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
               <option value="miniaeth">Black Carbon (MiniAeth)</option>
+              <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
           </div>
           <div class="plot-header">
@@ -1020,10 +1022,11 @@
               <option value="tect">Tec Temperature</option>
               <option value="rhi">RH inline</option>
               <option value="intensity">Max Intensity</option>
-              <option value="trisonica" selected>Wind Speed (Trisonica)</option>
-              <option value="pops">Particle Conc. (POPS)</option>
+              <option value="trisonica">Wind Speed (Trisonica)</option>
+              <option value="pops" selected>Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
               <option value="miniaeth">Black Carbon (MiniAeth)</option>
+              <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
           </div>
           <div class="plot-header">
@@ -1051,9 +1054,10 @@
               <option value="rhi">RH inline</option>
               <option value="intensity">Max Intensity</option>
               <option value="trisonica">Wind Speed (Trisonica)</option>
-              <option value="pops" selected>Particle Conc. (POPS)</option>
+              <option value="pops">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
-              <option value="miniaeth">Black Carbon (MiniAeth)</option>
+              <option value="miniaeth" selected>Black Carbon (MiniAeth)</option>
+              <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
           </div>
           <div class="plot-header">
@@ -1066,6 +1070,68 @@
           <div class="plot-canvas-wrap">
             <canvas id="plot-canvas-4" class="plot-canvas-el"></canvas>
             <div class="plot-tooltip" id="plot-tooltip-4"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="plot-toolbar">
+            <label style="margin-bottom: 0;">live plot</label>
+            <select id="plot-sensor-select-5" class="select-input">
+              <option value="pom">Ozone (POM)</option>
+              <option value="imet">Temperature (iMet)</option>
+              <option value="cavity">Inline Pressure (Cavity)</option>
+              <option value="teca">Tec Current</option>
+              <option value="tect">Tec Temperature</option>
+              <option value="rhi">RH inline</option>
+              <option value="intensity">Max Intensity</option>
+              <option value="trisonica">Wind Speed (Trisonica)</option>
+              <option value="pops">Particle Conc. (POPS)</option>
+              <option value="partector2pro" selected>Particle Conc. (Partector2Pro)</option>
+              <option value="miniaeth">Black Carbon (MiniAeth)</option>
+              <option value="altitude_agl">Altitude AGL (Drone)</option>
+            </select>
+          </div>
+          <div class="plot-header">
+            <div>
+              <span class="plot-stat-value" id="plot-stat-value-5">--</span>
+              <span class="plot-stat-unit" id="plot-stat-unit-5"></span>
+            </div>
+            <div class="hint" id="plot-status-5"></div>
+          </div>
+          <div class="plot-canvas-wrap">
+            <canvas id="plot-canvas-5" class="plot-canvas-el"></canvas>
+            <div class="plot-tooltip" id="plot-tooltip-5"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="plot-toolbar">
+            <label style="margin-bottom: 0;">live plot</label>
+            <select id="plot-sensor-select-6" class="select-input">
+              <option value="pom">Ozone (POM)</option>
+              <option value="imet">Temperature (iMet)</option>
+              <option value="cavity">Inline Pressure (Cavity)</option>
+              <option value="teca">Tec Current</option>
+              <option value="tect">Tec Temperature</option>
+              <option value="rhi">RH inline</option>
+              <option value="intensity">Max Intensity</option>
+              <option value="trisonica" selected>Wind Speed (Trisonica)</option>
+              <option value="pops">Particle Conc. (POPS)</option>
+              <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="miniaeth">Black Carbon (MiniAeth)</option>
+              <option value="altitude_agl">Altitude AGL (Drone)</option>
+            </select>
+          </div>
+          <div class="plot-header">
+            <div>
+              <span class="plot-stat-value" id="plot-stat-value-6">--</span>
+              <span class="plot-stat-unit" id="plot-stat-unit-6"></span>
+            </div>
+            <div class="hint" id="plot-status-6"></div>
+          </div>
+          <div class="plot-canvas-wrap">
+            <canvas id="plot-canvas-6" class="plot-canvas-el"></canvas>
+            <div class="plot-tooltip" id="plot-tooltip-6"></div>
           </div>
         </div>
       </div>
@@ -2042,7 +2108,7 @@ const PLOT_PADDING = { top: 16, right: 16, bottom: 24, left: 46 };
 // spectrometer's max intensity is an integer count.
 const PLOT_DECIMALS = {
   pom: 1, imet: 2, cavity: 1, teca: 3, tect: 2, rhi: 1, intensity: 0,
-  trisonica: 2, pops: 1, partector2pro: 0, miniaeth: 1,
+  trisonica: 2, pops: 1, partector2pro: 0, miniaeth: 1, altitude_agl: 2,
 };
 
 function plotTimeOnly(ts) {
@@ -2374,8 +2440,10 @@ function createStaticPlotController(canvasId, tooltipId) {
 const plotControllers = [
   createPlotController('-1', 'pom'),
   createPlotController('-2', 'imet'),
-  createPlotController('-3', 'trisonica'),
-  createPlotController('-4', 'pops'),
+  createPlotController('-3', 'pops'),
+  createPlotController('-4', 'miniaeth'),
+  createPlotController('-5', 'partector2pro'),
+  createPlotController('-6', 'trisonica'),
 ];
 
 function startPlotPolling() {
