@@ -1157,6 +1157,13 @@
         </div>
         <div class="hint" id="download-status"></div>
         <div id="download-results"></div>
+
+        <button class="btn-download" id="backup-btn" style="margin-top: 14px;" onclick="startBackup()">💾 Backup to External Drive</button>
+        <div class="progress-bar-track" id="backup-progress-bar-track">
+          <div class="progress-bar-fill" id="backup-progress-bar-fill"></div>
+        </div>
+        <div class="hint" id="backup-status"></div>
+        <div id="backup-results"></div>
       </div>
     </div>
 
@@ -1272,6 +1279,15 @@
         <button class="btn-ghost" onclick="closeModal()">Cancel</button>
         <button class="btn-primary" style="width:auto;" onclick="submitFolderName()">Continue</button>
       </div>
+    </div>
+  </div>
+
+  <!-- BACKUP TO EXTERNAL DRIVE MODAL -->
+  <div id="backup-modal-overlay" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-title" id="backup-modal-title">Backup to external drive</div>
+      <div class="modal-body" id="backup-modal-body"></div>
+      <div class="modal-actions" id="backup-modal-actions"></div>
     </div>
   </div>
 
@@ -2000,12 +2016,256 @@ async function pollDownloadProgress() {
   }
 }
 
+// ---------- Backup to External Drive flow ----------
+// Same underlying copy job as Download All Data (see _run_download_job on
+// the backend) - just aimed at a folder on a currently-mounted external
+// drive instead of downloaded_outputs, with an explicit incremental/full
+// choice asked every time rather than a fixed default.
+
+function openBackupModal() {
+  document.getElementById('backup-modal-overlay').classList.add('active');
+}
+
+function closeBackupModal() {
+  document.getElementById('backup-modal-overlay').classList.remove('active');
+}
+
+async function startBackup() {
+  document.getElementById('backup-modal-title').textContent = 'Backup to external drive';
+  document.getElementById('backup-modal-body').innerHTML = `<p>Looking for connected drives...</p>`;
+  document.getElementById('backup-modal-actions').innerHTML = `
+    <button class="btn-ghost" onclick="closeBackupModal()">Cancel</button>
+  `;
+  openBackupModal();
+
+  try {
+    const res = await fetch('/external_volumes');
+    const data = await res.json();
+    const volumes = (data.ok && data.volumes) || [];
+
+    if (!volumes.length) {
+      document.getElementById('backup-modal-body').innerHTML = `
+        <p>No external drives found. Plug one in, give it a moment to mount, then try again.</p>
+      `;
+      document.getElementById('backup-modal-actions').innerHTML = `
+        <button class="btn-ghost" onclick="closeBackupModal()">Close</button>
+        <button class="btn-primary" style="width:auto;" onclick="startBackup()">Check again</button>
+      `;
+      return;
+    }
+
+    const volumeOptions = volumes.map(v =>
+      `<option value="${escapeHtml(v.path)}">${escapeHtml(v.name)}</option>`
+    ).join('');
+
+    document.getElementById('backup-modal-body').innerHTML = `
+      <label for="backup-volume-select">external drive</label>
+      <select id="backup-volume-select" class="select-input" style="width:100%;">${volumeOptions}</select>
+
+      <label for="backup-folder-name-input" style="margin-top:14px;">subfolder name (on the drive)</label>
+      <input type="text" id="backup-folder-name-input" placeholder="session_2026_06_18" autocomplete="off">
+
+      <label style="margin-top:14px;">copy mode - asked every time, no fixed default</label>
+      <div style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
+        <label style="display:flex; align-items:center; gap:8px; font-family:inherit; font-size:13px; color:var(--text); text-transform:none;">
+          <input type="radio" name="backup-mode" value="incremental" checked>
+          Incremental - skip files already on the drive that match by size
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; font-family:inherit; font-size:13px; color:var(--text); text-transform:none;">
+          <input type="radio" name="backup-mode" value="full">
+          Full copy - re-copy everything, even if it's already there
+        </label>
+      </div>
+      <div class="error-msg" id="backup-modal-error"></div>
+    `;
+    document.getElementById('backup-modal-actions').innerHTML = `
+      <button class="btn-ghost" onclick="closeBackupModal()">Cancel</button>
+      <button class="btn-primary" style="width:auto;" onclick="submitBackupDetails()">Continue</button>
+    `;
+    setTimeout(() => {
+      const input = document.getElementById('backup-folder-name-input');
+      if (input) input.focus();
+    }, 50);
+  } catch (e) {
+    document.getElementById('backup-modal-body').innerHTML = `<p>Could not reach the local app server.</p>`;
+    document.getElementById('backup-modal-actions').innerHTML = `
+      <button class="btn-ghost" onclick="closeBackupModal()">Close</button>
+    `;
+  }
+}
+
+async function submitBackupDetails() {
+  const volumeSelect = document.getElementById('backup-volume-select');
+  const nameInput = document.getElementById('backup-folder-name-input');
+  const errBox = document.getElementById('backup-modal-error');
+  const volumePath = volumeSelect.value;
+  const name = nameInput.value.trim();
+  const force = document.querySelector('input[name="backup-mode"]:checked').value === 'full';
+
+  if (!name) {
+    errBox.textContent = 'Enter a folder name.';
+    return;
+  }
+
+  try {
+    const res = await fetch('/check_backup_folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ volume_path: volumePath, name })
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      errBox.textContent = data.error;
+      return;
+    }
+
+    if (data.exists) {
+      showBackupOverwriteConfirm(volumePath, name, force, data.path);
+    } else {
+      closeBackupModal();
+      runBackup(volumePath, name, force);
+    }
+  } catch (e) {
+    errBox.textContent = 'Could not reach the local app server.';
+  }
+}
+
+function showBackupOverwriteConfirm(volumePath, name, force, path) {
+  document.getElementById('backup-modal-title').textContent = 'Folder already exists';
+  document.getElementById('backup-modal-body').innerHTML = `
+    <p><b>${escapeHtml(name)}</b> already exists on that drive.<br><br>
+    ${force
+      ? 'Full copy mode will re-copy and overwrite everything in it.'
+      : 'Files already there that match will be reused as-is; only new or changed files will actually be copied.'}
+    Continue into this folder, or go back and choose a different name?</p>
+  `;
+  document.getElementById('backup-modal-actions').innerHTML = `
+    <button class="btn-ghost" onclick="startBackup()">Choose different name</button>
+    <button class="btn-primary" style="width:auto;" onclick="confirmBackupOverwrite('${volumePath.replace(/'/g, "\\'")}', '${name.replace(/'/g, "\\'")}', ${force})">Continue</button>
+  `;
+}
+
+function confirmBackupOverwrite(volumePath, name, force) {
+  closeBackupModal();
+  runBackup(volumePath, name, force);
+}
+
+async function runBackup(volumePath, name, force) {
+  const btn = document.getElementById('backup-btn');
+  const statusEl = document.getElementById('backup-status');
+  const resultsEl = document.getElementById('backup-results');
+  const track = document.getElementById('backup-progress-bar-track');
+  const fill = document.getElementById('backup-progress-bar-fill');
+
+  btn.disabled = true;
+  statusEl.textContent = 'Starting backup...';
+  statusEl.style.color = 'var(--text-dim)';
+  resultsEl.innerHTML = '';
+  track.classList.add('active');
+  fill.style.width = '0%';
+
+  try {
+    const res = await fetch('/backup_to_drive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ volume_path: volumePath, name, force })
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      track.classList.remove('active');
+      btn.disabled = false;
+      return;
+    }
+
+    pollBackupProgress();
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+    track.classList.remove('active');
+    btn.disabled = false;
+  }
+}
+
+async function pollBackupProgress() {
+  const btn = document.getElementById('backup-btn');
+  const statusEl = document.getElementById('backup-status');
+  const resultsEl = document.getElementById('backup-results');
+  const track = document.getElementById('backup-progress-bar-track');
+  const fill = document.getElementById('backup-progress-bar-fill');
+
+  try {
+    const res = await fetch('/download_progress');
+    const p = await res.json();
+
+    const pct = p.total_files > 0 ? Math.round((p.done_files / p.total_files) * 100) : 0;
+    fill.style.width = pct + '%';
+
+    if (p.running) {
+      const sourceLabel = p.current_source ? ` (${p.current_source})` : '';
+      statusEl.textContent = `Backing up${sourceLabel}... ${p.done_files} / ${p.total_files} files (${pct}%)`;
+      statusEl.style.color = 'var(--text-dim)';
+      setTimeout(pollBackupProgress, 400);
+      return;
+    }
+
+    btn.disabled = false;
+
+    if (p.error) {
+      statusEl.textContent = p.error;
+      statusEl.style.color = 'var(--err)';
+      track.classList.remove('active');
+      return;
+    }
+
+    fill.style.width = '100%';
+
+    const results = p.results || [];
+    const anyErrors = results.some(r => r.error);
+
+    statusEl.textContent = anyErrors
+      ? 'Backup finished with some errors — see details below.'
+      : 'Backup complete.';
+    statusEl.style.color = anyErrors ? 'var(--err)' : 'var(--ok)';
+
+    const rows = results.map(r => {
+      if (r.error) {
+        return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="err">error: ${escapeHtml(r.error)}</span></div>`;
+      }
+      const skipLabel = r.skipped_count ? `, ${r.skipped_count} unchanged (skipped)` : '';
+      return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="ok">${r.file_count} copied${skipLabel}</span></div>`;
+    }).join('');
+
+    resultsEl.innerHTML = `
+      <div class="download-result-list">${rows}</div>
+      <div class="download-target-path">saved to: ${escapeHtml(p.target_root)}</div>
+    `;
+
+    setTimeout(() => track.classList.remove('active'), 1200);
+  } catch (e) {
+    statusEl.textContent = 'Lost connection to local app server while backing up.';
+    statusEl.style.color = 'var(--err)';
+    btn.disabled = false;
+    track.classList.remove('active');
+  }
+}
+
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && document.getElementById('download-modal-overlay').classList.contains('active')) {
     const input = document.getElementById('folder-name-input');
     if (input && document.activeElement === input) {
       e.preventDefault();
       submitFolderName();
+    }
+  }
+  if (e.key === 'Enter' && document.getElementById('backup-modal-overlay').classList.contains('active')) {
+    const input = document.getElementById('backup-folder-name-input');
+    if (input && document.activeElement === input) {
+      e.preventDefault();
+      submitBackupDetails();
     }
   }
   if (e.key === 'Enter' && document.activeElement === document.getElementById('timer-custom-input')) {

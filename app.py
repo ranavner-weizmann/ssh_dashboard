@@ -24,9 +24,11 @@ import io
 import json
 import math
 import os
+import plistlib
 import re
 import shlex
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -110,10 +112,15 @@ state = {
     "lock": threading.Lock(),
 }
 
-# Progress tracking for the "Download All Data" background job.
-# Only one download job runs at a time (single-user local app).
+# Progress tracking for the "Download All Data" / "Backup to External
+# Drive" background job - both are the same underlying copy operation
+# (see _run_download_job), just pointed at a different target_root, so
+# they share this one piece of state. Only one such job runs at a time
+# (single-user local app, and both share the one SFTP connection, which
+# isn't safe to drive from two threads at once).
 download_state = {
     "running": False,
+    "kind": None,           # "download" or "backup" - which button started this job
     "total_files": 0,
     "done_files": 0,
     "current_source": None,
@@ -1833,14 +1840,15 @@ def _local_file_matches(local_path, remote_size):
         return False
 
 
-def sftp_count_files(sftp, remote_dir, local_dir=None):
+def sftp_count_files(sftp, remote_dir, local_dir=None, force=False):
     """
     Recursively count files (not directories) under remote_dir that still
     need downloading - i.e. don't already exist locally with a matching
-    size (see _local_file_matches). Pass local_dir=None to count every
-    file unconditionally. Returns 0 if remote_dir doesn't exist (missing
-    sources don't error here; that's handled the same way during the
-    actual download).
+    size (see _local_file_matches). Pass local_dir=None, or force=True, to
+    count every file unconditionally (force=True is how "full copy" backups
+    ignore what's already on the drive). Returns 0 if remote_dir doesn't
+    exist (missing sources don't error here; that's handled the same way
+    during the actual download).
     """
     count = 0
     try:
@@ -1852,18 +1860,20 @@ def sftp_count_files(sftp, remote_dir, local_dir=None):
         remote_path = f"{remote_dir}/{entry.filename}"
         local_path = os.path.join(local_dir, entry.filename) if local_dir else None
         if stat.S_ISDIR(entry.st_mode):
-            count += sftp_count_files(sftp, remote_path, local_path)
-        elif not (local_path and _local_file_matches(local_path, entry.st_size)):
+            count += sftp_count_files(sftp, remote_path, local_path, force=force)
+        elif force or not (local_path and _local_file_matches(local_path, entry.st_size)):
             count += 1
     return count
 
 
-def sftp_download_dir(sftp, remote_dir, local_dir, on_file_done=None):
+def sftp_download_dir(sftp, remote_dir, local_dir, on_file_done=None, force=False):
     """
-    Recursively download remote_dir (and all its contents) into local_dir,
-    skipping any file that already exists locally with a matching size
-    (see _local_file_matches) - so downloading the same target folder
-    again only pulls new or changed files instead of the whole tree.
+    Recursively download remote_dir (and all its contents) into local_dir.
+    Unless force=True, skips any file that already exists locally with a
+    matching size (see _local_file_matches) - so downloading the same
+    target folder again only pulls new or changed files instead of the
+    whole tree. force=True re-downloads and overwrites everything
+    regardless (a "full copy" backup rather than an incremental one).
     Returns (downloaded_count, skipped_count, error_or_none). Skips
     silently if remote_dir doesn't exist (treated as 0 files, no error) so
     a missing source doesn't block the others. Calls on_file_done() after
@@ -1886,12 +1896,12 @@ def sftp_download_dir(sftp, remote_dir, local_dir, on_file_done=None):
         local_path = os.path.join(local_dir, entry.filename)
 
         if stat.S_ISDIR(entry.st_mode):
-            sub_down, sub_skip, err = sftp_download_dir(sftp, remote_path, local_path, on_file_done)
+            sub_down, sub_skip, err = sftp_download_dir(sftp, remote_path, local_path, on_file_done, force=force)
             if err:
                 return downloaded, skipped, err
             downloaded += sub_down
             skipped += sub_skip
-        elif _local_file_matches(local_path, entry.st_size):
+        elif not force and _local_file_matches(local_path, entry.st_size):
             skipped += 1
         else:
             try:
@@ -1920,11 +1930,14 @@ def check_download_folder():
     return jsonify({"ok": True, "exists": exists, "path": target})
 
 
-def _run_download_job(sftp, target_root, name):
+def _run_download_job(sftp, target_root, name, force=False, kind="download"):
     """
     Runs in a background thread. Updates download_state as it goes.
     Holds state['lock'] for the whole job since the SFTP channel is shared
     with the notes feature and isn't safe to use from two threads at once.
+    Shared by both "Download All Data" and "Backup to External Drive" -
+    they're the same copy operation, just aimed at a different target_root
+    (and "kind" is only here so the frontend knows which panel to update).
     """
     try:
         with state["lock"]:
@@ -1934,12 +1947,13 @@ def _run_download_job(sftp, target_root, name):
             # already present locally are excluded here rather than just
             # fast-forwarded through in phase 2, so the progress bar (and
             # "X / Y files") reflects the actual work left to do on a
-            # repeat download into the same folder.
+            # repeat download into the same folder. force=True (a "full
+            # copy" backup) counts everything instead.
             total = 0
             for remote_subpath, local_name in DOWNLOAD_SOURCES:
                 remote_full = f"{REMOTE_DIR}/{remote_subpath}"
                 local_full = os.path.join(target_root, local_name)
-                total += sftp_count_files(sftp, remote_full, local_full)
+                total += sftp_count_files(sftp, remote_full, local_full, force=force)
 
             with download_state["lock"]:
                 download_state["total_files"] = total
@@ -1958,7 +1972,7 @@ def _run_download_job(sftp, target_root, name):
                 remote_full = f"{REMOTE_DIR}/{remote_subpath}"
                 local_full = os.path.join(target_root, local_name)
 
-                downloaded, skipped, err = sftp_download_dir(sftp, remote_full, local_full, on_file_done)
+                downloaded, skipped, err = sftp_download_dir(sftp, remote_full, local_full, on_file_done, force=force)
                 results.append({
                     "source": remote_subpath,
                     "local_folder": local_name,
@@ -1974,8 +1988,42 @@ def _run_download_job(sftp, target_root, name):
 
     except Exception as e:
         with download_state["lock"]:
-            download_state["error"] = f"Download job failed: {e}"
+            download_state["error"] = f"{kind.capitalize()} job failed: {e}"
             download_state["running"] = False
+
+
+def _start_copy_job(sftp, target_root, name, force, kind):
+    """
+    Shared by /download_all and /backup_to_drive - both just kick off
+    _run_download_job with a different target_root/force/kind. Checking
+    "is one already running" and marking this one as running happens
+    atomically under download_state["lock"] here (rather than a separate
+    check-then-later-set, like the two routes used to each do
+    independently), since both share the one SFTP connection and can't run
+    concurrently. Returns (started, error_message_or_None).
+    """
+    with download_state["lock"]:
+        if download_state["running"]:
+            running_kind = download_state.get("kind") or "job"
+            return False, f"A {running_kind} is already in progress."
+
+        download_state["running"] = True
+        download_state["kind"] = kind
+        download_state["total_files"] = 0
+        download_state["done_files"] = 0
+        download_state["current_source"] = None
+        download_state["results"] = None
+        download_state["target_root"] = target_root
+        download_state["error"] = None
+
+    thread = threading.Thread(
+        target=_run_download_job,
+        args=(sftp, target_root, name),
+        kwargs={"force": force, "kind": kind},
+        daemon=True,
+    )
+    thread.start()
+    return True, None
 
 
 @app.route("/download_all", methods=["POST"])
@@ -1987,10 +2035,6 @@ def download_all():
         return jsonify({"ok": False, "error": "Folder name is required."}), 400
     if any(c in name for c in ("/", "\\", "..")):
         return jsonify({"ok": False, "error": "Folder name contains invalid characters."}), 400
-
-    with download_state["lock"]:
-        if download_state["running"]:
-            return jsonify({"ok": False, "error": "A download is already in progress."}), 409
 
     with state["lock"]:
         if not state["connected"] or not state["sftp"]:
@@ -2004,17 +2048,9 @@ def download_all():
         except Exception as e:
             return jsonify({"ok": False, "error": f"Could not create local folder: {e}"}), 500
 
-        with download_state["lock"]:
-            download_state["running"] = True
-            download_state["total_files"] = 0
-            download_state["done_files"] = 0
-            download_state["current_source"] = None
-            download_state["results"] = None
-            download_state["target_root"] = target_root
-            download_state["error"] = None
-
-        thread = threading.Thread(target=_run_download_job, args=(sftp, target_root, name), daemon=True)
-        thread.start()
+        started, error = _start_copy_job(sftp, target_root, name, force=False, kind="download")
+        if not started:
+            return jsonify({"ok": False, "error": error}), 409
 
         return jsonify({"ok": True, "started": True})
 
@@ -2024,6 +2060,7 @@ def download_progress():
     with download_state["lock"]:
         return jsonify({
             "running": download_state["running"],
+            "kind": download_state["kind"],
             "total_files": download_state["total_files"],
             "done_files": download_state["done_files"],
             "current_source": download_state["current_source"],
@@ -2031,6 +2068,119 @@ def download_progress():
             "target_root": download_state["target_root"],
             "error": download_state["error"],
         })
+
+
+def _list_external_volumes():
+    """
+    Returns [{"name": ..., "path": ...}, ...] for every currently-mounted
+    external (non-internal, non-network) volume on this Mac - i.e. the
+    plausible targets for "Backup to External Drive". Scans /Volumes and
+    asks `diskutil info` about each entry rather than parsing the full
+    disk list, since that's the simplest way to get a definite yes/no on
+    "is this actually external" (Internal/NetworkVolume flags) plus its
+    mount point in one call. Skips disk images (BusProtocol "Disk Image")
+    too - a mounted .dmg isn't a real external drive worth offering here.
+
+    Best-effort: any single volume that fails to inspect is just skipped
+    rather than failing the whole list, and this returns [] outright on
+    any platform/environment where /Volumes or diskutil aren't there
+    (non-macOS) instead of raising.
+    """
+    volumes = []
+    try:
+        entries = os.listdir("/Volumes")
+    except OSError:
+        return volumes
+
+    for name in entries:
+        path = f"/Volumes/{name}"
+        if not os.path.isdir(path):
+            continue
+        try:
+            result = subprocess.run(
+                ["diskutil", "info", "-plist", path],
+                capture_output=True, timeout=5,
+            )
+            if result.returncode != 0:
+                continue
+            info = plistlib.loads(result.stdout)
+        except Exception:
+            continue
+
+        if info.get("Internal", True):
+            continue
+        if info.get("NetworkVolume", False):
+            continue
+        if info.get("BusProtocol") == "Disk Image":
+            continue
+
+        volumes.append({"name": info.get("VolumeName") or name, "path": path})
+
+    return sorted(volumes, key=lambda v: v["name"].lower())
+
+
+@app.route("/external_volumes")
+def external_volumes():
+    return jsonify({"ok": True, "volumes": _list_external_volumes()})
+
+
+@app.route("/check_backup_folder", methods=["POST"])
+def check_backup_folder():
+    data = request.get_json()
+    volume_path = (data.get("volume_path") or "").strip()
+    name = (data.get("name") or "").strip()
+
+    if not name:
+        return jsonify({"ok": False, "error": "Folder name is required."}), 400
+    if any(c in name for c in ("/", "\\", "..")):
+        return jsonify({"ok": False, "error": "Folder name contains invalid characters."}), 400
+
+    # Only ever write under a volume this Mac itself currently reports as a
+    # mounted external drive - re-validated fresh against the live list
+    # rather than trusting the path the browser sent, since it's about to
+    # be used as a filesystem write target.
+    valid_paths = {v["path"] for v in _list_external_volumes()}
+    if volume_path not in valid_paths:
+        return jsonify({"ok": False, "error": "That drive is no longer connected. Refresh the drive list and try again."}), 400
+
+    target = os.path.join(volume_path, name)
+    exists = os.path.isdir(target)
+    return jsonify({"ok": True, "exists": exists, "path": target})
+
+
+@app.route("/backup_to_drive", methods=["POST"])
+def backup_to_drive():
+    data = request.get_json()
+    volume_path = (data.get("volume_path") or "").strip()
+    name = (data.get("name") or "").strip()
+    force = bool(data.get("force", False))
+
+    if not name:
+        return jsonify({"ok": False, "error": "Folder name is required."}), 400
+    if any(c in name for c in ("/", "\\", "..")):
+        return jsonify({"ok": False, "error": "Folder name contains invalid characters."}), 400
+
+    valid_paths = {v["path"] for v in _list_external_volumes()}
+    if volume_path not in valid_paths:
+        return jsonify({"ok": False, "error": "That drive is no longer connected. Refresh the drive list and try again."}), 400
+
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
+
+        sftp = state["sftp"]
+        target_root = os.path.join(volume_path, name)
+
+        try:
+            os.makedirs(target_root, exist_ok=True)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Could not create folder on drive: {e}"}), 500
+
+        started, error = _start_copy_job(sftp, target_root, name, force=force, kind="backup")
+        if not started:
+            return jsonify({"ok": False, "error": error}), 409
+
+        return jsonify({"ok": True, "started": True})
 
 
 @sock.route("/terminal_ws")
