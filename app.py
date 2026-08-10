@@ -2134,20 +2134,33 @@ CHECKABLE_SENSOR_SCRIPT = "sensor_runner.py"
 @sock.route("/sensor_check_ws")
 def sensor_check_ws(ws):
     """
-    Streams live stdout from a single sensor's standalone sensor_runner.py
+    Streams live output from a single sensor's standalone sensor_runner.py
     process on the Pi - the exact same script/CLI runall.py itself launches
     per sensor, just run here as a lone foreground process instead of part
     of the full pipeline. For confirming a sensor is wired up and producing
     data (e.g. before a flight) without starting everything. Nothing is
-    saved; this is a live view only, in the same spirit as terminal_ws.
+    saved by this dashboard; this is a live view only, in the same spirit
+    as terminal_ws.
+
+    Two kinds of output get streamed, since sensor_runner.py's own stdout
+    turns out to only be status/log lines (generic_sensor.py's write_data()
+    logs a 3-field sample per row, not the full row - see "Written: ..."):
+      - "output": the process's own stdout/stderr (startup messages,
+        reconnect attempts, the truncated per-row sample log line, etc).
+      - "data": actual full rows tailed straight from the CSV file the
+        process is writing (its path is parsed out of that same stdout,
+        from the "Output file: <path>" line generic_sensor.py logs right
+        after creating it) - this is the real, complete sensor output the
+        "output" stream alone doesn't show.
 
     The browser's first (and only expected) message must be
     {"sensor": "<name>"}; every server message after that is
-    {"type": "output"|"error", "data": "..."}. A PTY is allocated
-    specifically so that closing the channel (browser closes the socket,
-    navigates away, etc.) delivers SIGHUP to sensor_runner.py and actually
-    kills it - a plain exec_command channel doesn't reliably do that, and
-    leaving a reader running detached would keep the sensor's port tied up.
+    {"type": "output"|"data"|"error", "data": "..."}. A PTY is allocated
+    for both the sensor process and the tail process specifically so that
+    closing either channel (browser closes the socket, navigates away,
+    etc.) delivers SIGHUP and actually kills them - a plain exec_command
+    channel doesn't reliably do that, and leaving either running detached
+    would keep the sensor's port (or the CSV file) tied up.
 
     Blocked entirely while runall.py is running: a second reader opening
     the same serial/USB port runall.py already has open is a real conflict,
@@ -2215,15 +2228,64 @@ def sensor_check_ws(ws):
 
     channel.settimeout(0.0)
     stop_event = threading.Event()
+    tail_channel_box = {"channel": None}
+
+    OUTPUT_FILE_RE = re.compile(r"Output file: (\S+\.csv)")
+    # Bounds how long the "output" stream is scanned for the "Output file:"
+    # line before giving up - it normally shows up within the first couple
+    # hundred bytes, right after the process starts. Without this cap, a
+    # sensor that never reaches that line (e.g. it errors out first) would
+    # keep this buffer growing for the whole life of the check.
+    DETECT_SCAN_LIMIT = 4096
+
+    def start_tailing(csv_relpath):
+        csv_path = csv_relpath if csv_relpath.startswith("/") else f"{remote_dir}/{csv_relpath}"
+        try:
+            tail_channel = ssh.get_transport().open_session()
+            tail_channel.get_pty()
+            tail_channel.exec_command("tail -n +1 -F " + shlex.quote(csv_path))
+            tail_channel.settimeout(0.0)
+        except Exception:
+            return
+        tail_channel_box["channel"] = tail_channel
+
+        def tail_reader():
+            try:
+                while not stop_event.is_set():
+                    if tail_channel.recv_ready():
+                        data = tail_channel.recv(4096)
+                        if not data:
+                            break
+                        ws.send(json.dumps({"type": "data", "data": data.decode("utf-8", errors="replace")}))
+                    elif tail_channel.closed or tail_channel.exit_status_ready():
+                        break
+                    else:
+                        time.sleep(0.1)
+            except Exception:
+                pass
+
+        threading.Thread(target=tail_reader, daemon=True).start()
 
     def reader():
+        detect_buffer = ""
+        tailing_started = False
         try:
             while not stop_event.is_set():
                 if channel.recv_ready():
                     data = channel.recv(4096)
                     if not data:
                         break
-                    ws.send(json.dumps({"type": "output", "data": data.decode("utf-8", errors="replace")}))
+                    text = data.decode("utf-8", errors="replace")
+                    ws.send(json.dumps({"type": "output", "data": text}))
+
+                    if not tailing_started:
+                        detect_buffer += text
+                        match = OUTPUT_FILE_RE.search(detect_buffer)
+                        if match:
+                            tailing_started = True
+                            start_tailing(match.group(1))
+                        elif len(detect_buffer) > DETECT_SCAN_LIMIT:
+                            tailing_started = True  # give up looking
                 elif channel.closed or channel.exit_status_ready():
                     break
                 else:
@@ -2257,6 +2319,12 @@ def sensor_check_ws(ws):
             channel.close()
         except Exception:
             pass
+        tail_channel = tail_channel_box["channel"]
+        if tail_channel:
+            try:
+                tail_channel.close()
+            except Exception:
+                pass
 
 
 @app.route("/status")

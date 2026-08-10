@@ -549,6 +549,11 @@
     color: var(--text);
   }
 
+  .check-data-line {
+    color: var(--ok);
+    font-weight: 600;
+  }
+
   .button-row {
     display: flex;
     gap: 10px;
@@ -3243,7 +3248,7 @@ function startSensorCheck() {
     if (sensorCheckSocket && sensorCheckSocket.readyState === WebSocket.OPEN) {
       sensorCheckSocket.send(JSON.stringify({ sensor }));
     }
-    statusEl.textContent = 'watching live output below - nothing here is being saved.';
+    statusEl.textContent = 'watching live output below (highlighted = actual data rows) - nothing here is being saved.';
     statusEl.style.color = 'var(--ok)';
     stopBtn.disabled = false;
   };
@@ -3251,8 +3256,16 @@ function startSensorCheck() {
   sensorCheckSocket.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
-      if (msg.type === 'output') {
-        outputEl.textContent += msg.data;
+      if (msg.type === 'output' || msg.type === 'data') {
+        // "output" is the process's own status/log lines; "data" is the
+        // actual CSV rows tailed straight from the file it's writing (see
+        // the backend comment on sensor_check_ws for why these are two
+        // separate streams) - styled differently so real sensor readings
+        // stand out from startup/reconnect noise.
+        const span = document.createElement('span');
+        if (msg.type === 'data') span.className = 'check-data-line';
+        span.textContent = msg.data;
+        outputEl.appendChild(span);
         outputEl.scrollTop = outputEl.scrollHeight;
       } else if (msg.type === 'error') {
         statusEl.textContent = msg.data.trim();
