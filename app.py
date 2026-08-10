@@ -13,7 +13,13 @@ Then open: http://127.0.0.1:5050
 (Deliberately not port 5000 - macOS's AirPlay Receiver listens there by
 default and intercepts the connection before Flask ever sees it, which
 shows up as an inexplicable 403 in the browser rather than a connection
-error.)
+error. Harmless but unnecessary on Windows, where that conflict doesn't
+exist - the port is just kept the same everywhere.)
+
+Runs on both Windows and macOS. The couple of places that inherently need
+platform-specific handling (auto-opening Chrome, listing external drives
+for "Backup to External Drive") branch on sys.platform internally; there
+is no separate Windows/macOS build of this file.
 
 Can also be packaged as a double-clickable macOS .app with PyInstaller;
 see build_app.sh / app.spec in the same project for the build steps.
@@ -2070,21 +2076,19 @@ def download_progress():
         })
 
 
-def _list_external_volumes():
+def _list_external_volumes_macos():
     """
     Returns [{"name": ..., "path": ...}, ...] for every currently-mounted
-    external (non-internal, non-network) volume on this Mac - i.e. the
-    plausible targets for "Backup to External Drive". Scans /Volumes and
-    asks `diskutil info` about each entry rather than parsing the full
-    disk list, since that's the simplest way to get a definite yes/no on
-    "is this actually external" (Internal/NetworkVolume flags) plus its
-    mount point in one call. Skips disk images (BusProtocol "Disk Image")
-    too - a mounted .dmg isn't a real external drive worth offering here.
+    external (non-internal, non-network) volume on this Mac. Scans
+    /Volumes and asks `diskutil info` about each entry rather than parsing
+    the full disk list, since that's the simplest way to get a definite
+    yes/no on "is this actually external" (Internal/NetworkVolume flags)
+    plus its mount point in one call. Skips disk images (BusProtocol
+    "Disk Image") too - a mounted .dmg isn't a real external drive worth
+    offering here.
 
     Best-effort: any single volume that fails to inspect is just skipped
-    rather than failing the whole list, and this returns [] outright on
-    any platform/environment where /Volumes or diskutil aren't there
-    (non-macOS) instead of raising.
+    rather than failing the whole list.
     """
     volumes = []
     try:
@@ -2116,6 +2120,90 @@ def _list_external_volumes():
 
         volumes.append({"name": info.get("VolumeName") or name, "path": path})
 
+    return volumes
+
+
+def _list_external_volumes_windows():
+    """
+    Returns [{"name": ..., "path": ...}, ...] for plausible backup drive
+    targets on Windows: every removable drive (USB flash, SD cards -
+    DRIVE_REMOVABLE) plus every non-system fixed drive (DRIVE_FIXED) -
+    Windows commonly reports USB external HDDs/SSDs as "Fixed" rather than
+    "Removable", so DRIVE_FIXED can't be excluded outright the way it can
+    be assumed-internal on macOS. The boot/system drive (usually C:) is
+    always excluded.
+
+    This can't distinguish "external fixed drive" from "a second truly
+    internal drive" as cleanly as macOS's diskutil Internal flag does -
+    Windows doesn't expose that distinction as directly. That's an
+    acceptable trade-off here: the result is only ever offered as labeled
+    choices in a dropdown you pick from, never auto-selected, so an
+    unlikely false positive (an internal secondary drive showing up as an
+    option) is low-risk, not a silent write to the wrong place.
+
+    Uses only the two most basic, decades-stable kernel32 calls
+    (GetLogicalDrives/GetDriveTypeW) rather than anything more elaborate
+    (WMI, the registry, GetVolumeInformationW for a friendly label) to
+    keep this as simple and reliable as possible.
+    """
+    import ctypes
+    import shutil
+    import string
+
+    DRIVE_REMOVABLE = 2
+    DRIVE_FIXED = 3
+
+    system_drive = (os.environ.get("SystemDrive") or "C:").upper()
+    volumes = []
+    try:
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+    except Exception:
+        return volumes
+
+    for i, letter in enumerate(string.ascii_uppercase):
+        if not (bitmask >> i) & 1:
+            continue
+        drive = f"{letter}:"
+        if drive == system_drive:
+            continue
+        root_path = f"{drive}\\"
+
+        try:
+            drive_type = ctypes.windll.kernel32.GetDriveTypeW(root_path)
+        except Exception:
+            continue
+        if drive_type not in (DRIVE_REMOVABLE, DRIVE_FIXED):
+            continue
+
+        try:
+            _total, _used, free = shutil.disk_usage(root_path)
+        except OSError:
+            # A drive letter can be assigned per GetLogicalDrives but not
+            # actually ready (e.g. an empty card reader slot) - skip it
+            # rather than offering a target nothing can actually be
+            # written to.
+            continue
+
+        volumes.append({"name": f"{root_path} ({free / (1024 ** 3):.1f} GB free)", "path": root_path})
+
+    return volumes
+
+
+def _list_external_volumes():
+    """
+    Returns [{"name": ..., "path": ...}, ...] for the plausible "Backup to
+    External Drive" targets on this machine - dispatches to a
+    platform-specific implementation since Windows and macOS expose "what
+    drives are attached" completely differently (drive letters + WinAPI
+    calls vs. /Volumes + diskutil). Returns [] on any other platform
+    (e.g. Linux - not supported yet) rather than raising.
+    """
+    if sys.platform == "win32":
+        volumes = _list_external_volumes_windows()
+    elif sys.platform == "darwin":
+        volumes = _list_external_volumes_macos()
+    else:
+        volumes = []
     return sorted(volumes, key=lambda v: v["name"].lower())
 
 
@@ -2506,19 +2594,57 @@ def disconnect():
     return jsonify({"ok": True})
 
 
+def _find_chrome_windows():
+    """
+    Locates chrome.exe via the registry "App Paths" key Chrome's own
+    installer registers - works regardless of whether it was installed
+    per-machine (HKLM) or per-user (HKCU), unlike guessing at fixed
+    Program Files paths (which also differ between the 32-bit and 64-bit
+    install locations). Returns the full path, or None if Chrome isn't
+    installed/registered there.
+    """
+    import winreg
+    key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, key_path) as key:
+                path, _ = winreg.QueryValueEx(key, None)
+        except OSError:
+            continue
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
 def _open_in_chrome():
     """
     Opens http://127.0.0.1:5050 in a new Chrome tab specifically (not
     just whatever the default browser is). Falls back to the system
-    default browser if Chrome isn't registered/available.
+    default browser if Chrome isn't installed/registered/available.
 
-    Uses `tell application "chrome" to open location ...` (via
-    webbrowser's macOS AppleScript backend) rather than `open -a
+    macOS: `tell application "chrome" to open location ...` (via
+    webbrowser's own AppleScript backend) rather than `open -a
     "Google Chrome" url` - the AppleScript "open location" Apple Event
     is what makes Chrome open a fresh new tab in the frontmost window
     each time, instead of just re-focusing an existing matching tab.
+
+    Windows: launching chrome.exe directly with the URL as an argument
+    has the same effect - Chrome opens it as a new tab in its existing
+    window rather than a new window, when one is already running.
     """
     url = "http://127.0.0.1:5050"
+
+    if sys.platform == "win32":
+        chrome_path = _find_chrome_windows()
+        if chrome_path:
+            try:
+                subprocess.Popen([chrome_path, url])
+                return
+            except Exception:
+                pass
+        webbrowser.open(url)
+        return
+
     try:
         webbrowser.get("chrome").open(url)
     except webbrowser.Error:
