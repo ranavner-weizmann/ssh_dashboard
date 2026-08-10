@@ -86,6 +86,17 @@
     min-width: 0;
   }
 
+  .debug-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .debug-row > .panel {
+    margin-bottom: 0;
+  }
+
   /* Below ~1100px there isn't enough room for a 3-column top strip or
      two side-by-side plots without squeezing things uncomfortably
      narrow - collapse both back to a single stacked column. */
@@ -94,6 +105,9 @@
       grid-template-columns: 1fr;
     }
     .plot-row {
+      grid-template-columns: 1fr;
+    }
+    .debug-row {
       grid-template-columns: 1fr;
     }
   }
@@ -612,12 +626,6 @@
     font-size: 13px;
   }
 
-  .sensor-toggle-row .sensor-type {
-    font-size: 11px;
-    color: var(--text-dim);
-    margin-left: 8px;
-  }
-
   .switch {
     position: relative;
     display: inline-block;
@@ -881,6 +889,7 @@
           <div class="button-row">
             <button class="btn-ghost timer-preset" onclick="startTimerPreset(30, this)">30s</button>
             <button class="btn-ghost timer-preset" onclick="startTimerPreset(60, this)">1m</button>
+            <button class="btn-ghost timer-preset" onclick="startTimerPreset(90, this)">1m 30s</button>
             <button class="btn-ghost timer-preset" onclick="startTimerPreset(180, this)">3m</button>
             <button class="btn-ghost timer-preset" onclick="startTimerPreset(300, this)">5m</button>
           </div>
@@ -1168,10 +1177,23 @@
         <div id="terminal-container" class="terminal-container"></div>
       </div>
 
-      <div class="panel sensor-panel">
-        <label style="margin-bottom: 8px;">sensors</label>
-        <div class="hint" id="sensor-config-status">Connect to load the sensor list.</div>
-        <div id="sensor-config-list" class="sensor-toggle-list"></div>
+      <div class="debug-row">
+        <div class="panel sensor-panel">
+          <label style="margin-bottom: 8px;">sensors</label>
+          <div class="hint" id="sensor-config-status">Connect to load the sensor list.</div>
+          <div id="sensor-config-list" class="sensor-toggle-list"></div>
+        </div>
+
+        <div class="panel">
+          <label style="margin-bottom: 8px;">check a sensor</label>
+          <div class="button-row">
+            <select id="sensor-check-select" class="select-input" style="width:auto;" disabled></select>
+            <button class="btn-primary" id="sensor-check-start-btn" style="width:auto;" onclick="startSensorCheck()" disabled>Start Check</button>
+            <button class="btn-ghost" id="sensor-check-stop-btn" style="width:auto;" onclick="stopSensorCheck()" disabled>Stop Check</button>
+          </div>
+          <div class="hint" id="sensor-check-status">Connect to load the sensor list.</div>
+          <div id="sensor-check-output" class="output-panel"></div>
+        </div>
       </div>
 
       <div class="panel">
@@ -1293,6 +1315,7 @@ function showNotesView(data) {
   startTimeSync();
   startPlotPolling();
   startConnectionHealthCheck();
+  refreshNotesLog();
   refreshRunallLogList();
   // Keeps polling runall.py's live status for as long as you're connected
   // (not just right after this page loads) - see the comment in
@@ -1675,6 +1698,25 @@ async function runCApp() {
 function addLogEntry(timestamp, text) {
   notes.push({ timestamp, text });
   renderLog();
+}
+
+async function refreshNotesLog() {
+  // Repopulates the session log from today's notes CSV on the Pi, if one
+  // already exists (e.g. from earlier today, before a disconnect/reload) -
+  // otherwise the log box always started blank on reconnect even though
+  // the notes themselves were never actually lost, just not fetched back.
+  try {
+    const res = await fetch('/notes');
+    const data = await res.json();
+    if (!data.ok) return; // non-fatal - the log just stays as-is
+    notes.length = 0;
+    for (const n of data.notes) {
+      notes.push({ timestamp: n.timestamp, text: n.text });
+    }
+    renderLog();
+  } catch (e) {
+    // Non-fatal - notes already written are safe on the Pi regardless.
+  }
 }
 
 function renderLog() {
@@ -3001,6 +3043,27 @@ function stopAutoReconnect() {
 // reflects whatever's currently in sensor_config.json on the Pi - so
 // sensors added/removed/renamed there show up here with no code change.
 
+// Purely cosmetic - keyed by the sensor_config.json key (a stable
+// identifier), not by its "type" field. "type" is a functional dispatch
+// key sensor_runner.py uses to pick the actual sensor class, so it's never
+// touched here; a sensor missing from this map just falls back to showing
+// its raw type instead.
+const SENSOR_DISPLAY_NAMES = {
+  imet: 'Imet XQ2',
+  pom: 'POM',
+  trisonica: 'Trisonica LI-550P',
+  spectro: 'Ocean Optics SR6',
+  partector2pro: 'Partector 2 Pro',
+  miniaeth: 'Miniaeth MA200',
+  pops: 'POPS',
+  ldd: 'LDD',
+  cavity: 'Cavity',
+};
+
+function sensorDisplayName(sensor) {
+  return SENSOR_DISPLAY_NAMES[sensor.name] || sensor.type;
+}
+
 let sensorConfigRunning = false;
 
 async function refreshSensorConfig() {
@@ -3029,8 +3092,7 @@ async function refreshSensorConfig() {
       row.className = 'sensor-toggle-row';
 
       const nameSpan = document.createElement('span');
-      nameSpan.innerHTML = `<span class="sensor-name">${escapeHtml(sensor.name)}</span>` +
-        `<span class="sensor-type">${escapeHtml(sensor.type)}</span>`;
+      nameSpan.innerHTML = `<span class="sensor-name">${escapeHtml(sensorDisplayName(sensor))}</span>`;
 
       const label = document.createElement('label');
       label.className = 'switch';
@@ -3048,6 +3110,8 @@ async function refreshSensorConfig() {
       row.appendChild(label);
       listEl.appendChild(row);
     }
+
+    populateSensorCheckSelect(data.sensors);
   } catch (e) {
     statusEl.textContent = 'Could not reach local app server.';
     statusEl.style.color = 'var(--err)';
@@ -3094,6 +3158,129 @@ function setSensorTogglesDisabled(running) {
       ? 'Stop Run All Sensors to change which sensors are enabled.'
       : 'Toggle a sensor, then start Run All Sensors to apply the change.';
     statusEl.style.color = 'var(--text-dim)';
+  }
+
+  // "Check Sensor" opens its own standalone reader on a sensor's
+  // port/device - running that alongside runall.py risks two readers
+  // fighting over the same port, so it's gated the same way the toggles
+  // above are. If Run All Sensors starts while a check happens to be open
+  // (e.g. started from the Operation tab while this tab was left showing
+  // a live check), stop that check proactively rather than let it collide.
+  const select = document.getElementById('sensor-check-select');
+  const startBtn = document.getElementById('sensor-check-start-btn');
+  select.disabled = running || select.options.length === 0;
+  startBtn.disabled = running || select.options.length === 0 || !!sensorCheckSocket;
+  if (running && sensorCheckSocket) {
+    stopSensorCheck();
+  }
+}
+
+// ---------- Check Sensor (one-off standalone read, streamed over a WS) ----------
+// Runs the same sensor_runner.py <name> the Pi already launches per-sensor
+// inside runall.py, but as a lone foreground process outside the pipeline -
+// for confirming a sensor is wired up and producing data (e.g. before a
+// flight) without starting everything. Nothing here is saved; it's just a
+// live view, and the process is killed the moment the socket closes.
+
+let sensorCheckSocket = null;
+
+function populateSensorCheckSelect(sensors) {
+  const select = document.getElementById('sensor-check-select');
+  const statusEl = document.getElementById('sensor-check-status');
+  const startBtn = document.getElementById('sensor-check-start-btn');
+  const previousValue = select.value;
+
+  // Only sensors launched via sensor_runner.py <name> can be checked this
+  // way - e.g. spectro uses its own separate script with a different CLI.
+  const checkable = sensors.filter((s) => s.script === 'sensor_runner.py');
+
+  select.innerHTML = '';
+  for (const sensor of checkable) {
+    const opt = document.createElement('option');
+    opt.value = sensor.name;
+    opt.textContent = sensorDisplayName(sensor);
+    select.appendChild(opt);
+  }
+  const stillExists = Array.from(select.options).some((o) => o.value === previousValue);
+  if (stillExists) select.value = previousValue;
+
+  const blocked = sensorConfigRunning || checkable.length === 0;
+  select.disabled = blocked;
+  startBtn.disabled = blocked || !!sensorCheckSocket;
+
+  if (!sensorCheckSocket) {
+    statusEl.textContent = checkable.length
+      ? (sensorConfigRunning ? 'Stop Run All Sensors to check a sensor.' : 'Pick a sensor and start a live check.')
+      : 'No checkable sensors found.';
+    statusEl.style.color = 'var(--text-dim)';
+  }
+}
+
+function startSensorCheck() {
+  if (sensorCheckSocket) return;
+  const select = document.getElementById('sensor-check-select');
+  const sensor = select.value;
+  if (!sensor) return;
+
+  const statusEl = document.getElementById('sensor-check-status');
+  const outputEl = document.getElementById('sensor-check-output');
+  const startBtn = document.getElementById('sensor-check-start-btn');
+  const stopBtn = document.getElementById('sensor-check-stop-btn');
+
+  const sensorLabel = select.options[select.selectedIndex].textContent;
+
+  outputEl.textContent = '';
+  outputEl.style.display = 'block';
+  statusEl.textContent = `connecting to ${sensorLabel}...`;
+  statusEl.style.color = 'var(--text-dim)';
+  startBtn.disabled = true;
+  select.disabled = true;
+
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  sensorCheckSocket = new WebSocket(`${proto}://${window.location.host}/sensor_check_ws`);
+
+  sensorCheckSocket.onopen = () => {
+    if (sensorCheckSocket && sensorCheckSocket.readyState === WebSocket.OPEN) {
+      sensorCheckSocket.send(JSON.stringify({ sensor }));
+    }
+    statusEl.textContent = 'watching live output below - nothing here is being saved.';
+    statusEl.style.color = 'var(--ok)';
+    stopBtn.disabled = false;
+  };
+
+  sensorCheckSocket.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'output') {
+        outputEl.textContent += msg.data;
+        outputEl.scrollTop = outputEl.scrollHeight;
+      } else if (msg.type === 'error') {
+        statusEl.textContent = msg.data.trim();
+        statusEl.style.color = 'var(--err)';
+      }
+    } catch (e) {
+      // Ignore malformed frames rather than breaking the whole session.
+    }
+  };
+
+  sensorCheckSocket.onclose = () => {
+    statusEl.textContent = 'check stopped.';
+    statusEl.style.color = 'var(--text-dim)';
+    startBtn.disabled = sensorConfigRunning;
+    stopBtn.disabled = true;
+    select.disabled = sensorConfigRunning;
+    sensorCheckSocket = null;
+  };
+
+  sensorCheckSocket.onerror = () => {
+    statusEl.textContent = 'connection error.';
+    statusEl.style.color = 'var(--err)';
+  };
+}
+
+function stopSensorCheck() {
+  if (sensorCheckSocket) {
+    sensorCheckSocket.close();
   }
 }
 

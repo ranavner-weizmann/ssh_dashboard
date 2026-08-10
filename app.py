@@ -306,6 +306,50 @@ def add_note():
             return jsonify({"ok": False, "error": f"Failed to write note (connection may have dropped): {e}"}), 500
 
 
+@app.route("/notes")
+def get_notes():
+    """
+    Reads back whatever's already in today's notes CSV on the Pi, if it
+    exists - so the session log can show earlier notes right after
+    connecting, instead of only filling in from here on. Without this, a
+    disconnect + reconnect (or just reloading the page) always started the
+    log box empty even though the notes were sitting right there in the
+    same file the next note would append to - nothing was actually lost,
+    it just wasn't being displayed.
+
+    Read-only: doesn't create the file or touch state["remote_path"] -
+    add_note() already independently discovers and reuses today's existing
+    file on the first note of a session, so this doesn't need to duplicate
+    that.
+    """
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
+
+        remote_path, _filename = build_remote_path()
+        try:
+            state["sftp"].stat(remote_path)
+        except IOError:
+            return jsonify({"ok": True, "notes": []})
+
+        try:
+            with state["sftp"].open(remote_path, "r") as f:
+                raw = f.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            _mark_disconnected()
+            return jsonify({"ok": False, "error": f"Could not read notes file: {e}"}), 500
+
+    notes = []
+    for row in csv.DictReader(io.StringIO(raw)):
+        timestamp = row.get("timestamp")
+        text = row.get("note")
+        if timestamp is None or text is None:
+            continue
+        notes.append({"timestamp": timestamp, "text": text})
+
+    return jsonify({"ok": True, "notes": notes})
+
+
 def _run_sudo_command(ssh, password, command, timeout=15):
     """
     Runs `command` on the remote host with sudo, feeding `password` to
@@ -1170,6 +1214,11 @@ def sensor_config():
                 "name": name,
                 "type": cfg.get("type", name) if isinstance(cfg, dict) else name,
                 "enabled": bool(cfg.get("enabled", False)) if isinstance(cfg, dict) else False,
+                # Lets the frontend tell which sensors "Check Sensor" can
+                # actually run standalone (anything launched via the same
+                # sensor_runner.py <name> CLI runall.py itself uses) versus
+                # ones like spectro that use their own separate script.
+                "script": cfg.get("script", "") if isinstance(cfg, dict) else "",
             }
             for name, cfg in sensors.items()
         ]
@@ -2071,6 +2120,137 @@ def terminal_ws(ws):
                     channel.resize_pty(width=max(cols, 1), height=max(rows, 1))
                 except Exception:
                     pass
+    finally:
+        stop_event.set()
+        try:
+            channel.close()
+        except Exception:
+            pass
+
+
+CHECKABLE_SENSOR_SCRIPT = "sensor_runner.py"
+
+
+@sock.route("/sensor_check_ws")
+def sensor_check_ws(ws):
+    """
+    Streams live stdout from a single sensor's standalone sensor_runner.py
+    process on the Pi - the exact same script/CLI runall.py itself launches
+    per sensor, just run here as a lone foreground process instead of part
+    of the full pipeline. For confirming a sensor is wired up and producing
+    data (e.g. before a flight) without starting everything. Nothing is
+    saved; this is a live view only, in the same spirit as terminal_ws.
+
+    The browser's first (and only expected) message must be
+    {"sensor": "<name>"}; every server message after that is
+    {"type": "output"|"error", "data": "..."}. A PTY is allocated
+    specifically so that closing the channel (browser closes the socket,
+    navigates away, etc.) delivers SIGHUP to sensor_runner.py and actually
+    kills it - a plain exec_command channel doesn't reliably do that, and
+    leaving a reader running detached would keep the sensor's port tied up.
+
+    Blocked entirely while runall.py is running: a second reader opening
+    the same serial/USB port runall.py already has open is a real conflict,
+    not just a formality - same reasoning as gating sensor_config/toggle.
+    """
+    with state["lock"]:
+        if not state["connected"] or not state["ssh"] or not state["sftp"]:
+            ws.send(json.dumps({"type": "error", "data": "Not connected to remote host.\r\n"}))
+            return
+        ssh = state["ssh"]
+        sftp = state["sftp"]
+
+    try:
+        first_message = ws.receive(timeout=10)
+        msg = json.loads(first_message) if first_message else {}
+    except Exception:
+        msg = {}
+
+    sensor_name = (msg.get("sensor") or "").strip().lower()
+    if not sensor_name:
+        ws.send(json.dumps({"type": "error", "data": "No sensor specified.\r\n"}))
+        return
+
+    try:
+        running, _pid = _check_runall_running(ssh)
+    except Exception as e:
+        try:
+            ws.send(json.dumps({"type": "error", "data": f"Could not check runall.py status: {e}\r\n"}))
+        except Exception:
+            pass
+        return
+    if running:
+        ws.send(json.dumps({"type": "error", "data": "Stop Run All Sensors before checking a sensor.\r\n"}))
+        return
+
+    try:
+        with sftp.open(SENSOR_CONFIG_REMOTE_PATH, "r") as f:
+            config = json.loads(f.read().decode("utf-8"))
+    except Exception as e:
+        ws.send(json.dumps({"type": "error", "data": f"Could not read sensor_config.json: {e}\r\n"}))
+        return
+
+    sensor_cfg = config.get("sensors", {}).get(sensor_name)
+    if not isinstance(sensor_cfg, dict) or sensor_cfg.get("script") != CHECKABLE_SENSOR_SCRIPT:
+        ws.send(json.dumps({"type": "error", "data": f'"{sensor_name}" cannot be checked this way.\r\n'}))
+        return
+
+    remote_dir = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}"
+    command = (
+        "cd " + shlex.quote(remote_dir) + " && exec "
+        + shlex.quote(RUN_ALL_VENV_PYTHON) + " -u "
+        + shlex.quote(CHECKABLE_SENSOR_SCRIPT) + " " + shlex.quote(sensor_name)
+    )
+
+    try:
+        channel = ssh.get_transport().open_session()
+        channel.get_pty()
+        channel.exec_command(command)
+    except Exception as e:
+        try:
+            ws.send(json.dumps({"type": "error", "data": f"Could not start check: {e}\r\n"}))
+        except Exception:
+            pass
+        return
+
+    channel.settimeout(0.0)
+    stop_event = threading.Event()
+
+    def reader():
+        try:
+            while not stop_event.is_set():
+                if channel.recv_ready():
+                    data = channel.recv(4096)
+                    if not data:
+                        break
+                    ws.send(json.dumps({"type": "output", "data": data.decode("utf-8", errors="replace")}))
+                elif channel.closed or channel.exit_status_ready():
+                    break
+                else:
+                    time.sleep(0.05)
+        except Exception:
+            pass
+        finally:
+            stop_event.set()
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+
+    try:
+        while not stop_event.is_set():
+            try:
+                message = ws.receive(timeout=1)
+            except Exception:
+                break
+            if message is None:
+                continue
+            # There's nothing to send after the initial sensor pick - any
+            # further message from the browser just means "stop".
+            break
     finally:
         stop_event.set()
         try:
