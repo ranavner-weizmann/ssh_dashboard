@@ -1,6 +1,6 @@
 """
-SSH Dashboard
--------------
+MAMP Dashboard (Mobile Atmospheric Measurement Platform)
+----------------------------------------------------------
 Connects to a remote machine over SSH (password auth), creates a timestamped
 CSV file in /home/rsp/drone_air_system/, and lets you write notes from a
 local web dashboard. Each note is appended live to the remote CSV over SFTP.
@@ -33,7 +33,9 @@ import os
 import plistlib
 import re
 import shlex
+import shutil
 import stat
+import statistics
 import subprocess
 import sys
 import threading
@@ -41,6 +43,7 @@ import time
 import webbrowser
 from datetime import datetime
 
+import anthropic
 import paramiko
 from flask import Flask, render_template, request, jsonify
 from flask_sock import Sock
@@ -137,32 +140,71 @@ download_state = {
 }
 
 
+def _detach_ssh_handles():
+    """
+    Grabs the current SSH/SFTP handles and clears them from state,
+    returning (ssh, sftp) so the caller can close them separately -
+    shared by _mark_disconnected() and /disconnect, which both need to
+    hand the handles off rather than close() them inline (see
+    _close_ssh_handles_async's docstring for why). Caller must hold
+    state["lock"].
+    """
+    ssh = state["ssh"]
+    sftp = state["sftp"]
+    state["ssh"] = None
+    state["sftp"] = None
+    return ssh, sftp
+
+
+def _close_ssh_handles_async(ssh, sftp):
+    """
+    Closes SSH/SFTP handles in a background thread, best-effort. On a
+    dead/flaky field link, close() can sit on a TCP teardown timeout for
+    a while - closing inline, before state["connected"] flips to False,
+    left /status (read without the lock, so it doesn't even wait on this)
+    reporting "still connected" for however long that took. A quick
+    refresh during that window landed right back in the "connected" view
+    even though the user had already clicked Disconnect. Closing here
+    instead, after the caller has already flipped the flag, means every
+    other endpoint sees the session as gone the instant it actually is,
+    regardless of how long the underlying socket takes to tear down.
+    """
+    if not (ssh or sftp):
+        return
+
+    def _close():
+        try:
+            if sftp:
+                sftp.close()
+        except Exception:
+            pass
+        try:
+            if ssh:
+                ssh.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=_close, daemon=True).start()
+
+
 def _mark_disconnected():
     """
-    Tears down the SSH/SFTP handles and marks the session as no longer
-    connected. Call this from a route's `except` block whenever a remote
-    command throws - on this kind of unattended field connection, that
-    almost always means the physical link actually died (cable pulled, Pi
-    lost power, out of Wi-Fi range), not a one-off command hiccup. Without
-    this, state["connected"] just stays True forever after the transport is
-    already dead, and the dashboard's status dot keeps lying about it.
+    Marks the session as no longer connected and tears down the
+    SSH/SFTP handles. Call this from a route's `except` block whenever a
+    remote command throws - on this kind of unattended field connection,
+    that almost always means the physical link actually died (cable
+    pulled, Pi lost power, out of Wi-Fi range), not a one-off command
+    hiccup. Without this, state["connected"] just stays True forever
+    after the transport is already dead, and the dashboard's status dot
+    keeps lying about it.
 
     Callers must already hold state["lock"] - this doesn't acquire it
     itself, since most call sites are already inside a `with state["lock"]:`
     block and the lock is a plain non-reentrant threading.Lock.
     """
-    if state["ssh"]:
-        try:
-            state["sftp"].close()
-        except Exception:
-            pass
-        try:
-            state["ssh"].close()
-        except Exception:
-            pass
-    state["ssh"] = None
-    state["sftp"] = None
+    ssh, sftp = _detach_ssh_handles()
     state["connected"] = False
+    _close_ssh_handles_async(ssh, sftp)
 
 
 def build_remote_path():
@@ -180,6 +222,1652 @@ def index():
         username=state["username"],
         remote_path=state["remote_path"],
     )
+
+
+@app.route("/offline")
+def offline():
+    """
+    The offline entry point - browses whatever's already sitting in
+    downloaded_outputs/ (from a past "Download All Data" or "Backup to
+    External Drive") straight off the local disk, no SSH connection
+    needed. First step towards SSH being one option among several rather
+    than the only way into the app.
+    """
+    return render_template("offline.html")
+
+
+@app.route("/offline/sessions")
+def offline_sessions():
+    """
+    Lists every folder directly under downloaded_outputs/ - each one is
+    a past download's subfolder name - along with a rough sense of what's
+    in it (run count under output/, if present) and when it was last
+    touched, newest first.
+    """
+    if not os.path.isdir(DOWNLOADS_ROOT):
+        return jsonify({"ok": True, "sessions": []})
+
+    sessions = []
+    for name in os.listdir(DOWNLOADS_ROOT):
+        full = os.path.join(DOWNLOADS_ROOT, name)
+        if not os.path.isdir(full):
+            continue
+        run_count = 0
+        output_dir = os.path.join(full, "output")
+        if os.path.isdir(output_dir):
+            run_count = sum(
+                1 for entry in os.listdir(output_dir)
+                if os.path.isdir(os.path.join(output_dir, entry))
+            )
+        sessions.append({
+            "name": name,
+            "run_count": run_count,
+            "modified": os.path.getmtime(full),
+        })
+
+    sessions.sort(key=lambda s: s["modified"], reverse=True)
+    return jsonify({"ok": True, "sessions": sessions})
+
+
+# ---------- Offline: merging a session's runs, and viewing the result ----------
+# A downloaded session folder often holds several runall.py runs from the
+# same day (e.g. stopped and restarted between flights). These endpoints
+# merge every run on one date into a single CSV per file "type" -
+# merged_data, vitals_summary, and each per-sensor csv/<x>_data - so a
+# whole day's flights can be browsed/plotted as one continuous dataset,
+# then reuse the same table/column/plot_multi shapes as the online Data
+# Viewer (reading local files instead of SFTP) so the frontend can drive
+# both with the same plotting code.
+
+_RUN_DIR_RE = re.compile(r"^(\d{8})_\d{6}$")
+
+
+def _valid_session_name(name):
+    return bool(name) and not any(c in name for c in ("/", "\\", "..")) and name not in (".", "..")
+
+
+def _session_output_dir(session_name):
+    return os.path.join(DOWNLOADS_ROOT, session_name, "output")
+
+
+def _session_merged_dir(session_name, date):
+    return os.path.join(DOWNLOADS_ROOT, session_name, "merged", date)
+
+
+def _session_drone_dir(session_name):
+    # "Download All Data"/"Backup to External Drive" save this session's
+    # copy of the remote data_from_drone/ folder here (see
+    # DOWNLOAD_SOURCES) - flat telemetry_<date>_<time>.csv files, one per
+    # flight, unrelated to and not nested under output/ (the drone's own
+    # PSDK C app writes these independently of uri_aplogger/runall.py).
+    return os.path.join(DOWNLOADS_ROOT, session_name, "data_from_drone")
+
+
+def _session_drone_merged_dir(session_name, date):
+    # Kept under data_from_drone/ itself (not alongside merged_data_* in
+    # _session_merged_dir) so a date's merged drone CSV can never be
+    # mistaken for one more file under source="merged" - the two sources
+    # stay physically as well as logically separate. See _merge_drone_day.
+    return os.path.join(_session_drone_dir(session_name), "merged", date)
+
+
+def _list_run_dirs_by_date(session_name):
+    """
+    Groups a session's output/<run> folders by the date embedded in their
+    name (runall.py names them YYYYMMDD_HHMMSS), each date's runs sorted
+    chronologically - the local-disk, per-session equivalent of
+    /data_viewer/runs, grouped for merging rather than left flat.
+    """
+    output_dir = _session_output_dir(session_name)
+    by_date = {}
+    if os.path.isdir(output_dir):
+        for entry in os.listdir(output_dir):
+            if not os.path.isdir(os.path.join(output_dir, entry)):
+                continue
+            m = _RUN_DIR_RE.match(entry)
+            if not m:
+                continue
+            by_date.setdefault(m.group(1), []).append(entry)
+    for runs in by_date.values():
+        runs.sort()
+    return by_date
+
+
+_DRONE_FILE_RE = re.compile(r"^telemetry_(\d{8})_\d{6}\.csv$")
+
+
+def _list_drone_files_by_date(session_name):
+    """
+    Groups this session's data_from_drone/telemetry_<date>_<time>.csv
+    files by the date embedded in their name - the drone-telemetry
+    equivalent of _list_run_dirs_by_date, needed because
+    data_from_drone/ (unlike a merged day's own folder) is flat across
+    every date the drone ever flew in this session, not pre-split by day.
+    """
+    drone_dir = _session_drone_dir(session_name)
+    by_date = {}
+    if os.path.isdir(drone_dir):
+        for entry in os.listdir(drone_dir):
+            m = _DRONE_FILE_RE.match(entry)
+            # The drone's onboard clock defaults to 2021 until it gets a
+            # GPS fix, so pre-fix telemetry is stamped with a bogus 2021
+            # date - exclude it rather than show it as a selectable date.
+            if not m or m.group(1).startswith("2021"):
+                continue
+            by_date.setdefault(m.group(1), []).append(entry)
+    for files in by_date.values():
+        files.sort()
+    return by_date
+
+
+def _drone_day_merged_dir_if_present(name, date):
+    """
+    Returns _session_drone_merged_dir(name, date) if _merge_drone_day
+    has actually written something there, else None - the single check
+    _offline_source_dir/_offline_files_for_date both use to decide
+    whether a date's drone view should serve the merged CSV or fall back
+    to the individual flight files.
+    """
+    merged_dir = _session_drone_merged_dir(name, date)
+    if os.path.isdir(merged_dir) and os.listdir(merged_dir):
+        return merged_dir
+    return None
+
+
+def _offline_source_dir(name, source, date):
+    """
+    Resolves which local folder an offline read endpoint should look in -
+    a merged day's own folder (source="merged", the default - every one
+    of these endpoints predates the drone source and keeps behaving
+    exactly as before), this date's merged drone CSV if one has been
+    made (see _merge_drone_day), or otherwise this session's flat
+    data_from_drone/ folder (source="drone"). Unlike _session_merged_dir,
+    the flat drone folder isn't itself date-scoped - callers reading
+    "every file for this date" under source="drone" need
+    _offline_files_for_date below, not a plain directory listing.
+    """
+    if source == "drone":
+        return _drone_day_merged_dir_if_present(name, date) or _session_drone_dir(name)
+    return _session_merged_dir(name, date)
+
+
+def _offline_files_for_date(name, source, date):
+    """
+    [(relpath, size), ...] for whichever files back this date's offline
+    view - every CSV in the merged day's own folder (source="merged";
+    that folder is already scoped to one date, same as
+    _list_csv_files_in_dir elsewhere). For source="drone": this date's
+    merged telemetry CSV alone, if _merge_drone_day has made one - a day
+    with several flights would otherwise offer the same handful of
+    column names once per flight, which is exactly what merging fixes -
+    or otherwise every individual telemetry_*.csv flight file for this
+    date out of the session's flat data_from_drone/ folder (everything
+    else in that folder belongs to a different date and must stay
+    excluded).
+    """
+    if source == "drone":
+        merged_dir = _drone_day_merged_dir_if_present(name, date)
+        if merged_dir:
+            return _list_csv_files_in_dir(merged_dir)
+        drone_dir = _session_drone_dir(name)
+        files = []
+        for fname in _list_drone_files_by_date(name).get(date, []):
+            try:
+                files.append((fname, os.path.getsize(os.path.join(drone_dir, fname))))
+            except OSError:
+                continue
+        return files
+    return _list_csv_files_in_dir(_session_merged_dir(name, date))
+
+
+def _list_csv_files_in_dir(base_dir):
+    """
+    Local-disk equivalent of _list_run_csv_files: every .csv directly in
+    base_dir, plus its csv/ subfolder - the same two-location shape every
+    run (and now every merged day) uses.
+    """
+    files = []
+    if os.path.isdir(base_dir):
+        for name in sorted(os.listdir(base_dir)):
+            if name.endswith(".csv"):
+                files.append((name, os.path.getsize(os.path.join(base_dir, name))))
+    csv_dir = os.path.join(base_dir, "csv")
+    if os.path.isdir(csv_dir):
+        for name in sorted(os.listdir(csv_dir)):
+            if name.endswith(".csv"):
+                files.append((f"csv/{name}", os.path.getsize(os.path.join(csv_dir, name))))
+    return files
+
+
+def _read_local_csv(base_dir, relpath):
+    """
+    Local-disk equivalent of _read_remote_csv: validates the relpath
+    shape (reusing the same run-CSV validator - a merged day's folder has
+    the identical root-file/csv-subfolder shape) and reads it straight
+    off disk, no SSH involved.
+    """
+    if not _valid_csv_relpath(relpath):
+        return None, (jsonify({"ok": False, "error": "Invalid file path."}), 400)
+    full_path = os.path.join(base_dir, relpath)
+    try:
+        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    except Exception as e:
+        return None, (jsonify({"ok": False, "error": f"Could not read {relpath}: {e}"}), 500)
+    return raw, None
+
+
+def _merge_day(session_name, date, dest_dir=None):
+    """
+    Concatenates every run's merged_data_*.csv on `date` into one CSV,
+    written to <session>/merged/<date>/merged_data_<date>_merged.csv.
+    merged_data is runall.py's own per-run join of every instrument onto
+    one row-per-timestamp table (imet_*, pom_*, trisonica_*, ... columns
+    all together) - so concatenating it across a day's runs already
+    yields one file with every instrument in it, without re-joining the
+    per-sensor csv/ logs (which are each on their own independent
+    timebase and would need a real join, not a concatenation, to combine
+    - out of scope here since merged_data already did that per-run work).
+
+    Runs are concatenated in chronological (run-folder-name) order, which
+    is already time order within each run's own rows, so no separate sort
+    pass is needed - flights on a given day are back-to-back and
+    non-overlapping. A leading "_source_run" column (inserted right after
+    the original time column, so column 0 is still the time axis - the
+    same convention every unmerged CSV uses) traces each row back to the
+    run it came from. Always regenerates from scratch, so re-merging
+    after a fresh download just picks up whatever runs exist now rather
+    than risking a stale partial merge.
+
+    dest_dir, if given, is an arbitrary folder elsewhere on this machine
+    (chosen in the "Merge" modal) that also gets a copy of the finished
+    CSV. It's purely an extra copy for the user's own filing - the
+    canonical copy under <session>/merged/<date>/ is always written
+    regardless, since that's what this offline viewer's own
+    files/columns/table/plot_multi endpoints read from. A failed copy
+    (e.g. the folder disappeared, a full disk) doesn't fail the merge
+    itself - the real merge already succeeded - it's reported back as
+    dest_error instead.
+
+    Returns ({"rows": N, "skipped_rows": N, "dest_path": path_or_None,
+    "dest_error": message_or_None}, None) on success, or (None,
+    error_message) if there was nothing to merge.
+    """
+    by_date = _list_run_dirs_by_date(session_name)
+    runs = by_date.get(date)
+    if not runs:
+        return None, "No runs found for that date."
+
+    output_dir = _session_output_dir(session_name)
+    merged_dir = _session_merged_dir(session_name, date)
+
+    entries = []  # [(run_name, full_path), ...] in run (= time) order
+    for run in runs:
+        run_dir = os.path.join(output_dir, run)
+        for name in sorted(os.listdir(run_dir)):
+            if name.endswith(".csv") and name.startswith("merged_data_"):
+                entries.append((run, os.path.join(run_dir, name)))
+                break  # one merged_data file per run
+
+    if not entries:
+        return None, "No merged_data CSV found in this date's runs."
+
+    # Clear out anything already here before writing - re-merging is
+    # meant to fully regenerate this date's output, and an older version
+    # of this feature wrote a file per instrument instead of one; without
+    # this, re-merging a date merged under that older behavior would
+    # leave its per-instrument leftovers sitting alongside the new single
+    # file rather than actually replacing them.
+    if os.path.isdir(merged_dir):
+        shutil.rmtree(merged_dir)
+    os.makedirs(merged_dir, exist_ok=True)
+    out_path = os.path.join(merged_dir, f"merged_data_{date}_merged.csv")
+
+    header = None
+    total_rows = 0
+    skipped_rows = 0
+    with open(out_path, "w", newline="", encoding="utf-8") as out_f:
+        writer = csv.writer(out_f)
+        for run, path in entries:
+            with open(path, "r", newline="", encoding="utf-8", errors="replace") as in_f:
+                reader = csv.reader(in_f)
+                try:
+                    this_header = next(reader)
+                except StopIteration:
+                    continue
+                if header is None:
+                    header = this_header
+                    writer.writerow([this_header[0], "_source_run"] + this_header[1:])
+                elif this_header != header:
+                    # Schema drift between runs (e.g. sensor config
+                    # changed mid-day) - skip rather than silently
+                    # misaligning columns; that run's own file is
+                    # still there to view individually.
+                    continue
+                for row in reader:
+                    # Guards against a truncated/torn write (seen in
+                    # practice: a file downloaded while runall.py was
+                    # still flushing to it can end in a garbage partial
+                    # row) - a real data row always has as many fields
+                    # as the header it was written under.
+                    if len(row) != len(this_header):
+                        skipped_rows += 1
+                        continue
+                    writer.writerow([row[0], run] + row[1:])
+                    total_rows += 1
+
+    result = {"rows": total_rows, "skipped_rows": skipped_rows, "dest_path": None, "dest_error": None}
+
+    if dest_dir:
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            dest_path = os.path.join(dest_dir, os.path.basename(out_path))
+            shutil.copy2(out_path, dest_path)
+            result["dest_path"] = dest_path
+        except Exception as e:
+            result["dest_error"] = f"Merged, but could not copy to {dest_dir}: {e}"
+
+    return result, None
+
+
+def _merge_drone_day(session_name, date, dest_dir=None):
+    """
+    The drone-telemetry equivalent of _merge_day: concatenates every
+    flight (data_from_drone/telemetry_<date>_<time>.csv) on `date` into
+    one CSV, written to
+    <session>/data_from_drone/merged/<date>/telemetry_<date>_merged.csv.
+    Once this exists, _offline_source_dir/_offline_files_for_date serve
+    it instead of the individual flight files for source="drone" - a
+    day with several flights previously showed every flight's identical
+    column names duplicated once per flight in the variable picker;
+    merging collapses that back down to one file, one set of variables,
+    same as a merged sensor day.
+
+    Unlike a sensor run's merged_data (independently-sampled instruments
+    joined onto one row-per-timestamp table), every flight already
+    shares the exact same schema straight from the drone's own logger,
+    so this is a plain concatenation - no per-instrument join involved.
+    Flights are concatenated in filename (= time) order, same
+    chronological-by-construction assumption _merge_day relies on. A
+    leading "_source_file" column traces each row back to which flight
+    it came from, playing the same role _merge_day's "_source_run" does.
+    Always regenerates from scratch, so re-merging after downloading
+    more flights just picks up whatever's there now.
+
+    Returns ({"rows": N, "skipped_rows": N, "dest_path": path_or_None,
+    "dest_error": message_or_None}, None) on success, or (None,
+    error_message) if there was nothing to merge.
+    """
+    flights = _list_drone_files_by_date(session_name).get(date, [])
+    if not flights:
+        return None, "No drone telemetry found for that date."
+
+    drone_dir = _session_drone_dir(session_name)
+    merged_dir = _session_drone_merged_dir(session_name, date)
+
+    if os.path.isdir(merged_dir):
+        shutil.rmtree(merged_dir)
+    os.makedirs(merged_dir, exist_ok=True)
+    out_path = os.path.join(merged_dir, f"telemetry_{date}_merged.csv")
+
+    header = None
+    total_rows = 0
+    skipped_rows = 0
+    with open(out_path, "w", newline="", encoding="utf-8") as out_f:
+        writer = csv.writer(out_f)
+        for fname in flights:
+            path = os.path.join(drone_dir, fname)
+            with open(path, "r", newline="", encoding="utf-8", errors="replace") as in_f:
+                reader = csv.reader(in_f)
+                try:
+                    this_header = next(reader)
+                except StopIteration:
+                    continue
+                if header is None:
+                    header = this_header
+                    writer.writerow([this_header[0], "_source_file"] + this_header[1:])
+                elif this_header != header:
+                    # Schema drift between flights (e.g. a firmware
+                    # update mid-session) - skip rather than silently
+                    # misaligning columns; that flight's own file is
+                    # still there to view individually.
+                    continue
+                for row in reader:
+                    if len(row) != len(this_header):
+                        skipped_rows += 1
+                        continue
+                    writer.writerow([row[0], fname] + row[1:])
+                    total_rows += 1
+
+    result = {"rows": total_rows, "skipped_rows": skipped_rows, "dest_path": None, "dest_error": None}
+
+    if dest_dir:
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            dest_path = os.path.join(dest_dir, os.path.basename(out_path))
+            shutil.copy2(out_path, dest_path)
+            result["dest_path"] = dest_path
+        except Exception as e:
+            result["dest_error"] = f"Merged, but could not copy to {dest_dir}: {e}"
+
+    return result, None
+
+
+@app.route("/offline/session/<name>/days")
+def offline_session_days(name):
+    """
+    Lists this session's dates, each with its sensor run count and
+    whether it's already been merged (the frontend uses this to offer
+    "Merge" for a fresh date and "View merged data" for one already
+    done), plus any drone telemetry flights on that date and whether
+    *those* have already been merged into one CSV (see
+    _merge_drone_day). A date can have either, both, or (for a
+    drone-only date - the drone flew a shakedown flight with no sensor
+    rig running) just drone_files, so the date list is the union of both
+    sources rather than driven off sensor runs alone.
+    """
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+
+    by_date = _list_run_dirs_by_date(name)
+    drone_by_date = _list_drone_files_by_date(name)
+    drone_dir = _session_drone_dir(name)
+
+    days = []
+    for date in sorted(set(by_date) | set(drone_by_date), reverse=True):
+        runs = by_date.get(date, [])
+        merged_dir = _session_merged_dir(name, date)
+        drone_merged_dir = _session_drone_merged_dir(name, date)
+        days.append({
+            "date": date,
+            "run_count": len(runs),
+            "merged": os.path.isdir(merged_dir) and bool(os.listdir(merged_dir)),
+            "drone_files": [
+                {"file": f, "size": os.path.getsize(os.path.join(drone_dir, f))}
+                for f in drone_by_date.get(date, [])
+            ],
+            "drone_merged": os.path.isdir(drone_merged_dir) and bool(os.listdir(drone_merged_dir)),
+        })
+    return jsonify({"ok": True, "days": days})
+
+
+@app.route("/offline/session/<name>/merge", methods=["POST"])
+def offline_merge_day(name):
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    data = request.get_json() or {}
+    date = (data.get("date") or "").strip()
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+
+    # Optional "also save a copy here" folder from the merge modal - must
+    # be absolute (a relative path is meaningless from a browser, which
+    # has no notion of this process's cwd) before it's ever used as a
+    # write target.
+    dest_dir = (data.get("dest_dir") or "").strip() or None
+    if dest_dir and not os.path.isabs(dest_dir):
+        return jsonify({"ok": False, "error": "Destination must be an absolute path."}), 400
+
+    try:
+        result, err = _merge_day(name, date, dest_dir=dest_dir)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Merge failed: {e}"}), 500
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+
+    return jsonify({
+        "ok": True,
+        "rows": result["rows"],
+        "skipped_rows": result["skipped_rows"],
+        "dest_path": result["dest_path"],
+        "dest_error": result["dest_error"],
+    })
+
+
+@app.route("/offline/session/<name>/merge_drone", methods=["POST"])
+def offline_merge_drone_day(name):
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    data = request.get_json() or {}
+    date = (data.get("date") or "").strip()
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+
+    dest_dir = (data.get("dest_dir") or "").strip() or None
+    if dest_dir and not os.path.isabs(dest_dir):
+        return jsonify({"ok": False, "error": "Destination must be an absolute path."}), 400
+
+    try:
+        result, err = _merge_drone_day(name, date, dest_dir=dest_dir)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Merge failed: {e}"}), 500
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+
+    return jsonify({
+        "ok": True,
+        "rows": result["rows"],
+        "skipped_rows": result["skipped_rows"],
+        "dest_path": result["dest_path"],
+        "dest_error": result["dest_error"],
+    })
+
+
+@app.route("/offline/session/<name>/merged/<date>/files")
+def offline_merged_files(name, date):
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+    files = _list_csv_files_in_dir(_session_merged_dir(name, date))
+    return jsonify({"ok": True, "files": [{"path": path, "size": size} for path, size in files]})
+
+
+@app.route("/offline/session/<name>/merged/<date>/columns")
+def offline_merged_columns(name, date):
+    """
+    Column info for every file backing this date's view, in one
+    response, so the plot picker can offer every instrument's data as
+    one flat list. source="merged" (the default) means the merged day's
+    single CSV; source="drone" means that date's telemetry_*.csv
+    flight(s). Safe to read every file up front here (unlike the online
+    Data Viewer, which fetches only the one file a user picks) since this
+    is plain local disk I/O, not a slow/high-latency SSH round trip per
+    file.
+    """
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+    source = (request.args.get("source") or "merged").strip()
+    base_dir = _offline_source_dir(name, source, date)
+
+    files = []
+    for relpath, _size in _offline_files_for_date(name, source, date):
+        raw, err = _read_local_csv(base_dir, relpath)
+        if err:
+            continue
+        rows = list(csv.reader(io.StringIO(raw)))
+        if not rows:
+            continue
+        columns = rows[0]
+        files.append({
+            "file": relpath,
+            "columns": columns,
+            "column_numeric": _compute_column_numeric(columns, rows[1:]),
+        })
+    return jsonify({"ok": True, "files": files})
+
+
+@app.route("/offline/session/<name>/merged/<date>/table")
+def offline_merged_table(name, date):
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+    relpath = (request.args.get("file") or "").strip()
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except ValueError:
+        page = 1
+
+    merged_dir = _session_merged_dir(name, date)
+    raw, err = _read_local_csv(merged_dir, relpath)
+    if err:
+        return err
+
+    all_rows = list(csv.reader(io.StringIO(raw)))
+    if not all_rows:
+        return jsonify({
+            "ok": True, "file": relpath,
+            "columns": [], "column_numeric": [], "rows": [],
+            "total_rows": 0, "page": 1, "page_size": DATA_VIEWER_PAGE_SIZE, "total_pages": 1,
+        })
+
+    columns = all_rows[0]
+    data_rows = all_rows[1:]
+    total_rows = len(data_rows)
+    total_pages = max(1, math.ceil(total_rows / DATA_VIEWER_PAGE_SIZE))
+    page = min(page, total_pages)
+    start = (page - 1) * DATA_VIEWER_PAGE_SIZE
+    page_rows = data_rows[start:start + DATA_VIEWER_PAGE_SIZE]
+
+    return jsonify({
+        "ok": True,
+        "file": relpath,
+        "columns": columns,
+        "column_numeric": _compute_column_numeric(columns, data_rows),
+        "rows": page_rows,
+        "total_rows": total_rows,
+        "page": page,
+        "page_size": DATA_VIEWER_PAGE_SIZE,
+        "total_pages": total_pages,
+    })
+
+
+@app.route("/offline/session/<name>/merged/<date>/plot_multi")
+def offline_merged_plot_multi(name, date):
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+    source = (request.args.get("source") or "merged").strip()
+    relpath = (request.args.get("file") or "").strip()
+    columns = [c for c in (request.args.get("columns") or "").split(",") if c]
+
+    base_dir = _offline_source_dir(name, source, date)
+    raw, err = _read_local_csv(base_dir, relpath)
+    if err:
+        return err
+    if not columns:
+        return jsonify({"ok": False, "error": "At least one column is required."}), 400
+
+    reader = csv.DictReader(io.StringIO(raw))
+    fieldnames = reader.fieldnames or []
+    for column in columns:
+        if column not in fieldnames:
+            return jsonify({"ok": False, "error": f'Column "{column}" not found in this file.'}), 400
+    time_column = fieldnames[0]
+
+    series_points = {column: [] for column in columns}
+    series_decimals = {column: 0 for column in columns}
+    for row in reader:
+        ts = row.get(time_column)
+        if not ts:
+            continue
+        for column in columns:
+            raw_val = (row.get(column) or "").strip()
+            if not raw_val:
+                continue
+            try:
+                value = float(raw_val)
+            except ValueError:
+                continue
+            series_points[column].append({"t": ts, "v": value})
+            if "." in raw_val:
+                series_decimals[column] = max(series_decimals[column], min(4, len(raw_val.split(".")[-1])))
+
+    return jsonify({
+        "ok": True,
+        "file": relpath,
+        "time_column": time_column,
+        "series": [
+            {"column": column, "points": series_points[column], "decimals": series_decimals[column]}
+            for column in columns
+        ],
+    })
+
+
+# ---------- Offline: deeper exploration of a merged day (stats, correlation, ----------
+# ---------- histogram, scatter) ----------
+# All four read the same merged-day CSVs as /plot_multi above, just
+# summarized differently. No numpy/pandas dependency in this project, so
+# the stats/correlation math below is plain stdlib.
+
+def _parse_numeric(raw_val):
+    """
+    Shared float-parse for these four endpoints - same rule as
+    _compute_column_numeric's per-value check (guards against PEP 515's
+    "_" digit-group separator turning a run-folder-name-shaped value like
+    "20260813_151443", e.g. the merged CSVs' own _source_run column, into
+    a number). Returns None for blank/non-numeric values instead of
+    raising.
+    """
+    val = (raw_val or "").strip()
+    if not val or "_" in val:
+        return None
+    try:
+        return float(val)
+    except ValueError:
+        return None
+
+
+def _values_by_column(raw, columns):
+    """
+    Parses already-fetched CSV text and returns ({column: [values...]},
+    None) for the requested columns - blank/non-numeric cells simply
+    excluded from that column's list, independently per column (so each
+    column's list only reflects rows where *that* column had a value,
+    same as /plot_multi). Only needs each column's own value
+    distribution, not row-for-row alignment across columns (unlike
+    correlation, which needs pairs from the same row and reads rows
+    itself - see _correlation_matrix_from_raw). Split out from
+    _read_merged_columns so both the local-disk and SFTP-backed callers
+    can share it without a second read of their own source.
+
+    Returns (None, error_response) if a requested column doesn't exist.
+    """
+    reader = csv.DictReader(io.StringIO(raw))
+    fieldnames = reader.fieldnames or []
+    for column in columns:
+        if column not in fieldnames:
+            return None, (jsonify({"ok": False, "error": f'Column "{column}" not found in this file.'}), 400)
+
+    values = {column: [] for column in columns}
+    for row in reader:
+        for column in columns:
+            v = _parse_numeric(row.get(column))
+            if v is not None:
+                values[column].append(v)
+    return values, None
+
+
+def _read_merged_columns(base_dir, relpath, columns):
+    """
+    Reads one local CSV once and extracts the requested columns' values
+    via _values_by_column - the shared row source for /stats and
+    /histogram. See _values_by_column for the value-extraction
+    semantics.
+
+    Returns (None, error_response) if the file can't be read or a
+    requested column doesn't exist.
+    """
+    raw, err = _read_local_csv(base_dir, relpath)
+    if err:
+        return None, err
+    return _values_by_column(raw, columns)
+
+
+def _pearson(xs, ys):
+    """
+    Pearson correlation coefficient between two equal-length lists,
+    computed by hand (no numpy/scipy in this project). Returns (None, n)
+    if there are fewer than 2 points or either series is constant (zero
+    variance has no meaningful correlation, and would divide by zero
+    here).
+    """
+    n = len(xs)
+    if n < 2:
+        return None, n
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    var_y = sum((y - mean_y) ** 2 for y in ys)
+    if var_x == 0 or var_y == 0:
+        return None, n
+    r = cov / math.sqrt(var_x * var_y)
+    return max(-1.0, min(1.0, r)), n
+
+
+def _stats_from_values(values, columns):
+    """
+    Summary statistics (count/mean/std/min/p25/median/p75/max) for each
+    column, given its already-extracted values - a hand-rolled
+    describe(), since this project has no pandas. Split out from
+    _stats_for_columns so the Data Viewer's SFTP-backed assistant
+    context can reuse the same computation on values it fetched itself,
+    without a second read of its own source.
+    """
+    stats = []
+    for column in columns:
+        data = sorted(values[column])
+        n = len(data)
+        if n == 0:
+            stats.append({
+                "column": column, "count": 0, "mean": None, "std": None,
+                "min": None, "p25": None, "median": None, "p75": None, "max": None,
+            })
+            continue
+        if n >= 2:
+            std = statistics.stdev(data)
+            p25, median, p75 = statistics.quantiles(data, n=4, method="inclusive")
+        else:
+            std = None
+            p25 = median = p75 = data[0]
+        stats.append({
+            "column": column, "count": n, "mean": statistics.mean(data), "std": std,
+            "min": data[0], "p25": p25, "median": median, "p75": p75, "max": data[-1],
+        })
+    return stats
+
+
+def _stats_for_columns(base_dir, relpath, columns):
+    """
+    Summary statistics for each column of a local CSV. Shared by /stats
+    and the offline assistant's data context (below), so both describe a
+    selection the same way.
+
+    Returns (stats_list, None) on success, or (None, error_response).
+    """
+    values, err = _read_merged_columns(base_dir, relpath, columns)
+    if err:
+        return None, err
+    return _stats_from_values(values, columns), None
+
+
+def _correlation_matrix_from_raw(raw, columns):
+    """
+    Pairwise Pearson correlation between every pair of columns, parsed
+    from already-fetched CSV text. Pairwise-deleted (each pair uses only
+    the rows where both of that pair's columns have a value), not
+    listwise - merged_data's columns come from independently-sampled
+    instruments and are rarely all populated on the same row, so
+    requiring every requested column at once would throw away most of
+    the data; each pair still only ever compares values genuinely read
+    off the same row. Split out from _correlation_matrix_for_columns so
+    the Data Viewer's SFTP-backed assistant context can reuse it on text
+    it fetched itself, without a second read of its own source.
+
+    Returns (matrix_list, None) on success, or (None, error_response).
+    """
+    reader = csv.DictReader(io.StringIO(raw))
+    fieldnames = reader.fieldnames or []
+    for column in columns:
+        if column not in fieldnames:
+            return None, (jsonify({"ok": False, "error": f'Column "{column}" not found in this file.'}), 400)
+
+    # Every requested column's parsed value per row, rows kept aligned -
+    # unlike _values_by_column, which drops each column's blanks
+    # independently and so loses the row alignment pairs need.
+    rows = [{c: _parse_numeric(row.get(c)) for c in columns} for row in reader]
+
+    matrix = []
+    for i, a in enumerate(columns):
+        for b in columns[i:]:
+            xs, ys = [], []
+            for row in rows:
+                if row[a] is not None and row[b] is not None:
+                    xs.append(row[a])
+                    ys.append(row[b])
+            r, n = _pearson(xs, ys)
+            matrix.append({"a": a, "b": b, "r": r, "n": n})
+
+    return matrix, None
+
+
+def _correlation_matrix_for_columns(base_dir, relpath, columns):
+    """
+    Pairwise Pearson correlation for a local CSV's columns. Shared by
+    /correlation and the offline assistant's data context (below).
+
+    Returns (matrix_list, None) on success, or (None, error_response).
+    """
+    raw, err = _read_local_csv(base_dir, relpath)
+    if err:
+        return None, err
+    return _correlation_matrix_from_raw(raw, columns)
+
+
+@app.route("/offline/session/<name>/merged/<date>/stats")
+def offline_merged_stats(name, date):
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+    source = (request.args.get("source") or "merged").strip()
+    relpath = (request.args.get("file") or "").strip()
+    columns = [c for c in (request.args.get("columns") or "").split(",") if c]
+    if not columns:
+        return jsonify({"ok": False, "error": "At least one column is required."}), 400
+
+    base_dir = _offline_source_dir(name, source, date)
+    stats, err = _stats_for_columns(base_dir, relpath, columns)
+    if err:
+        return err
+    return jsonify({"ok": True, "file": relpath, "stats": stats})
+
+
+@app.route("/offline/session/<name>/merged/<date>/correlation")
+def offline_merged_correlation(name, date):
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+    source = (request.args.get("source") or "merged").strip()
+    relpath = (request.args.get("file") or "").strip()
+    columns = [c for c in (request.args.get("columns") or "").split(",") if c]
+    if len(columns) < 2:
+        return jsonify({"ok": False, "error": "At least two columns are required."}), 400
+
+    base_dir = _offline_source_dir(name, source, date)
+    matrix, err = _correlation_matrix_for_columns(base_dir, relpath, columns)
+    if err:
+        return err
+    return jsonify({"ok": True, "file": relpath, "matrix": matrix})
+
+
+@app.route("/offline/session/<name>/merged/<date>/histogram")
+def offline_merged_histogram(name, date):
+    """
+    Equal-width histogram (bin edges + counts) for one column of one
+    merged-day file - the distribution view alongside /stats and
+    /correlation's summary numbers.
+    """
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+    source = (request.args.get("source") or "merged").strip()
+    relpath = (request.args.get("file") or "").strip()
+    column = (request.args.get("column") or "").strip()
+    try:
+        bin_count = max(1, min(100, int(request.args.get("bins", "20"))))
+    except ValueError:
+        bin_count = 20
+    if not column:
+        return jsonify({"ok": False, "error": "A column is required."}), 400
+
+    base_dir = _offline_source_dir(name, source, date)
+    values, err = _read_merged_columns(base_dir, relpath, [column])
+    if err:
+        return err
+
+    data = values[column]
+    if not data:
+        return jsonify({"ok": True, "file": relpath, "column": column, "edges": [], "counts": [], "n": 0})
+
+    lo, hi = min(data), max(data)
+    if lo == hi:
+        lo -= 0.5
+        hi += 0.5
+    width = (hi - lo) / bin_count
+    counts = [0] * bin_count
+    for v in data:
+        idx = int((v - lo) / width)
+        if idx >= bin_count:
+            idx = bin_count - 1  # the max value itself would otherwise land one past the last edge
+        counts[idx] += 1
+    edges = [lo + i * width for i in range(bin_count + 1)]
+
+    return jsonify({"ok": True, "file": relpath, "column": column, "edges": edges, "counts": counts, "n": len(data)})
+
+
+@app.route("/offline/session/<name>/merged/<date>/scatter")
+def offline_merged_scatter(name, date):
+    """
+    Paired (x, y) values - each pair read off the same row, so genuinely
+    simultaneous readings - for two columns of one merged-day file, plus
+    their least-squares regression line and Pearson r. The scatter
+    counterpart to /correlation's single number; reads the file itself
+    (like /correlation) rather than using _read_merged_columns, since it
+    needs both raw values kept row-aligned rather than each column's
+    blanks dropped separately.
+    """
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+    source = (request.args.get("source") or "merged").strip()
+    relpath = (request.args.get("file") or "").strip()
+    x_column = (request.args.get("x") or "").strip()
+    y_column = (request.args.get("y") or "").strip()
+    if not x_column or not y_column:
+        return jsonify({"ok": False, "error": "Both x and y columns are required."}), 400
+
+    base_dir = _offline_source_dir(name, source, date)
+    raw, err = _read_local_csv(base_dir, relpath)
+    if err:
+        return err
+
+    reader = csv.DictReader(io.StringIO(raw))
+    fieldnames = reader.fieldnames or []
+    for column in (x_column, y_column):
+        if column not in fieldnames:
+            return jsonify({"ok": False, "error": f'Column "{column}" not found in this file.'}), 400
+
+    points = []
+    for row in reader:
+        x = _parse_numeric(row.get(x_column))
+        y = _parse_numeric(row.get(y_column))
+        if x is not None and y is not None:
+            points.append({"x": x, "y": y})
+
+    xs = [p["x"] for p in points]
+    ys = [p["y"] for p in points]
+    r, n = _pearson(xs, ys)
+
+    regression = None
+    if n >= 2:
+        mean_x = sum(xs) / n
+        mean_y = sum(ys) / n
+        var_x = sum((x - mean_x) ** 2 for x in xs)
+        if var_x > 0:
+            slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / var_x
+            regression = {"slope": slope, "intercept": mean_y - slope * mean_x}
+
+    return jsonify({
+        "ok": True, "file": relpath, "x_column": x_column, "y_column": y_column,
+        "points": points, "n": n, "r": r,
+        "r_squared": (r * r) if r is not None else None,
+        "regression": regression,
+    })
+
+
+# ---------- Offline: a Claude-backed assistant scoped to one day's data ----------
+# A small chat endpoint for the offline exploration page - grounded in
+# the same statistics and correlations /stats and /correlation already
+# compute, rather than raw data (keeps the prompt small) or general
+# knowledge (would let it guess). Stateless like the rest of this app:
+# the frontend keeps the conversation history in memory and resends it
+# with every question.
+
+ASSISTANT_MODEL = "claude-opus-5"
+
+ASSISTANT_SYSTEM_PREAMBLE = (
+    "You are a data-analysis assistant built into a local dashboard for a drone-based "
+    "air pollution research project. You're helping the operator understand the data "
+    "currently on their screen - either a downloaded session's saved data, or whatever's "
+    "live on the Pi right now - the summary statistics and correlations below are "
+    "computed over the actual data, not estimated. Answer using these numbers; if a "
+    "question needs something not shown here (specific data points, visual inspection of "
+    "the plot itself) and you have no tool that can get it, say so plainly rather than "
+    "guessing. Keep answers concise."
+)
+
+# Appended to the system prompt only when tools are offered (the online
+# Data Viewer assistant - see _ask_claude_with_tools) - the base
+# preamble above is shared with the offline assistant, which has no
+# tools and must always defer on anything not already in its context.
+ASSISTANT_TOOLS_ADDENDUM = (
+    "\n\nYou also have tools to look beyond the variables currently on the plot: "
+    "list_instruments to see what files exist for this run, check_instrument_health to "
+    "check whether specific files are still being written to and whether their latest "
+    "readings look anomalous, and scan_correlations to find strong relationships between "
+    "different instruments' readings. Reach for these when the operator asks something "
+    "broader than what's currently plotted - e.g. whether sensors are running properly, "
+    "whether anything looks unusual, or whether instruments correlate with each other."
+)
+
+_anthropic_client = None
+
+
+def _get_anthropic_client():
+    """
+    Lazily constructs the Anthropic client, reusing it across requests -
+    constructing it eagerly at import time would make the whole app fail
+    to start (or crash on first request) if ANTHROPIC_API_KEY isn't set,
+    when every other feature in this dashboard works fine without it.
+
+    Checks for credentials explicitly rather than trusting
+    anthropic.Anthropic() to raise: the SDK doesn't validate credentials
+    at construction time, only once a real request tries to build its
+    headers - and a missing key surfaces there as a bare TypeError deep
+    in request-building code, not a catchable AnthropicError. Raises
+    RuntimeError with a message meant to be shown directly to the user
+    if no credentials are configured.
+    """
+    global _anthropic_client
+    if _anthropic_client is None:
+        if not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+            raise RuntimeError(
+                "No ANTHROPIC_API_KEY is set in this process's environment. "
+                "Set it and restart the dashboard to use the assistant."
+            )
+        _anthropic_client = anthropic.Anthropic()
+    return _anthropic_client
+
+
+def _ask_claude_with_context(context, question, history):
+    """
+    Shared Claude call for both /assistant/ask (offline exploration) and
+    /assistant/ask_online (Data Viewer) - same model, system preamble,
+    conversation-history handling, and error mapping; only how each
+    endpoint builds its `context` text differs (a downloaded session's
+    local files vs. whatever's live on the Pi over SFTP).
+
+    Returns (result_dict, None) on success, or (None, error_response).
+    """
+    try:
+        client = _get_anthropic_client()
+    except RuntimeError as e:
+        return None, (jsonify({"ok": False, "error": str(e)}), 500)
+
+    messages = [{"role": m["role"], "content": m["content"]} for m in history]
+    messages.append({"role": "user", "content": question})
+
+    try:
+        response = client.messages.create(
+            model=ASSISTANT_MODEL,
+            max_tokens=1024,
+            output_config={"effort": "medium"},
+            system=f"{ASSISTANT_SYSTEM_PREAMBLE}\n\n{context}",
+            messages=messages,
+        )
+    except anthropic.APIStatusError as e:
+        return None, (jsonify({"ok": False, "error": f"Claude API error: {e.message}"}), 502)
+    except anthropic.APIConnectionError:
+        return None, (jsonify({"ok": False, "error": "Could not reach the Claude API - check your internet connection."}), 502)
+    except Exception as e:
+        # Catches anything the SDK itself raises outside its own exception
+        # hierarchy (e.g. a malformed-credential TypeError) - this call
+        # goes out to a third party with failure modes the two branches
+        # above don't fully cover, so it gets a safety net this app's
+        # local-only endpoints don't need.
+        return None, (jsonify({"ok": False, "error": f"Could not reach Claude: {e}"}), 502)
+
+    if response.stop_reason == "refusal":
+        return None, (jsonify({"ok": False, "error": "Claude declined to answer that question."}), 200)
+
+    answer = "".join(block.text for block in response.content if block.type == "text")
+    return {
+        "ok": True,
+        "answer": answer,
+        "usage": {
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+        },
+    }, None
+
+
+def _build_offline_data_context(name, date, columns):
+    """
+    Renders the currently-selected variables' statistics (and, within
+    each file, their pairwise correlation) as plain text for the
+    assistant's system prompt - the same numbers /stats and
+    /correlation return as JSON, just narrated, so answers are grounded
+    in real numbers instead of guesses. columns is
+    [{"file","column","source"}, ...], the same shape the offline page's
+    activeSeries already is - "source" being "merged" or "drone" per
+    entry, since one plot can mix a day's merged sensor data with that
+    day's drone telemetry at once (the online Data Viewer's
+    _build_online_data_context takes the same shape for the same
+    reason).
+
+    A request with nothing selected still gets a valid (if sparse)
+    context - the system prompt tells the assistant to say so rather
+    than fabricate. Returns (context_text, None), or (None,
+    error_response) if a column lookup fails.
+    """
+    lines = [
+        f"Session: {name}",
+        f"Date: {date[:4]}-{date[4:6]}-{date[6:]}",
+    ]
+
+    if not columns:
+        lines.append(
+            "\nNo variables are currently added to the plot - the operator hasn't "
+            "picked anything to look at yet in this conversation."
+        )
+        return "\n".join(lines), None
+
+    by_file = {}
+    for c in columns:
+        by_file.setdefault((c.get("source") or "merged", c["file"]), []).append(c["column"])
+
+    for (source, relpath), cols in by_file.items():
+        file_label = "drone telemetry" if source == "drone" else "merged sensor data"
+        base_dir = _offline_source_dir(name, source, date)
+        stats, err = _stats_for_columns(base_dir, relpath, cols)
+        if err:
+            return None, err
+
+        lines.append(f"\nVariables from {relpath} ({file_label}):")
+        for s in stats:
+            if s["count"] == 0:
+                lines.append(f"  - {s['column']}: no numeric values found")
+                continue
+            std_txt = f"{s['std']:.4g}" if s["std"] is not None else "n/a (only one value)"
+            lines.append(
+                f"  - {s['column']}: n={s['count']}, mean={s['mean']:.4g}, std={std_txt}, "
+                f"min={s['min']:.4g}, p25={s['p25']:.4g}, median={s['median']:.4g}, "
+                f"p75={s['p75']:.4g}, max={s['max']:.4g}"
+            )
+
+        if len(cols) >= 2:
+            matrix, err = _correlation_matrix_for_columns(base_dir, relpath, cols)
+            if err:
+                return None, err
+            lines.append(f"\nPairwise correlation (Pearson r) within {relpath}:")
+            for m in matrix:
+                if m["a"] == m["b"]:
+                    continue
+                r_txt = f"{m['r']:.3f}" if m["r"] is not None else "undefined (a constant variable)"
+                lines.append(f"  - {m['a']} vs {m['b']}: r={r_txt} (n={m['n']})")
+
+    return "\n".join(lines), None
+
+
+@app.route("/assistant/ask", methods=["POST"])
+def assistant_ask():
+    data = request.get_json() or {}
+    name = (data.get("session") or "").strip()
+    date = (data.get("date") or "").strip()
+    question = (data.get("question") or "").strip()
+    columns = data.get("columns") or []
+    history = data.get("history") or []
+
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+    if not question:
+        return jsonify({"ok": False, "error": "Ask something first."}), 400
+    if not isinstance(columns, list) or not all(
+        isinstance(c, dict)
+        and isinstance(c.get("file"), str)
+        and isinstance(c.get("column"), str)
+        and c.get("source") in ("merged", "drone")
+        for c in columns
+    ):
+        return jsonify({"ok": False, "error": "Invalid columns."}), 400
+    if not isinstance(history, list) or not all(
+        isinstance(m, dict) and m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+        for m in history
+    ):
+        return jsonify({"ok": False, "error": "Invalid conversation history."}), 400
+
+    context, err = _build_offline_data_context(name, date, columns)
+    if err:
+        return err
+
+    result, err = _ask_claude_with_context(context, question, history)
+    if err:
+        return err
+    return jsonify(result)
+
+
+def _build_online_data_context(run_name, columns):
+    """
+    The Data Viewer tab's counterpart to _build_offline_data_context -
+    same idea (narrate each selected variable's statistics, plus
+    pairwise correlation within a file, as plain text for the
+    assistant's system prompt), just reading over SFTP from whatever's
+    live on the Pi right now instead of a downloaded session's local
+    files. columns is [{"file","column","source"}, ...] - the same
+    shape dvState.activeSeries already is, "source" being "run" or
+    "drone" per entry the same way /data_viewer/plot_multi takes it,
+    since a Data Viewer plot can mix a run's own sensor columns with
+    drone telemetry columns at once.
+
+    Each distinct (source, file) is fetched over SFTP once and reused
+    for both its stats and its correlation matrix, rather than once per
+    computation - unlike the offline version, a second SFTP round trip
+    per file isn't free.
+
+    Returns (context_text, None), or (None, error_response) if a remote
+    read fails - most commonly "not connected to remote host".
+    """
+    lines = [f"Live run: {run_name}" if run_name else "No run currently selected."]
+
+    if not columns:
+        lines.append(
+            "\nNo variables are currently added to the plot - the operator hasn't "
+            "picked anything to look at yet in this conversation."
+        )
+        return "\n".join(lines), None
+
+    by_file = {}
+    for c in columns:
+        by_file.setdefault((c.get("source") or "run", c["file"]), []).append(c["column"])
+
+    for (source, relpath), cols in by_file.items():
+        file_label = "drone telemetry" if source == "drone" else f"run {run_name}"
+        raw, err = _read_remote_csv(run_name, relpath, source=source)
+        if err:
+            return None, err
+
+        values, err = _values_by_column(raw, cols)
+        if err:
+            return None, err
+        stats = _stats_from_values(values, cols)
+
+        lines.append(f"\nVariables from {relpath} ({file_label}):")
+        for s in stats:
+            if s["count"] == 0:
+                lines.append(f"  - {s['column']}: no numeric values found")
+                continue
+            std_txt = f"{s['std']:.4g}" if s["std"] is not None else "n/a (only one value)"
+            lines.append(
+                f"  - {s['column']}: n={s['count']}, mean={s['mean']:.4g}, std={std_txt}, "
+                f"min={s['min']:.4g}, p25={s['p25']:.4g}, median={s['median']:.4g}, "
+                f"p75={s['p75']:.4g}, max={s['max']:.4g}"
+            )
+
+        if len(cols) >= 2:
+            matrix, err = _correlation_matrix_from_raw(raw, cols)
+            if err:
+                return None, err
+            lines.append(f"\nPairwise correlation (Pearson r) within {relpath}:")
+            for m in matrix:
+                if m["a"] == m["b"]:
+                    continue
+                r_txt = f"{m['r']:.3f}" if m["r"] is not None else "undefined (a constant variable)"
+                lines.append(f"  - {m['a']} vs {m['b']}: r={r_txt} (n={m['n']})")
+
+    return "\n".join(lines), None
+
+
+# ---- Data Viewer assistant tools ----
+# Beyond the always-included stats/correlation for whatever's currently
+# plotted (_build_online_data_context above), the online assistant can
+# also reach for these on demand - "are all sensors running properly",
+# "anything unusual", "any strong correlations between instruments" -
+# questions that need to look at data beyond what's on screen right
+# now. Kept out of the offline assistant: these tools all read live off
+# the Pi over the current SSH session, which a downloaded session has
+# no equivalent of.
+
+ASSISTANT_ONLINE_TOOLS = [
+    {
+        "name": "list_instruments",
+        "description": (
+            "Lists every CSV file available for the currently selected run on "
+            "the Pi, plus the latest drone telemetry file if one exists. Call "
+            "this first to see what's available before checking health or "
+            "scanning for correlations."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "check_instrument_health",
+        "description": (
+            "Checks whether the given CSV files are still being written to, "
+            "and whether their most recent readings look like statistical "
+            "outliers or are stuck at a constant value, each compared against "
+            "that file's own history so far this run. Get file names from "
+            "list_instruments first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "description": "Files to check, as returned by list_instruments.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file": {"type": "string"},
+                            "source": {"type": "string", "enum": ["run", "drone"]},
+                        },
+                        "required": ["file", "source"],
+                    },
+                },
+            },
+            "required": ["files"],
+        },
+    },
+    {
+        "name": "scan_correlations",
+        "description": (
+            "Computes pairwise Pearson correlation across every numeric column "
+            "in this run's own merged_data CSV, which already aligns readings "
+            "from every instrument onto the same rows, and returns only the "
+            "strong pairs - use this to spot relationships between different "
+            "instruments. Only covers instruments present in the merged_data "
+            "file for this run."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "min_r": {
+                    "type": "number",
+                    "description": "Minimum absolute correlation to report (default 0.6).",
+                },
+            },
+        },
+    },
+]
+
+
+def _tool_list_instruments(run_name):
+    """
+    Tool executor for list_instruments. Unlike the HTTP-endpoint helpers
+    elsewhere in this file, tool executors return plain text (fed back
+    to Claude as a tool_result) rather than a Flask response - see
+    (result_text, error_text) below.
+    """
+    if not run_name:
+        return None, "No run is currently selected in the Data Viewer."
+
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return None, "Not connected to remote host."
+        run_dir = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}/output/{run_name}"
+        files = _list_run_csv_files(state["sftp"], run_dir)
+        drone_path = _find_latest_drone_telemetry_csv(state["sftp"])
+
+    lines = [f"- {path} (source=run, {size} bytes)" for path, size in files]
+    if drone_path:
+        lines.append(f"- {os.path.basename(drone_path)} (source=drone)")
+    if not lines:
+        return f"No CSV files found for run {run_name}.", None
+    return f"Files for run {run_name}:\n" + "\n".join(lines), None
+
+
+def _tool_check_instrument_health(run_name, files):
+    """
+    Tool executor for check_instrument_health - see
+    ASSISTANT_ONLINE_TOOLS for the schema. Reports facts (age since last
+    write, any flagged columns) rather than a healthy/unhealthy verdict;
+    Claude does the judgment call, since this app has no reliable signal
+    for whether the logger is even still supposed to be running (see
+    state["runall_pid"]'s own caveats elsewhere in this file).
+    """
+    if not files:
+        return None, "No files given - call list_instruments first and pass some of its results here."
+
+    report = []
+    for f in files:
+        relpath = (f or {}).get("file")
+        source = (f or {}).get("source") or "run"
+        if not relpath:
+            continue
+
+        mtime, err = _remote_csv_mtime(run_name, relpath, source)
+        if err:
+            report.append(f"{relpath}: could not stat file ({err[0].get_json()['error']})")
+            continue
+        age_s = time.time() - mtime
+        age_txt = f"{age_s / 60:.1f} min ago" if age_s < 3600 else f"{age_s / 3600:.1f} hr ago"
+
+        raw, err = _read_remote_csv(run_name, relpath, source)
+        if err:
+            report.append(f"{relpath}: last written {age_txt}; could not read its content ({err[0].get_json()['error']})")
+            continue
+
+        reader = csv.DictReader(io.StringIO(raw))
+        fieldnames = reader.fieldnames or []
+        rows = list(reader)
+        numeric_cols = [
+            c for c in fieldnames
+            if sum(1 for row in rows if _parse_numeric(row.get(c)) is not None) >= 2
+        ]
+
+        flags = []
+        if numeric_cols:
+            values, _ = _values_by_column(raw, numeric_cols)
+            for s in _stats_from_values(values, numeric_cols):
+                data = values[s["column"]]
+                if s["count"] < 2:
+                    continue
+                last_val = data[-1]
+                if s["std"]:
+                    z = (last_val - s["mean"]) / s["std"]
+                    if abs(z) >= 3:
+                        flags.append(
+                            f"{s['column']}: latest value {last_val:.4g} is {z:.1f} std devs "
+                            f"from this file's own mean ({s['mean']:.4g})"
+                        )
+                tail = data[-5:]
+                if len(tail) >= 5 and len(set(tail)) == 1:
+                    flags.append(f"{s['column']}: stuck at a constant value ({tail[0]:.4g}) for its last 5 readings")
+
+        line = f"{relpath} (source={source}): last written {age_txt}, {len(rows)} rows so far"
+        line += "\n  - " + "\n  - ".join(flags) if flags else "\n  - no anomalies flagged"
+        report.append(line)
+
+    return "\n\n".join(report), None
+
+
+def _tool_scan_correlations(run_name, min_r):
+    """Tool executor for scan_correlations - see ASSISTANT_ONLINE_TOOLS for the schema."""
+    if not run_name:
+        return None, "No run is currently selected in the Data Viewer."
+
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return None, "Not connected to remote host."
+        run_dir = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}/output/{run_name}"
+        files = _list_run_csv_files(state["sftp"], run_dir)
+
+    merged = [path for path, _ in files if os.path.basename(path).startswith("merged_data_")]
+    if not merged:
+        return "This run has no merged_data CSV yet, so there's nothing to cross-correlate across instruments.", None
+    relpath = merged[0]
+
+    raw, err = _read_remote_csv(run_name, relpath, source="run")
+    if err:
+        return None, err[0].get_json()["error"]
+
+    reader = csv.DictReader(io.StringIO(raw))
+    fieldnames = reader.fieldnames or []
+    rows = list(reader)
+    numeric_cols = [
+        c for c in fieldnames
+        if sum(1 for row in rows if _parse_numeric(row.get(c)) is not None) >= 2
+    ]
+    if len(numeric_cols) < 2:
+        return f"{relpath} doesn't have enough numeric columns to correlate.", None
+
+    matrix, err = _correlation_matrix_from_raw(raw, numeric_cols)
+    if err:
+        return None, err[0].get_json()["error"]
+
+    strong = [m for m in matrix if m["a"] != m["b"] and m["r"] is not None and abs(m["r"]) >= min_r]
+    strong.sort(key=lambda m: -abs(m["r"]))
+    if not strong:
+        return f"No column pairs in {relpath} have |r| >= {min_r}.", None
+
+    lines = [f"Strong correlations in {relpath} (|r| >= {min_r}):"]
+    for m in strong[:15]:
+        lines.append(f"  - {m['a']} vs {m['b']}: r={m['r']:.3f} (n={m['n']})")
+    return "\n".join(lines), None
+
+
+def _dispatch_assistant_tool(run_name, name, tool_input):
+    """
+    Executes one Claude-requested tool call by name. Returns
+    (result_text, None) on success or (None, error_text) - either way,
+    the tool loop below feeds the text back to Claude as the next
+    tool_result, so a failure here becomes something Claude can explain
+    to the operator rather than an HTTP error.
+    """
+    tool_input = tool_input or {}
+    if name == "list_instruments":
+        return _tool_list_instruments(run_name)
+    if name == "check_instrument_health":
+        return _tool_check_instrument_health(run_name, tool_input.get("files") or [])
+    if name == "scan_correlations":
+        min_r = tool_input.get("min_r")
+        if not isinstance(min_r, (int, float)):
+            min_r = 0.6
+        return _tool_scan_correlations(run_name, min_r)
+    return None, f"Unknown tool: {name}"
+
+
+ASSISTANT_MAX_TOOL_ITERATIONS = 6
+
+
+def _ask_claude_with_tools(context, question, history, run_name):
+    """
+    Online counterpart to _ask_claude_with_context - same model, system
+    preamble, and error handling, but also offers ASSISTANT_ONLINE_TOOLS
+    and loops on stop_reason == "tool_use": each requested tool is
+    executed against the live SFTP session (_dispatch_assistant_tool)
+    and its result fed back as the next turn, until Claude reaches a
+    final text answer or ASSISTANT_MAX_TOOL_ITERATIONS is hit (a safety
+    cap in case it keeps calling tools instead of answering). Token
+    usage is summed across every round trip, not just the last one.
+
+    Returns (result_dict, None) on success, or (None, error_response).
+    """
+    try:
+        client = _get_anthropic_client()
+    except RuntimeError as e:
+        return None, (jsonify({"ok": False, "error": str(e)}), 500)
+
+    messages = [{"role": m["role"], "content": m["content"]} for m in history]
+    messages.append({"role": "user", "content": question})
+
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+    for _ in range(ASSISTANT_MAX_TOOL_ITERATIONS):
+        try:
+            response = client.messages.create(
+                model=ASSISTANT_MODEL,
+                max_tokens=1024,
+                output_config={"effort": "medium"},
+                system=f"{ASSISTANT_SYSTEM_PREAMBLE}{ASSISTANT_TOOLS_ADDENDUM}\n\n{context}",
+                messages=messages,
+                tools=ASSISTANT_ONLINE_TOOLS,
+            )
+        except anthropic.APIStatusError as e:
+            return None, (jsonify({"ok": False, "error": f"Claude API error: {e.message}"}), 502)
+        except anthropic.APIConnectionError:
+            return None, (jsonify({"ok": False, "error": "Could not reach the Claude API - check your internet connection."}), 502)
+        except Exception as e:
+            return None, (jsonify({"ok": False, "error": f"Could not reach Claude: {e}"}), 502)
+
+        total_input_tokens += response.usage.input_tokens
+        total_output_tokens += response.usage.output_tokens
+
+        if response.stop_reason == "refusal":
+            return None, (jsonify({"ok": False, "error": "Claude declined to answer that question."}), 200)
+
+        if response.stop_reason != "tool_use":
+            answer = "".join(block.text for block in response.content if block.type == "text")
+            return {
+                "ok": True,
+                "answer": answer,
+                "usage": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens},
+            }, None
+
+        messages.append({"role": "assistant", "content": response.content})
+        tool_result_blocks = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            result_text, tool_err = _dispatch_assistant_tool(run_name, block.name, block.input)
+            tool_result_blocks.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": tool_err if tool_err else result_text,
+                "is_error": bool(tool_err),
+            })
+        messages.append({"role": "user", "content": tool_result_blocks})
+
+    return None, (jsonify({
+        "ok": False,
+        "error": "The assistant made too many tool calls without reaching an answer - try a more specific question.",
+    }), 502)
+
+
+@app.route("/assistant/ask_online", methods=["POST"])
+def assistant_ask_online():
+    data = request.get_json() or {}
+    run_name = (data.get("run") or "").strip()
+    question = (data.get("question") or "").strip()
+    columns = data.get("columns") or []
+    history = data.get("history") or []
+
+    if run_name and not _valid_run_name(run_name):
+        return jsonify({"ok": False, "error": "Invalid run name."}), 400
+    if not question:
+        return jsonify({"ok": False, "error": "Ask something first."}), 400
+    if not isinstance(columns, list) or not all(
+        isinstance(c, dict)
+        and isinstance(c.get("file"), str)
+        and isinstance(c.get("column"), str)
+        and c.get("source") in ("run", "drone")
+        for c in columns
+    ):
+        return jsonify({"ok": False, "error": "Invalid columns."}), 400
+    if not isinstance(history, list) or not all(
+        isinstance(m, dict) and m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+        for m in history
+    ):
+        return jsonify({"ok": False, "error": "Invalid conversation history."}), 400
+
+    context, err = _build_online_data_context(run_name, columns)
+    if err:
+        return err
+
+    result, err = _ask_claude_with_tools(context, question, history, run_name)
+    if err:
+        return err
+    return jsonify(result)
 
 
 @app.route("/connect", methods=["POST"])
@@ -245,6 +1933,10 @@ def connect():
             state["host"] = host
             state["username"] = username
             state["password"] = password
+            # A fresh connection might be a different host entirely, or the
+            # same one with its data folders reset - don't let /plot_data
+            # keep serving whatever paths were cached from before.
+            _plot_path_cache.clear()
 
             return jsonify({
                 "ok": True,
@@ -729,6 +2421,10 @@ def run_all_sensors():
         # remote launch genuinely happened but the HTTP response to the
         # browser never arrived, leaving the button stuck on "starting...".
         state["runall_pid"] = pid_value
+        # A fresh run means a fresh output/<timestamp> folder - drop any
+        # cached CSV paths from the previous run so /plot_data doesn't keep
+        # serving frozen data from a run that's no longer being written to.
+        _plot_path_cache.clear()
 
         if not out_text and not err_text:
             try:
@@ -1310,6 +3006,19 @@ def sensor_config_toggle():
 
 PLOT_MAX_POINTS = 300
 
+# Cache of each sensor's most-recently-resolved (run_dir_name, csv_path).
+# /plot_data polls every few seconds per sensor, and on a slow/high-latency
+# link each of the two directory listings it used to do on every single
+# call (find the latest run folder, then find the latest CSV in it) can
+# itself take seconds - multiplied by however many sensor plots are on
+# screen, that backlog is what made the whole app feel frozen. The run
+# folder and CSV filename don't actually change between polls within one
+# flight, so only the first poll after a connection (or a fresh Run All
+# Sensors start) pays that cost; every poll after that re-opens the same
+# known path directly, falling back to a fresh lookup if that path ever
+# stops working (self-healing against rotation, not just an optimization).
+_plot_path_cache = {}
+
 PLOT_SENSORS = {
     "pom": {
         "label": "Ozone (POM)",
@@ -1494,31 +3203,57 @@ def plot_data():
             return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
 
         sftp = state["sftp"]
-        run_dir_name = None
+        cached = _plot_path_cache.get(sensor)
+        run_dir_name = cached["run_dir_name"] if cached else None
+        csv_path = cached["csv_path"] if cached else None
+        raw = None
 
-        if spec.get("source") == "drone_telemetry":
-            csv_path = _find_latest_drone_telemetry_csv(sftp)
-            if not csv_path:
-                return jsonify({"ok": False, "error": "No drone telemetry CSV found yet in data_from_drone."}), 404
-        else:
-            remote_dir = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}"
-            run_dir_name = _find_latest_run_dir(sftp, remote_dir)
-            if not run_dir_name:
-                return jsonify({"ok": False, "error": "No run folder found yet - start Run All Sensors first."}), 404
+        if csv_path:
+            try:
+                with sftp.open(csv_path, "r") as f:
+                    raw = f.read().decode("utf-8", errors="replace")
+            except IOError:
+                # Cached path went stale (run rotated, file moved/renamed) -
+                # drop it and fall through to a fresh lookup below rather
+                # than treating this as a connection failure.
+                _plot_path_cache.pop(sensor, None)
+                csv_path = None
+            except Exception as e:
+                # Anything other than IOError here (SSHException, EOFError,
+                # a dropped socket, ...) means the transport itself is dead,
+                # not just a stale cached path - falling through to a fresh
+                # lookup on a channel that's no longer usable would just
+                # raise again, uncaught, and leave state["connected"] stuck
+                # True. Handle it the same way every other route here does.
+                _mark_disconnected()
+                return jsonify({"ok": False, "error": f"Could not read {csv_path}: {e}"}), 500
 
-            csv_path = _find_latest_sensor_csv(
-                sftp, remote_dir, run_dir_name, spec["csv_prefix"],
-                in_run_root=spec.get("in_run_root", False),
-            )
-            if not csv_path:
-                return jsonify({"ok": False, "error": f"No {spec['label']} CSV found yet in this run."}), 404
+        if raw is None:
+            if spec.get("source") == "drone_telemetry":
+                csv_path = _find_latest_drone_telemetry_csv(sftp)
+                if not csv_path:
+                    return jsonify({"ok": False, "error": "No drone telemetry CSV found yet in data_from_drone."}), 404
+            else:
+                remote_dir = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}"
+                run_dir_name = _find_latest_run_dir(sftp, remote_dir)
+                if not run_dir_name:
+                    return jsonify({"ok": False, "error": "No run folder found yet - start Run All Sensors first."}), 404
 
-        try:
-            with sftp.open(csv_path, "r") as f:
-                raw = f.read().decode("utf-8", errors="replace")
-        except Exception as e:
-            _mark_disconnected()
-            return jsonify({"ok": False, "error": f"Could not read {csv_path}: {e}"}), 500
+                csv_path = _find_latest_sensor_csv(
+                    sftp, remote_dir, run_dir_name, spec["csv_prefix"],
+                    in_run_root=spec.get("in_run_root", False),
+                )
+                if not csv_path:
+                    return jsonify({"ok": False, "error": f"No {spec['label']} CSV found yet in this run."}), 404
+
+            try:
+                with sftp.open(csv_path, "r") as f:
+                    raw = f.read().decode("utf-8", errors="replace")
+            except Exception as e:
+                _mark_disconnected()
+                return jsonify({"ok": False, "error": f"Could not read {csv_path}: {e}"}), 500
+
+            _plot_path_cache[sensor] = {"run_dir_name": run_dir_name, "csv_path": csv_path}
 
     reader = csv.DictReader(io.StringIO(raw))
     value_column = spec["value_column"]
@@ -1566,12 +3301,12 @@ def _valid_run_name(run_name):
 
 def _valid_csv_relpath(relpath):
     """
-    Only allows the two shapes real files actually live at: a bare
-    "<name>.csv" in the run folder's root (vitals_summary/merged_data),
-    or "csv/<name>.csv" in its csv/ subfolder (per-sensor logs) - see
-    _find_latest_sensor_csv above, which reads from these same two
-    locations. Anything else (nested paths, "..", backslashes) is
-    rejected before it ever reaches sftp.open().
+    Only allows the shapes real files actually live at: a bare "<name>.csv"
+    (a run folder's root - vitals_summary/merged_data - or data_from_drone/,
+    both flat), or "csv/<name>.csv" in a run's csv/ subfolder (per-sensor
+    logs) - see _find_latest_sensor_csv above, which reads from these same
+    locations. Anything else (nested paths, "..", backslashes) is rejected
+    before it ever reaches sftp.open().
     """
     if not relpath or not relpath.endswith(".csv") or ".." in relpath or "\\" in relpath:
         return False
@@ -1653,22 +3388,69 @@ def data_viewer_files():
     })
 
 
-def _read_remote_csv(run_name, relpath):
+@app.route("/data_viewer/drone_latest")
+def data_viewer_drone_latest():
+    """
+    Just the *name* of the latest data_from_drone telemetry file, if any -
+    a single directory listing, no file content read - so the "add
+    variable" picker can offer it as a source instantly. Used to be
+    folded into a since-removed /data_viewer/run_columns that read every
+    file in a run (plus this one) up front in a single request: fine on
+    a fast connection, but on a slow/high-latency link (SSH file reads
+    here have been observed taking upwards of 15-30s *each*) that turned
+    "open a run" into a multi-minute wait before the picker showed
+    anything at all. Column info is now only ever fetched for the one
+    file the user actually picks (see /data_viewer/table), same as this
+    endpoint - listing is cheap, reading isn't.
+    """
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
+        latest = _find_latest_drone_telemetry_csv(state["sftp"])
+
+    return jsonify({"ok": True, "file": os.path.basename(latest) if latest else None})
+
+
+def _remote_csv_path(run_name, relpath, source="run"):
+    """
+    Resolves and validates the full remote path for a run or drone CSV,
+    without touching SFTP. Split out of _read_remote_csv so the
+    assistant's health-check tool (below) can also stat a file's mtime
+    without reading (and re-parsing) its full content just to answer
+    "is this still alive."
+
+    Returns (path, None) on success, or (None, error_response) if
+    relpath (or run_name, unless source="drone") doesn't pass
+    validation.
+    """
+    if not _valid_csv_relpath(relpath):
+        return None, (jsonify({"ok": False, "error": "Invalid file path."}), 400)
+    if source == "drone":
+        return f"{DRONE_TELEMETRY_DIR}/{relpath}", None
+    if not _valid_run_name(run_name):
+        return None, (jsonify({"ok": False, "error": "Invalid run name."}), 400)
+    return f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}/output/{run_name}/{relpath}", None
+
+
+def _read_remote_csv(run_name, relpath, source="run"):
     """
     Shared by the table and plot endpoints: validates run/file, reads
     the CSV over SFTP, and returns its raw decoded text. Returns
     (raw_text, None) on success or (None, (json_response, status)) on
     any failure, so callers can just `return err` and stop.
+
+    source="drone" reads a flat file straight out of data_from_drone/
+    instead of a run's output/<run_name>/ folder - drone telemetry isn't
+    tied to any particular uri_aplogger run, so it needs its own base
+    path and skips the run-name check entirely.
     """
-    if not _valid_run_name(run_name):
-        return None, (jsonify({"ok": False, "error": "Invalid run name."}), 400)
-    if not _valid_csv_relpath(relpath):
-        return None, (jsonify({"ok": False, "error": "Invalid file path."}), 400)
+    csv_path, err = _remote_csv_path(run_name, relpath, source)
+    if err:
+        return None, err
 
     with state["lock"]:
         if not state["connected"] or not state["sftp"]:
             return None, (jsonify({"ok": False, "error": "Not connected to remote host."}), 400)
-        csv_path = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}/output/{run_name}/{relpath}"
         try:
             with state["sftp"].open(csv_path, "r") as f:
                 raw = f.read().decode("utf-8", errors="replace")
@@ -1679,24 +3461,83 @@ def _read_remote_csv(run_name, relpath):
     return raw, None
 
 
+def _remote_csv_mtime(run_name, relpath, source="run"):
+    """
+    Returns (mtime, None) - a file's last-modified time as a Unix
+    timestamp - or (None, error_response). Used by the assistant's
+    health-check tool to flag a sensor that's stopped writing, without
+    needing to read the file's full content just to answer "is this
+    still alive."
+    """
+    csv_path, err = _remote_csv_path(run_name, relpath, source)
+    if err:
+        return None, err
+
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return None, (jsonify({"ok": False, "error": "Not connected to remote host."}), 400)
+        try:
+            mtime = state["sftp"].stat(csv_path).st_mtime
+        except Exception as e:
+            _mark_disconnected()
+            return None, (jsonify({"ok": False, "error": f"Could not stat {relpath}: {e}"}), 500)
+
+    return mtime, None
+
+
+def _compute_column_numeric(columns, data_rows):
+    """
+    A column counts as numeric (and so is worth offering as something to
+    plot) if at least half of its non-empty values parse as a float -
+    checked against every row, not just one page, since many of these
+    CSVs (especially merged_data's per-sensor columns) are mostly blank
+    except when that specific sensor happened to report on that
+    particular merged row. Shared by /data_viewer/table and the offline
+    merged-data endpoints (/offline/session/<name>/merged/<date>/*).
+    """
+    column_numeric = []
+    for col_idx in range(len(columns)):
+        seen = numeric = 0
+        for row in data_rows:
+            if col_idx >= len(row):
+                continue
+            val = row[col_idx].strip()
+            if not val:
+                continue
+            seen += 1
+            try:
+                # float() treats "_" as a digit-group separator (PEP
+                # 515), so e.g. a run-folder-name-shaped value like
+                # "20260813_151443" (see the merged CSVs' _source_run
+                # column) would otherwise silently parse as a number.
+                # Real sensor readings never contain underscores.
+                if "_" in val:
+                    raise ValueError
+                float(val)
+                numeric += 1
+            except ValueError:
+                pass
+        column_numeric.append(seen > 0 and (numeric / seen) >= 0.5)
+    return column_numeric
+
+
 @app.route("/data_viewer/table")
 def data_viewer_table():
     """
     Returns one page (DATA_VIEWER_PAGE_SIZE rows) of the requested CSV,
-    plus its full column list and, for each column, whether it's
-    numeric - computed over every row (not just this page), since the
-    whole file is already in memory to compute total_rows/total_pages
-    anyway. The frontend uses that flag to decide which columns are
-    worth offering in the plot dropdown.
+    plus its full column list and, for each column, whether it's numeric -
+    computed over every row, since the whole file is already in memory to
+    compute total_rows/total_pages anyway.
     """
     run_name = (request.args.get("run") or "").strip()
     relpath = (request.args.get("file") or "").strip()
+    source = (request.args.get("source") or "run").strip()
     try:
         page = max(1, int(request.args.get("page", "1")))
     except ValueError:
         page = 1
 
-    raw, err = _read_remote_csv(run_name, relpath)
+    raw, err = _read_remote_csv(run_name, relpath, source=source)
     if err:
         return err
 
@@ -1715,29 +3556,7 @@ def data_viewer_table():
     page = min(page, total_pages)
     start = (page - 1) * DATA_VIEWER_PAGE_SIZE
     page_rows = data_rows[start:start + DATA_VIEWER_PAGE_SIZE]
-
-    # A column counts as numeric (and so gets offered in the plot's
-    # column dropdown) if at least half of its non-empty values parse as
-    # a float. Checked against the whole file rather than just this
-    # page - many of these CSVs (especially merged_data's per-sensor
-    # columns) are mostly blank except when that specific sensor
-    # happened to report on that particular merged row.
-    column_numeric = []
-    for col_idx in range(len(columns)):
-        seen = numeric = 0
-        for row in data_rows:
-            if col_idx >= len(row):
-                continue
-            val = row[col_idx].strip()
-            if not val:
-                continue
-            seen += 1
-            try:
-                float(val)
-                numeric += 1
-            except ValueError:
-                pass
-        column_numeric.append(seen > 0 and (numeric / seen) >= 0.5)
+    column_numeric = _compute_column_numeric(columns, data_rows)
 
     return jsonify({
         "ok": True,
@@ -1766,8 +3585,9 @@ def data_viewer_plot():
     run_name = (request.args.get("run") or "").strip()
     relpath = (request.args.get("file") or "").strip()
     column = (request.args.get("column") or "").strip()
+    source = (request.args.get("source") or "run").strip()
 
-    raw, err = _read_remote_csv(run_name, relpath)
+    raw, err = _read_remote_csv(run_name, relpath, source=source)
     if err:
         return err
     if not column:
@@ -1802,6 +3622,61 @@ def data_viewer_plot():
         "time_column": time_column,
         "points": points,
         "decimals": max_decimals,
+    })
+
+
+@app.route("/data_viewer/plot_multi")
+def data_viewer_plot_multi():
+    """
+    Same idea as /data_viewer/plot but for several columns of one file at
+    once, read from a single SFTP fetch - used by the Data Viewer's overlay
+    plot so picking N columns costs one round trip instead of N.
+    """
+    run_name = (request.args.get("run") or "").strip()
+    relpath = (request.args.get("file") or "").strip()
+    columns = [c for c in (request.args.get("columns") or "").split(",") if c]
+    source = (request.args.get("source") or "run").strip()
+
+    raw, err = _read_remote_csv(run_name, relpath, source=source)
+    if err:
+        return err
+    if not columns:
+        return jsonify({"ok": False, "error": "At least one column is required."}), 400
+
+    reader = csv.DictReader(io.StringIO(raw))
+    fieldnames = reader.fieldnames or []
+    for column in columns:
+        if column not in fieldnames:
+            return jsonify({"ok": False, "error": f'Column "{column}" not found in this file.'}), 400
+    time_column = fieldnames[0]
+
+    series_points = {column: [] for column in columns}
+    series_decimals = {column: 0 for column in columns}
+    for row in reader:
+        ts = row.get(time_column)
+        if not ts:
+            continue
+        for column in columns:
+            raw_val = (row.get(column) or "").strip()
+            if not raw_val:
+                continue
+            try:
+                value = float(raw_val)
+            except ValueError:
+                continue
+            series_points[column].append({"t": ts, "v": value})
+            if "." in raw_val:
+                series_decimals[column] = max(series_decimals[column], min(4, len(raw_val.split(".")[-1])))
+
+    return jsonify({
+        "ok": True,
+        "run": run_name,
+        "file": relpath,
+        "time_column": time_column,
+        "series": [
+            {"column": column, "points": series_points[column], "decimals": series_decimals[column]}
+            for column in columns
+        ],
     })
 
 
@@ -1921,6 +3796,52 @@ def sftp_download_dir(sftp, remote_dir, local_dir, on_file_done=None, force=Fals
     return downloaded, skipped, None
 
 
+def sftp_count_named_files(remote_sizes, local_dir, force=False):
+    """
+    Given [(filename, size), ...] already known from an earlier
+    listdir_attr call (see _list_remote_drone_files_by_date), counts how
+    many still need downloading - no further SFTP round trip needed
+    since the sizes are already in hand. The flat-folder counterpart to
+    sftp_count_files, for the same reason sftp_download_named_files
+    exists alongside sftp_download_dir: data_from_drone/ mixes every
+    date's telemetry together, so a day-scoped download only wants
+    specific files out of it, not the whole folder.
+    """
+    count = 0
+    for filename, size in remote_sizes:
+        local_path = os.path.join(local_dir, filename) if local_dir else None
+        if force or not (local_path and _local_file_matches(local_path, size)):
+            count += 1
+    return count
+
+
+def sftp_download_named_files(sftp, remote_dir, remote_sizes, local_dir, on_file_done=None, force=False):
+    """
+    Downloads only the given [(filename, size), ...] out of remote_dir
+    (not everything in it) - see sftp_count_named_files above for why.
+    Same skip-if-already-matches-by-size and force semantics as
+    sftp_download_dir; sizes are passed in rather than re-stat'd since
+    the caller already has them from listing the folder once.
+    """
+    downloaded = 0
+    skipped = 0
+    os.makedirs(local_dir, exist_ok=True)
+    for filename, size in remote_sizes:
+        remote_path = f"{remote_dir}/{filename}"
+        local_path = os.path.join(local_dir, filename)
+        if not force and _local_file_matches(local_path, size):
+            skipped += 1
+            continue
+        try:
+            sftp.get(remote_path, local_path)
+            downloaded += 1
+            if on_file_done:
+                on_file_done()
+        except Exception as e:
+            return downloaded, skipped, f"Failed downloading {remote_path}: {e}"
+    return downloaded, skipped, None
+
+
 @app.route("/check_download_folder", methods=["POST"])
 def check_download_folder():
     data = request.get_json()
@@ -1934,6 +3855,298 @@ def check_download_folder():
     target = os.path.join(DOWNLOADS_ROOT, name)
     exists = os.path.isdir(target)
     return jsonify({"ok": True, "exists": exists, "path": target})
+
+
+# ---------- Downloading specific days ----------
+# "Download Data"/"Backup to External Drive" can pull everything (the
+# flow above) or just a chosen subset of dates - each date landing in
+# its own <destination>/<date>/ folder rather than one folder the user
+# names, so a day is immediately browsable on its own (same folder shape
+# the offline exploration page already expects a "session" to have) and
+# re-picking the same day later just tops up that same folder.
+
+def _list_remote_run_dirs_by_date(sftp):
+    """
+    SFTP equivalent of _list_run_dirs_by_date (which does this over local
+    disk for an already-downloaded session) - groups uri_aplogger/output's
+    run folders on the Pi by the date embedded in their name.
+    """
+    output_dir = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}/output"
+    by_date = {}
+    try:
+        entries = sftp.listdir(output_dir)
+    except IOError:
+        return by_date
+    for name in entries:
+        m = _RUN_DIR_RE.match(name)
+        if not m:
+            continue
+        try:
+            if not stat.S_ISDIR(sftp.stat(f"{output_dir}/{name}").st_mode):
+                continue
+        except IOError:
+            continue
+        by_date.setdefault(m.group(1), []).append(name)
+    for runs in by_date.values():
+        runs.sort()
+    return by_date
+
+
+def _list_remote_drone_files_by_date(sftp):
+    """
+    SFTP equivalent of _list_drone_files_by_date - groups
+    data_from_drone/telemetry_<date>_<time>.csv files on the Pi by date,
+    keeping each file's size from the same listdir_attr call so a
+    day-scoped download doesn't need a second per-file stat round trip
+    later. Returns {date: [(filename, size), ...]}.
+    """
+    by_date = {}
+    try:
+        entries = sftp.listdir_attr(DRONE_TELEMETRY_DIR)
+    except IOError:
+        return by_date
+    for entry in entries:
+        m = _DRONE_FILE_RE.match(entry.filename)
+        # The drone's onboard clock defaults to 2021 until it gets a GPS
+        # fix, so pre-fix telemetry is stamped with a bogus 2021 date -
+        # exclude it rather than show it as a selectable date.
+        if not m or m.group(1).startswith("2021"):
+            continue
+        by_date.setdefault(m.group(1), []).append((entry.filename, entry.st_size))
+    for files in by_date.values():
+        files.sort()
+    return by_date
+
+
+# build_remote_path() names each day's notes file remote_pc_notes_<date>.csv
+# (one file per day - see its own docstring), which conveniently means
+# notes are already inherently date-scoped, unlike the rest of
+# remote_ssh_notes/ might suggest at a glance.
+_NOTES_FILE_RE = re.compile(r"^remote_pc_notes_(\d{8})\.csv$")
+
+
+def _list_remote_notes_files_by_date(sftp):
+    """
+    SFTP listing of remote_ssh_notes/remote_pc_notes_<date>.csv, keyed by
+    the date in each filename - same shape as
+    _list_remote_drone_files_by_date, so a day-scoped download can
+    include that date's notes file the same way it includes that date's
+    drone telemetry. Returns {date: [(filename, size), ...]} (at most one
+    entry per date in practice, but a list for symmetry with the drone
+    lookup and sftp_count_named_files/sftp_download_named_files's shared shape).
+    """
+    by_date = {}
+    try:
+        entries = sftp.listdir_attr(f"{REMOTE_DIR}/{NOTES_SUBFOLDER}")
+    except IOError:
+        return by_date
+    for entry in entries:
+        m = _NOTES_FILE_RE.match(entry.filename)
+        if not m:
+            continue
+        by_date.setdefault(m.group(1), []).append((entry.filename, entry.st_size))
+    for files in by_date.values():
+        files.sort()
+    return by_date
+
+
+@app.route("/download_days")
+def download_days():
+    """
+    Lists every date that currently has sensor runs, drone telemetry,
+    and/or a notes file on the Pi, newest first - what the "specific
+    days" picker in the download/backup modals offers. Also reports
+    whether this machine already has a downloaded_outputs/<date>/ folder
+    for that date, so the picker can show what's already been pulled
+    down at least once (independent of whether a *backup* destination
+    has it - that's a different, external location this app has no way
+    to check without knowing which drive/folder to look at).
+    """
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
+        sftp = state["sftp"]
+        by_date = _list_remote_run_dirs_by_date(sftp)
+        drone_by_date = _list_remote_drone_files_by_date(sftp)
+        notes_by_date = _list_remote_notes_files_by_date(sftp)
+
+    days = []
+    for date in sorted(set(by_date) | set(drone_by_date) | set(notes_by_date), reverse=True):
+        days.append({
+            "date": date,
+            "run_count": len(by_date.get(date, [])),
+            "drone_file_count": len(drone_by_date.get(date, [])),
+            "has_notes": bool(notes_by_date.get(date)),
+            "downloaded_locally": os.path.isdir(os.path.join(DOWNLOADS_ROOT, date)),
+        })
+    return jsonify({"ok": True, "days": days})
+
+
+def _run_days_download_job(sftp, dates, base_root, kind):
+    """
+    Same background-thread shape as _run_download_job (Phase 1 count,
+    Phase 2 download, both under state["lock"] since the SFTP channel
+    isn't safe to share across threads) - but for a chosen subset of
+    dates rather than everything. Each date gets its own
+    <base_root>/<date>/ folder (base_root is downloaded_outputs/ for
+    "Download Data", or the chosen external volume/subfolder for
+    "Backup to External Drive" - same job either way, just like
+    _run_download_job's target_root already varies between those two).
+
+    Pulls in that date's sensor runs, drone telemetry, and notes file -
+    each one already knows how to name itself back to a date (see
+    _list_remote_run_dirs_by_date/_list_remote_drone_files_by_date/
+    _list_remote_notes_files_by_date), so nothing here is guessing.
+
+    Always incremental (no force option, unlike _run_download_job) -
+    the entire point of a day folder being named after its date is that
+    re-picking the same day later tops it up rather than starting over.
+    """
+    try:
+        with state["lock"]:
+            output_dir = f"{REMOTE_DIR}/{RUN_ALL_SUBDIR}/output"
+            notes_dir = f"{REMOTE_DIR}/{NOTES_SUBFOLDER}"
+            by_date = _list_remote_run_dirs_by_date(sftp)
+            drone_by_date = _list_remote_drone_files_by_date(sftp)
+            notes_by_date = _list_remote_notes_files_by_date(sftp)
+
+            # Phase 1: count files still needed across every selected date,
+            # for the progress bar denominator - same reasoning as
+            # _run_download_job's own Phase 1.
+            total = 0
+            plan = []
+            for date in dates:
+                target_root = os.path.join(base_root, date)
+                runs = by_date.get(date, [])
+                drone_files = drone_by_date.get(date, [])
+                notes_files = notes_by_date.get(date, [])
+                for run in runs:
+                    total += sftp_count_files(sftp, f"{output_dir}/{run}", os.path.join(target_root, "output", run))
+                if drone_files:
+                    total += sftp_count_named_files(drone_files, os.path.join(target_root, "data_from_drone"))
+                if notes_files:
+                    total += sftp_count_named_files(notes_files, os.path.join(target_root, "remote_ssh_notes"))
+                plan.append({
+                    "date": date, "target_root": target_root,
+                    "runs": runs, "drone_files": drone_files, "notes_files": notes_files,
+                })
+
+            with download_state["lock"]:
+                download_state["total_files"] = total
+                download_state["done_files"] = 0
+
+            def on_file_done():
+                with download_state["lock"]:
+                    download_state["done_files"] += 1
+
+            # Phase 2: download each date's runs, drone files, then notes
+            results = []
+            for entry in plan:
+                date, target_root = entry["date"], entry["target_root"]
+                run_downloaded = run_skipped = 0
+                drone_downloaded = drone_skipped = 0
+                notes_downloaded = notes_skipped = 0
+                err = None
+
+                for run in entry["runs"]:
+                    with download_state["lock"]:
+                        download_state["current_source"] = f"{date} - {run}"
+                    d, s, e = sftp_download_dir(sftp, f"{output_dir}/{run}", os.path.join(target_root, "output", run), on_file_done)
+                    run_downloaded += d
+                    run_skipped += s
+                    if e:
+                        err = e
+                        break
+
+                if not err and entry["drone_files"]:
+                    with download_state["lock"]:
+                        download_state["current_source"] = f"{date} - drone telemetry"
+                    d, s, e = sftp_download_named_files(
+                        sftp, DRONE_TELEMETRY_DIR, entry["drone_files"],
+                        os.path.join(target_root, "data_from_drone"), on_file_done,
+                    )
+                    drone_downloaded += d
+                    drone_skipped += s
+                    if e:
+                        err = e
+
+                if not err and entry["notes_files"]:
+                    with download_state["lock"]:
+                        download_state["current_source"] = f"{date} - notes"
+                    d, s, e = sftp_download_named_files(
+                        sftp, notes_dir, entry["notes_files"],
+                        os.path.join(target_root, "remote_ssh_notes"), on_file_done,
+                    )
+                    notes_downloaded += d
+                    notes_skipped += s
+                    if e:
+                        err = e
+
+                results.append({
+                    "date": date, "target_root": target_root,
+                    "run_downloaded": run_downloaded, "run_skipped": run_skipped,
+                    "drone_downloaded": drone_downloaded, "drone_skipped": drone_skipped,
+                    "notes_downloaded": notes_downloaded, "notes_skipped": notes_skipped,
+                    "error": err,
+                })
+
+        with download_state["lock"]:
+            download_state["results"] = results
+            download_state["current_source"] = None
+            download_state["running"] = False
+
+    except Exception as e:
+        with download_state["lock"]:
+            download_state["error"] = f"{kind.capitalize()} job failed: {e}"
+            download_state["running"] = False
+
+
+def _start_days_download_job(sftp, dates, base_root, kind):
+    """
+    Same "is one already running" atomicity as _start_copy_job, for
+    _run_days_download_job's multi-target-root shape instead of a single
+    target_root.
+    """
+    with download_state["lock"]:
+        if download_state["running"]:
+            running_kind = download_state.get("kind") or "job"
+            return False, f"A {running_kind} is already in progress."
+
+        download_state["running"] = True
+        download_state["kind"] = kind
+        download_state["total_files"] = 0
+        download_state["done_files"] = 0
+        download_state["current_source"] = None
+        download_state["results"] = None
+        download_state["target_root"] = base_root
+        download_state["error"] = None
+
+    thread = threading.Thread(target=_run_days_download_job, args=(sftp, dates, base_root, kind), daemon=True)
+    thread.start()
+    return True, None
+
+
+def _valid_dates(raw_dates):
+    return [d for d in (raw_dates or []) if isinstance(d, str) and re.match(r"^\d{8}$", d)]
+
+
+@app.route("/download_selected_days", methods=["POST"])
+def download_selected_days():
+    data = request.get_json() or {}
+    dates = _valid_dates(data.get("dates"))
+    if not dates:
+        return jsonify({"ok": False, "error": "Pick at least one day."}), 400
+
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
+        sftp = state["sftp"]
+
+        started, error = _start_days_download_job(sftp, dates, DOWNLOADS_ROOT, kind="download_days")
+        if not started:
+            return jsonify({"ok": False, "error": error}), 409
+
+        return jsonify({"ok": True, "started": True})
 
 
 def _run_download_job(sftp, target_root, name, force=False, kind="download"):
@@ -2212,6 +4425,40 @@ def external_volumes():
     return jsonify({"ok": True, "volumes": _list_external_volumes()})
 
 
+def _common_destination_folders():
+    """
+    Returns [{"name": ..., "path": ...}, ...] for the handful of obvious
+    "save a copy of the merged CSV here" targets on this machine -
+    Desktop, Downloads, Documents, and the home folder itself - each only
+    offered if it actually exists, since not every OS/account has all of
+    them (e.g. a fresh Linux account may have no Desktop folder).
+    """
+    home = os.path.expanduser("~")
+    candidates = [("Desktop", "Desktop"), ("Downloads", "Downloads"), ("Documents", "Documents"), ("Home folder", "")]
+    folders = []
+    for label, sub in candidates:
+        path = os.path.join(home, sub) if sub else home
+        if os.path.isdir(path):
+            folders.append({"name": label, "path": path})
+    return folders
+
+
+@app.route("/offline/merge_destination_options")
+def offline_merge_destination_options():
+    """
+    Quick-pick targets for the "Merge" modal's optional "also save a copy
+    to..." folder - common folders under this user's home directory plus
+    any currently-mounted external drives (same list "Backup to External
+    Drive" uses), so picking a destination doesn't require typing a full
+    path by hand for the common cases.
+    """
+    return jsonify({
+        "ok": True,
+        "common": _common_destination_folders(),
+        "volumes": _list_external_volumes(),
+    })
+
+
 @app.route("/check_backup_folder", methods=["POST"])
 def check_backup_folder():
     data = request.get_json()
@@ -2265,6 +4512,38 @@ def backup_to_drive():
             return jsonify({"ok": False, "error": f"Could not create folder on drive: {e}"}), 500
 
         started, error = _start_copy_job(sftp, target_root, name, force=force, kind="backup")
+        if not started:
+            return jsonify({"ok": False, "error": error}), 409
+
+        return jsonify({"ok": True, "started": True})
+
+
+@app.route("/backup_selected_days", methods=["POST"])
+def backup_selected_days():
+    """
+    "Backup to External Drive"'s counterpart to /download_selected_days -
+    same _run_days_download_job, just aimed at the chosen drive
+    (<volume_path>/<date>/ per date) instead of downloaded_outputs/, and
+    with no subfolder-name step - same reasoning as the local flow, each
+    date names its own folder.
+    """
+    data = request.get_json() or {}
+    volume_path = (data.get("volume_path") or "").strip()
+    dates = _valid_dates(data.get("dates"))
+
+    if not dates:
+        return jsonify({"ok": False, "error": "Pick at least one day."}), 400
+
+    valid_paths = {v["path"] for v in _list_external_volumes()}
+    if volume_path not in valid_paths:
+        return jsonify({"ok": False, "error": "That drive is no longer connected. Refresh the drive list and try again."}), 400
+
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
+        sftp = state["sftp"]
+
+        started, error = _start_days_download_job(sftp, dates, volume_path, kind="backup_days")
         if not started:
             return jsonify({"ok": False, "error": error}), 409
 
@@ -2578,19 +4857,13 @@ def status():
 @app.route("/disconnect", methods=["POST"])
 def disconnect():
     with state["lock"]:
-        if state["ssh"]:
-            try:
-                state["sftp"].close()
-                state["ssh"].close()
-            except Exception:
-                pass
-        state["ssh"] = None
-        state["sftp"] = None
+        ssh, sftp = _detach_ssh_handles()
         state["connected"] = False
         state["remote_path"] = None
         state["host"] = None
         state["username"] = None
         state["password"] = None
+    _close_ssh_handles_async(ssh, sftp)
     return jsonify({"ok": True})
 
 

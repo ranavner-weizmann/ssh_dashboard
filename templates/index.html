@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>SSH Dashboard — Drone Air System</title>
+<title>MAMP Dashboard — Drone Air System</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="{{ url_for('static', filename='xterm/xterm.css') }}">
 <style>
@@ -24,6 +24,17 @@
     --surface-sunken: #e2e7ee;
     --mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
     --sans: "Inter", -apple-system, sans-serif;
+    /* Categorical series palette (Data Viewer overlay plot) - fixed hue
+       order, validated for adjacent-pair CVD separation. Assign in order;
+       never cycle or reassign by rank. */
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #eda100;
+    --series-5: #e87ba4;
+    --series-6: #008300;
+    --series-7: #4a3aa7;
+    --series-8: #e34948;
   }
 
   * { box-sizing: border-box; }
@@ -215,6 +226,24 @@
     margin-right: auto;
   }
 
+  .connect-view-divider {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 12px;
+    margin: 16px 0;
+    position: relative;
+  }
+  .connect-view-divider::before,
+  .connect-view-divider::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    width: 40%;
+    border-top: 1px solid var(--panel-border);
+  }
+  .connect-view-divider::before { left: 0; }
+  .connect-view-divider::after { right: 0; }
+
   .field {
     margin-bottom: 10px;
   }
@@ -339,6 +368,78 @@
   .plot-tooltip .tt-time {
     color: var(--text-dim);
   }
+
+  .plot-tooltip .tt-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .plot-tooltip .tt-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: none;
+  }
+
+  .dv-zoom-reset {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-family: var(--sans);
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    z-index: 4;
+  }
+  .dv-zoom-reset:hover { color: var(--text); border-color: var(--text-dim); }
+
+  .dv-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .dv-legend-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    border-radius: 999px;
+    padding: 4px 6px 4px 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+  }
+
+  .dv-legend-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex: none;
+  }
+
+  .dv-legend-value {
+    color: var(--text-dim);
+  }
+
+  .dv-legend-remove {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+  }
+
+  .dv-legend-remove:hover { color: var(--err); }
 
   .row {
     display: flex;
@@ -580,8 +681,32 @@
     max-height: 420px;
     border: 1px solid var(--panel-border);
     border-radius: 6px;
-    margin-top: 4px;
+    margin-top: 10px;
   }
+
+  /* The raw sheet is secondary to the plot - collapsed by default behind
+     this disclosure so the tab opens on the more useful view instead of
+     a wall of mostly-blank merged_data columns. */
+  .dv-disclosure {
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-dim);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .dv-disclosure:hover { color: var(--text); }
+
+  .dv-sheet-body {
+    display: none;
+    margin-top: 12px;
+  }
+  .dv-sheet-body.open { display: block; }
 
   .dv-table {
     border-collapse: collapse;
@@ -665,6 +790,65 @@
   .switch input:checked + .switch-slider { background: var(--accent-dim); }
   .switch input:checked + .switch-slider::before { transform: translateX(18px); background: var(--accent); }
   .switch input:disabled + .switch-slider { opacity: 0.4; cursor: not-allowed; }
+
+  /* DOWNLOAD/BACKUP MODAL: "all data" vs "specific days" mode choice, and the day picker */
+  .scope-choice {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 2px;
+  }
+  .scope-choice label {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--text);
+    text-transform: none;
+    padding: 8px 10px;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .scope-choice label:hover { border-color: var(--accent); }
+  .scope-choice input[type=radio] { margin-top: 2px; flex: none; }
+  .scope-choice .scope-choice-desc { display: block; color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+
+  .day-picker-toolbar { display: flex; align-items: center; justify-content: space-between; margin: 10px 0 6px; }
+  .day-picker-toolbar .hint { margin: 0; }
+
+  .day-picker-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 280px;
+    overflow-y: auto;
+  }
+  .day-picker-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    background: var(--surface-sunken);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .day-picker-row:hover { border-color: var(--accent); }
+  .day-picker-row input[type=checkbox] { flex: none; }
+  .day-picker-date { font-family: var(--mono); flex: none; min-width: 90px; }
+  .day-picker-meta { color: var(--text-dim); font-size: 12px; flex: 1; }
+  .day-picker-tag {
+    font-size: 11px;
+    color: var(--ok);
+    border: 1px solid var(--ok);
+    border-radius: 999px;
+    padding: 1px 8px;
+    flex: none;
+    white-space: nowrap;
+  }
 
   .terminal-container {
     margin-top: 10px;
@@ -839,6 +1023,70 @@
   }
   .btn-danger:hover { background: #f7d1cd; border-color: #a91f1f; }
   .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ---- assistant chat panel ---- */
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .btn-primary-sm {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: var(--sans);
+  }
+  .btn-primary-sm:hover { background: var(--accent-dim); }
+
+  .assistant-log {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 320px;
+    overflow-y: auto;
+    margin-bottom: 10px;
+  }
+
+  .assistant-msg {
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    max-width: 90%;
+  }
+  .assistant-msg.user {
+    background: var(--surface-sunken);
+    align-self: flex-end;
+    max-width: 80%;
+  }
+  .assistant-msg.assistant {
+    background: #eaf1fa;
+    border: 1px solid var(--panel-border);
+    align-self: flex-start;
+  }
+
+  .assistant-input-row { display: flex; gap: 8px; }
+  .assistant-input-row input {
+    flex: 1;
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 8px 12px;
+    font-size: 13px;
+    font-family: var(--sans);
+    outline: none;
+  }
+  .assistant-input-row input:focus { border-color: var(--accent); }
+  .assistant-input-row input:disabled { opacity: 0.6; }
 </style>
 </head>
 <body>
@@ -847,7 +1095,7 @@
   <div class="header-row">
     <div>
       <div class="eyebrow">drone_air_system // remote logging</div>
-      <h1>SSH Dashboard</h1>
+      <h1>MAMP Dashboard</h1>
     </div>
     <div class="status-bar">
       <span class="dot" id="status-dot"></span>
@@ -877,6 +1125,10 @@
 
     <button class="btn-primary" id="connect-btn" onclick="connect()">Connect</button>
     <div class="error-msg" id="connect-error"></div>
+
+    <div class="connect-view-divider">or</div>
+    <button class="btn-ghost" style="width: 100%;" onclick="window.location.href='/offline'">Offline Data Exploration</button>
+    <div class="hint" style="text-align: center;">Browse data already downloaded to this machine - no Pi connection needed.</div>
   </div>
 
   <!-- NOTES VIEW -->
@@ -1151,7 +1403,7 @@
       </div>
 
       <div class="panel">
-        <button class="btn-download" id="download-btn" onclick="startDownload()">⬇ Download All Data</button>
+        <button class="btn-download" id="download-btn" onclick="startDownload()">⬇ Download Data</button>
         <div class="progress-bar-track" id="progress-bar-track">
           <div class="progress-bar-fill" id="progress-bar-fill"></div>
         </div>
@@ -1217,13 +1469,10 @@
 
     <div id="tab-dataviewer" class="tab-panel">
       <div class="panel">
-        <label style="margin-bottom: 8px;">browse output folders</label>
+        <label style="margin-bottom: 8px;">run</label>
         <div class="button-row">
           <select id="dv-run-select" class="select-input" onchange="onDvRunChange()">
             <option value="">Select a run...</option>
-          </select>
-          <select id="dv-file-select" class="select-input" onchange="onDvFileChange()" disabled>
-            <option value="">Select a file...</option>
           </select>
           <button class="btn-ghost" style="width: auto; white-space: nowrap;" onclick="refreshDvRuns(true)">Refresh</button>
         </div>
@@ -1231,27 +1480,20 @@
       </div>
 
       <div class="panel">
-        <label style="margin-bottom: 8px;">sheet</label>
-        <div class="dv-table-wrap">
-          <table class="dv-table">
-            <thead><tr id="dv-table-head"></tr></thead>
-            <tbody id="dv-table-body"></tbody>
-          </table>
-        </div>
-        <div class="button-row" style="margin-top: 8px; align-items: center;">
-          <button class="btn-ghost" style="width: auto;" id="dv-prev-btn" onclick="dvGoToPage(dvState.page - 1)" disabled>◀ Prev</button>
-          <span class="hint" id="dv-page-info" style="margin: 0;"></span>
-          <button class="btn-ghost" style="width: auto;" id="dv-next-btn" onclick="dvGoToPage(dvState.page + 1)" disabled>Next ▶</button>
-        </div>
-      </div>
-
-      <div class="panel">
+        <label style="margin-bottom: 8px;">plot</label>
         <div class="plot-toolbar">
-          <label style="margin-bottom: 0;">plot column</label>
-          <select id="dv-column-select" class="select-input" onchange="onDvColumnChange()" disabled>
+          <select id="dv-plot-file-select" class="select-input" onchange="onDvPlotFileChange()" disabled>
+            <option value="">Select a file...</option>
+          </select>
+          <select id="dv-instrument-select" class="select-input" onchange="dvInstrumentChange()" disabled style="display:none;">
+            <option value="">Instrument...</option>
+          </select>
+          <select id="dv-column-select" class="select-input" onchange="dvAddColumn()" disabled>
             <option value="">Select a column...</option>
           </select>
         </div>
+        <div class="hint">Columns for a file are only fetched once you pick it here - on a slow connection, reading every file up front made this take minutes.</div>
+        <div class="dv-legend" id="dv-plot-legend"></div>
         <div class="plot-header">
           <div>
             <span class="plot-stat-value" id="dv-plot-stat-value">--</span>
@@ -1261,6 +1503,42 @@
         <div class="plot-canvas-wrap">
           <canvas id="dv-plot-canvas" class="plot-canvas-el"></canvas>
           <div class="plot-tooltip" id="dv-plot-tooltip"></div>
+          <button class="dv-zoom-reset" id="dv-plot-zoom-reset" onclick="dvPlot.resetZoom()" style="display:none;">⤢ Reset zoom</button>
+        </div>
+        <div class="hint">Scroll to zoom, drag to pan, double-click to reset.</div>
+      </div>
+
+      <div class="panel" id="assistant-panel">
+        <div class="panel-header">
+          <label>ask about this data</label>
+          <button class="btn-ghost" onclick="dvClearAssistantChat()">Clear</button>
+        </div>
+        <div class="hint" style="margin-bottom: 10px;">Answers are grounded in the statistics and correlation for whichever variables are added to the plot above, plus it can check on demand whether sensors are still running, look for unusual readings, or scan for strong correlations across every instrument in this run - not the raw data, so ask about trends and relationships rather than specific rows. Reads live from the Pi over the current SSH connection. Needs an Anthropic API key configured on this machine.</div>
+        <div class="assistant-log" id="assistant-log"></div>
+        <div class="assistant-input-row">
+          <input type="text" id="assistant-input" placeholder="e.g. is ozone correlated with temperature right now?" autocomplete="off">
+          <button class="btn-primary-sm" id="assistant-ask-btn" onclick="dvAskAssistant()">Ask</button>
+        </div>
+        <div class="hint" id="assistant-status"></div>
+      </div>
+
+      <div class="panel">
+        <button class="dv-disclosure" id="dv-sheet-toggle" onclick="dvToggleSheet()">▸ Raw sheet (browse one file's rows)</button>
+        <div id="dv-sheet-body" class="dv-sheet-body">
+          <select id="dv-file-select" class="select-input" onchange="onDvFileChange()" disabled>
+            <option value="">Select a file...</option>
+          </select>
+          <div class="dv-table-wrap">
+            <table class="dv-table">
+              <thead><tr id="dv-table-head"></tr></thead>
+              <tbody id="dv-table-body"></tbody>
+            </table>
+          </div>
+          <div class="button-row" style="margin-top: 8px; align-items: center;">
+            <button class="btn-ghost" style="width: auto;" id="dv-prev-btn" onclick="dvGoToPage(dvState.page - 1)" disabled>◀ Prev</button>
+            <span class="hint" id="dv-page-info" style="margin: 0;"></span>
+            <button class="btn-ghost" style="width: auto;" id="dv-next-btn" onclick="dvGoToPage(dvState.page + 1)" disabled>Next ▶</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1309,6 +1587,7 @@
 
 <script src="{{ url_for('static', filename='xterm/xterm.js') }}"></script>
 <script src="{{ url_for('static', filename='xterm/addon-fit.js') }}"></script>
+<script src="{{ url_for('static', filename='plot-engine.js') }}"></script>
 <script>
 const notes = [];
 
@@ -1355,6 +1634,17 @@ function switchTab(name) {
     document.getElementById('tab-' + n).classList.toggle('active', n === name);
     document.getElementById('tab-btn-' + n).classList.toggle('active', n === name);
   });
+
+  // The 6 live sensor plots only live in the Operation tab, but used to
+  // keep polling /plot_data every 4s in the background even while you
+  // were on Debug or Data Viewer - each poll competes for the same
+  // single connection lock everything else needs, so that background
+  // polling was slowing down the tab you were actually looking at.
+  if (name === 'operation') {
+    startPlotPolling();
+  } else {
+    stopPlotPolling();
+  }
 }
 
 function showConnectView() {
@@ -1373,8 +1663,7 @@ function showConnectView() {
   document.getElementById('sensor-config-status').style.color = 'var(--text-dim)';
 
   document.getElementById('dv-run-select').innerHTML = '<option value="">Select a run...</option>';
-  document.getElementById('dv-file-select').innerHTML = '<option value="">Select a file...</option>';
-  document.getElementById('dv-file-select').disabled = true;
+  dvResetSelects();
   dvState.run = null;
   dvState.file = null;
   document.getElementById('dv-status').textContent = 'Connect, then pick a run folder to explore.';
@@ -1484,7 +1773,12 @@ let lastLogListFetch = 0;
 function startRunallPolling() {
   stopRunallPolling(); // guard against double-starting
   refreshRunAllOutput();
-  runallPollInterval = setInterval(refreshRunAllOutput, 3000);
+  // Each poll is a real SSH round trip (log tail + a liveness check) over
+  // a link that can take several seconds per round trip on its own - at
+  // 3s this was firing again before the previous call had even come back,
+  // so the connection lock (shared with every other feature) was rarely
+  // ever free. 10s still notices runall.py starting/stopping promptly.
+  runallPollInterval = setInterval(refreshRunAllOutput, 10000);
 }
 
 function stopRunallPolling() {
@@ -1832,7 +2126,13 @@ function handleConnectionLost() {
   errBox.style.color = 'var(--err)';
 }
 
-// ---------- Download All Data flow ----------
+// ---------- Download Data flow ----------
+// Two scopes: "All data" (the original flow below, unchanged - name a
+// subfolder, everything goes in it) or "Specific days" (no name to
+// pick - each chosen date gets its own downloaded_outputs/<date>/
+// folder, via /download_days + /download_selected_days). Both scopes
+// share the day-picker rendering/results-rendering helpers below with
+// "Backup to External Drive", which offers the same choice.
 
 function openModal() {
   document.getElementById('download-modal-overlay').classList.add('active');
@@ -1844,7 +2144,37 @@ function closeModal() {
 }
 
 function startDownload() {
-  // Reset modal to "ask for name" state
+  document.getElementById('modal-title').textContent = 'Download data';
+  document.getElementById('modal-body').innerHTML = `
+    <div class="scope-choice">
+      <label>
+        <input type="radio" name="download-scope" value="all" checked>
+        <span>All data<span class="scope-choice-desc">Everything - every sensor run, every drone flight, and your SSH notes.</span></span>
+      </label>
+      <label>
+        <input type="radio" name="download-scope" value="days">
+        <span>Specific days<span class="scope-choice-desc">Pick which dates to pull down - each gets its own folder named after that date.</span></span>
+      </label>
+    </div>
+    <div class="error-msg" id="modal-error"></div>
+  `;
+  document.getElementById('modal-actions').innerHTML = `
+    <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+    <button class="btn-primary" style="width:auto;" onclick="onDownloadScopeChosen()">Continue</button>
+  `;
+  openModal();
+}
+
+function onDownloadScopeChosen() {
+  const scope = document.querySelector('input[name="download-scope"]:checked').value;
+  if (scope === 'days') {
+    showDownloadDaysStep();
+  } else {
+    showDownloadNameStep();
+  }
+}
+
+function showDownloadNameStep() {
   document.getElementById('modal-title').textContent = 'Download all data';
   document.getElementById('modal-body').innerHTML = `
     <label for="folder-name-input">subfolder name (inside downloaded_outputs)</label>
@@ -1852,14 +2182,164 @@ function startDownload() {
     <div class="error-msg" id="modal-error"></div>
   `;
   document.getElementById('modal-actions').innerHTML = `
-    <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+    <button class="btn-ghost" onclick="startDownload()">Back</button>
     <button class="btn-primary" style="width:auto;" onclick="submitFolderName()">Continue</button>
   `;
-  openModal();
   setTimeout(() => {
     const input = document.getElementById('folder-name-input');
     if (input) input.focus();
   }, 50);
+}
+
+// ---------- Shared "pick which days" step (Download Data + Backup) ----------
+
+// "20260813" -> "2026-08-13"
+function formatPlainDate(yyyymmdd) {
+  return `${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}-${yyyymmdd.slice(6, 8)}`;
+}
+
+// Renders /download_days' response as checkbox rows - shared by the
+// Download Data and Backup to External Drive modals, which each just
+// wire the resulting checkboxes into their own "go" button
+// (submitDownloadDays / submitBackupDetails).
+function renderDayPickerRows(days) {
+  if (!days.length) {
+    return '<p>No sensor runs, drone flights, or notes found on the Pi yet.</p>';
+  }
+  const rows = days.map((d) => {
+    const parts = [];
+    if (d.run_count) parts.push(`${d.run_count} run${d.run_count === 1 ? '' : 's'}`);
+    if (d.drone_file_count) parts.push(`${d.drone_file_count} drone flight${d.drone_file_count === 1 ? '' : 's'}`);
+    if (d.has_notes) parts.push('notes');
+    const meta = parts.join(' · ') || 'no data';
+    const tag = d.downloaded_locally ? '<span class="day-picker-tag">downloaded</span>' : '';
+    return `
+      <label class="day-picker-row">
+        <input type="checkbox" class="day-picker-check" value="${d.date}">
+        <span class="day-picker-date">${formatPlainDate(d.date)}</span>
+        <span class="day-picker-meta">${escapeHtml(meta)}</span>
+        ${tag}
+      </label>`;
+  }).join('');
+  return `<div class="day-picker-list">${rows}</div>`;
+}
+
+function selectedDayPickerDates() {
+  return [...document.querySelectorAll('.day-picker-check:checked')].map((el) => el.value);
+}
+
+// Only one day picker is ever on screen at a time (the two modals are
+// mutually exclusive), so a single toggle-all can target whichever
+// checkboxes are currently rendered.
+function toggleAllDayPickerRows() {
+  const boxes = [...document.querySelectorAll('.day-picker-check')];
+  const allChecked = boxes.length > 0 && boxes.every((b) => b.checked);
+  boxes.forEach((b) => { b.checked = !allChecked; });
+}
+
+// Per-date result rows from _run_days_download_job - shared by
+// "Download specific days" and "Backup specific days to drive" (same
+// job, different destination root).
+function renderDaysResultsHtml(results) {
+  const rows = results.map((r) => {
+    if (r.error) {
+      return `<div class="download-result-row"><span>${formatPlainDate(r.date)}</span><span class="err">error: ${escapeHtml(r.error)}</span></div>`;
+    }
+    const parts = [];
+    if (r.run_downloaded || r.run_skipped) {
+      parts.push(`${r.run_downloaded} sensor file${r.run_downloaded === 1 ? '' : 's'} downloaded` + (r.run_skipped ? `, ${r.run_skipped} unchanged` : ''));
+    }
+    if (r.drone_downloaded || r.drone_skipped) {
+      parts.push(`${r.drone_downloaded} drone file${r.drone_downloaded === 1 ? '' : 's'} downloaded` + (r.drone_skipped ? `, ${r.drone_skipped} unchanged` : ''));
+    }
+    if (r.notes_downloaded || r.notes_skipped) {
+      parts.push(r.notes_downloaded ? 'notes downloaded' : 'notes unchanged');
+    }
+    const summary = parts.length ? parts.join(' · ') : 'nothing to download';
+    return `
+      <div class="download-result-row"><span>${formatPlainDate(r.date)}</span><span class="ok">${escapeHtml(summary)}</span></div>
+      <div class="download-target-path" style="margin-top:-4px;">saved to: ${escapeHtml(r.target_root)}</div>`;
+  }).join('');
+  return `<div class="download-result-list">${rows}</div>`;
+}
+
+async function showDownloadDaysStep() {
+  document.getElementById('modal-title').textContent = 'Download specific days';
+  document.getElementById('modal-body').innerHTML = '<p>Looking for available days on the Pi...</p>';
+  document.getElementById('modal-actions').innerHTML = `<button class="btn-ghost" onclick="startDownload()">Cancel</button>`;
+
+  try {
+    const res = await fetch('/download_days');
+    const data = await res.json();
+    if (!data.ok) {
+      document.getElementById('modal-body').innerHTML = `<p>${escapeHtml(data.error)}</p>`;
+      return;
+    }
+    document.getElementById('modal-body').innerHTML = `
+      <div class="day-picker-toolbar">
+        <span class="hint">${data.days.length} day${data.days.length === 1 ? '' : 's'} found on the Pi</span>
+        <button class="btn-ghost" style="width:auto;" onclick="toggleAllDayPickerRows()">Select all</button>
+      </div>
+      ${renderDayPickerRows(data.days)}
+      <div class="error-msg" id="modal-error"></div>
+    `;
+    document.getElementById('modal-actions').innerHTML = `
+      <button class="btn-ghost" onclick="startDownload()">Back</button>
+      <button class="btn-primary" style="width:auto;" onclick="submitDownloadDays()">Download</button>
+    `;
+  } catch (e) {
+    document.getElementById('modal-body').innerHTML = '<p>Could not reach the local app server.</p>';
+  }
+}
+
+function submitDownloadDays() {
+  const dates = selectedDayPickerDates();
+  const errBox = document.getElementById('modal-error');
+  if (!dates.length) {
+    errBox.textContent = 'Pick at least one day.';
+    return;
+  }
+  closeModal();
+  runDaysDownload(dates);
+}
+
+async function runDaysDownload(dates) {
+  const btn = document.getElementById('download-btn');
+  const statusEl = document.getElementById('download-status');
+  const resultsEl = document.getElementById('download-results');
+  const track = document.getElementById('progress-bar-track');
+  const fill = document.getElementById('progress-bar-fill');
+
+  btn.disabled = true;
+  statusEl.textContent = 'Starting download...';
+  statusEl.style.color = 'var(--text-dim)';
+  resultsEl.innerHTML = '';
+  track.classList.add('active');
+  fill.style.width = '0%';
+
+  try {
+    const res = await fetch('/download_selected_days', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dates })
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      track.classList.remove('active');
+      btn.disabled = false;
+      return;
+    }
+
+    pollDownloadProgress();
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+    track.classList.remove('active');
+    btn.disabled = false;
+  }
 }
 
 async function submitFolderName() {
@@ -1903,7 +2383,7 @@ function showOverwriteConfirm(name, path) {
     Files already there will be reused as-is; only new or changed files will actually be downloaded. Continue into this folder, or go back and choose a different name?</p>
   `;
   document.getElementById('modal-actions').innerHTML = `
-    <button class="btn-ghost" onclick="startDownload()">Choose different name</button>
+    <button class="btn-ghost" onclick="showDownloadNameStep()">Choose different name</button>
     <button class="btn-primary" style="width:auto;" onclick="confirmOverwrite('${name.replace(/'/g, "\\'")}')">Continue</button>
   `;
 }
@@ -1994,18 +2474,22 @@ async function pollDownloadProgress() {
       : 'Download complete.';
     statusEl.style.color = anyErrors ? 'var(--err)' : 'var(--ok)';
 
-    const rows = results.map(r => {
-      if (r.error) {
-        return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="err">error: ${escapeHtml(r.error)}</span></div>`;
-      }
-      const skipLabel = r.skipped_count ? `, ${r.skipped_count} unchanged (skipped)` : '';
-      return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="ok">${r.file_count} downloaded${skipLabel}</span></div>`;
-    }).join('');
+    if (p.kind === 'download_days') {
+      resultsEl.innerHTML = renderDaysResultsHtml(results);
+    } else {
+      const rows = results.map(r => {
+        if (r.error) {
+          return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="err">error: ${escapeHtml(r.error)}</span></div>`;
+        }
+        const skipLabel = r.skipped_count ? `, ${r.skipped_count} unchanged (skipped)` : '';
+        return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="ok">${r.file_count} downloaded${skipLabel}</span></div>`;
+      }).join('');
 
-    resultsEl.innerHTML = `
-      <div class="download-result-list">${rows}</div>
-      <div class="download-target-path">saved to: ${escapeHtml(p.target_root)}</div>
-    `;
+      resultsEl.innerHTML = `
+        <div class="download-result-list">${rows}</div>
+        <div class="download-target-path">saved to: ${escapeHtml(p.target_root)}</div>
+      `;
+    }
 
     setTimeout(() => track.classList.remove('active'), 1200);
   } catch (e) {
@@ -2017,10 +2501,11 @@ async function pollDownloadProgress() {
 }
 
 // ---------- Backup to External Drive flow ----------
-// Same underlying copy job as Download All Data (see _run_download_job on
-// the backend) - just aimed at a folder on a currently-mounted external
-// drive instead of downloaded_outputs, with an explicit incremental/full
-// choice asked every time rather than a fixed default.
+// Same underlying copy jobs as Download Data above (_run_download_job
+// for "all data", _run_days_download_job for "specific days") - just
+// aimed at a folder on a currently-mounted external drive instead of
+// downloaded_outputs, with an explicit incremental/full choice asked
+// every time (all-data mode only) rather than a fixed default.
 
 function openBackupModal() {
   document.getElementById('backup-modal-overlay').classList.add('active');
@@ -2058,24 +2543,48 @@ async function startBackup() {
       `<option value="${escapeHtml(v.path)}">${escapeHtml(v.name)}</option>`
     ).join('');
 
+    backupDaysLoaded = false;
     document.getElementById('backup-modal-body').innerHTML = `
       <label for="backup-volume-select">external drive</label>
       <select id="backup-volume-select" class="select-input" style="width:100%;">${volumeOptions}</select>
 
-      <label for="backup-folder-name-input" style="margin-top:14px;">subfolder name (on the drive)</label>
-      <input type="text" id="backup-folder-name-input" placeholder="session_2026_06_18" autocomplete="off">
-
-      <label style="margin-top:14px;">copy mode - asked every time, no fixed default</label>
-      <div style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
-        <label style="display:flex; align-items:center; gap:8px; font-family:inherit; font-size:13px; color:var(--text); text-transform:none;">
-          <input type="radio" name="backup-mode" value="incremental" checked>
-          Incremental - skip files already on the drive that match by size
+      <label style="margin-top:14px;">what to back up</label>
+      <div class="scope-choice">
+        <label>
+          <input type="radio" name="backup-scope" value="all" checked onchange="onBackupScopeChange()">
+          <span>All data<span class="scope-choice-desc">Everything, in a subfolder you name.</span></span>
         </label>
-        <label style="display:flex; align-items:center; gap:8px; font-family:inherit; font-size:13px; color:var(--text); text-transform:none;">
-          <input type="radio" name="backup-mode" value="full">
-          Full copy - re-copy everything, even if it's already there
+        <label>
+          <input type="radio" name="backup-scope" value="days" onchange="onBackupScopeChange()">
+          <span>Specific days<span class="scope-choice-desc">Pick which dates to back up - each gets its own folder named after that date.</span></span>
         </label>
       </div>
+
+      <div id="backup-all-fields">
+        <label for="backup-folder-name-input" style="margin-top:14px;">subfolder name (on the drive)</label>
+        <input type="text" id="backup-folder-name-input" placeholder="session_2026_06_18" autocomplete="off">
+
+        <label style="margin-top:14px;">copy mode - asked every time, no fixed default</label>
+        <div style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
+          <label style="display:flex; align-items:center; gap:8px; font-family:inherit; font-size:13px; color:var(--text); text-transform:none;">
+            <input type="radio" name="backup-mode" value="incremental" checked>
+            Incremental - skip files already on the drive that match by size
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; font-family:inherit; font-size:13px; color:var(--text); text-transform:none;">
+            <input type="radio" name="backup-mode" value="full">
+            Full copy - re-copy everything, even if it's already there
+          </label>
+        </div>
+      </div>
+
+      <div id="backup-days-fields" style="display:none;">
+        <div class="day-picker-toolbar" style="margin-top:14px;">
+          <span class="hint" id="backup-days-hint">Looking for available days...</span>
+          <button class="btn-ghost" style="width:auto;" onclick="toggleAllDayPickerRows()">Select all</button>
+        </div>
+        <div id="backup-days-list"></div>
+      </div>
+
       <div class="error-msg" id="backup-modal-error"></div>
     `;
     document.getElementById('backup-modal-actions').innerHTML = `
@@ -2094,11 +2603,55 @@ async function startBackup() {
   }
 }
 
+// Lazy-loaded the first time "Specific days" is picked, so choosing
+// "All data" (still the default) never costs the extra /download_days
+// round trip.
+let backupDaysLoaded = false;
+
+async function onBackupScopeChange() {
+  const scope = document.querySelector('input[name="backup-scope"]:checked').value;
+  document.getElementById('backup-all-fields').style.display = scope === 'all' ? 'block' : 'none';
+  document.getElementById('backup-days-fields').style.display = scope === 'days' ? 'block' : 'none';
+  if (scope === 'days' && !backupDaysLoaded) {
+    await loadBackupDaysList();
+  }
+}
+
+async function loadBackupDaysList() {
+  const hintEl = document.getElementById('backup-days-hint');
+  const listEl = document.getElementById('backup-days-list');
+  try {
+    const res = await fetch('/download_days');
+    const data = await res.json();
+    if (!data.ok) {
+      hintEl.textContent = data.error;
+      return;
+    }
+    backupDaysLoaded = true;
+    hintEl.textContent = `${data.days.length} day${data.days.length === 1 ? '' : 's'} found on the Pi`;
+    listEl.innerHTML = renderDayPickerRows(data.days);
+  } catch (e) {
+    hintEl.textContent = 'Could not reach the local app server.';
+  }
+}
+
 async function submitBackupDetails() {
-  const volumeSelect = document.getElementById('backup-volume-select');
-  const nameInput = document.getElementById('backup-folder-name-input');
+  const scope = document.querySelector('input[name="backup-scope"]:checked').value;
   const errBox = document.getElementById('backup-modal-error');
-  const volumePath = volumeSelect.value;
+  const volumePath = document.getElementById('backup-volume-select').value;
+
+  if (scope === 'days') {
+    const dates = selectedDayPickerDates();
+    if (!dates.length) {
+      errBox.textContent = 'Pick at least one day.';
+      return;
+    }
+    closeBackupModal();
+    runDaysBackup(volumePath, dates);
+    return;
+  }
+
+  const nameInput = document.getElementById('backup-folder-name-input');
   const name = nameInput.value.trim();
   const force = document.querySelector('input[name="backup-mode"]:checked').value === 'full';
 
@@ -2190,6 +2743,45 @@ async function runBackup(volumePath, name, force) {
   }
 }
 
+async function runDaysBackup(volumePath, dates) {
+  const btn = document.getElementById('backup-btn');
+  const statusEl = document.getElementById('backup-status');
+  const resultsEl = document.getElementById('backup-results');
+  const track = document.getElementById('backup-progress-bar-track');
+  const fill = document.getElementById('backup-progress-bar-fill');
+
+  btn.disabled = true;
+  statusEl.textContent = 'Starting backup...';
+  statusEl.style.color = 'var(--text-dim)';
+  resultsEl.innerHTML = '';
+  track.classList.add('active');
+  fill.style.width = '0%';
+
+  try {
+    const res = await fetch('/backup_selected_days', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ volume_path: volumePath, dates })
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      track.classList.remove('active');
+      btn.disabled = false;
+      return;
+    }
+
+    pollBackupProgress();
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+    track.classList.remove('active');
+    btn.disabled = false;
+  }
+}
+
 async function pollBackupProgress() {
   const btn = document.getElementById('backup-btn');
   const statusEl = document.getElementById('backup-status');
@@ -2231,18 +2823,22 @@ async function pollBackupProgress() {
       : 'Backup complete.';
     statusEl.style.color = anyErrors ? 'var(--err)' : 'var(--ok)';
 
-    const rows = results.map(r => {
-      if (r.error) {
-        return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="err">error: ${escapeHtml(r.error)}</span></div>`;
-      }
-      const skipLabel = r.skipped_count ? `, ${r.skipped_count} unchanged (skipped)` : '';
-      return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="ok">${r.file_count} copied${skipLabel}</span></div>`;
-    }).join('');
+    if (p.kind === 'backup_days') {
+      resultsEl.innerHTML = renderDaysResultsHtml(results);
+    } else {
+      const rows = results.map(r => {
+        if (r.error) {
+          return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="err">error: ${escapeHtml(r.error)}</span></div>`;
+        }
+        const skipLabel = r.skipped_count ? `, ${r.skipped_count} unchanged (skipped)` : '';
+        return `<div class="download-result-row"><span>${escapeHtml(r.source)}</span><span class="ok">${r.file_count} copied${skipLabel}</span></div>`;
+      }).join('');
 
-    resultsEl.innerHTML = `
-      <div class="download-result-list">${rows}</div>
-      <div class="download-target-path">saved to: ${escapeHtml(p.target_root)}</div>
-    `;
+      resultsEl.innerHTML = `
+        <div class="download-result-list">${rows}</div>
+        <div class="download-target-path">saved to: ${escapeHtml(p.target_root)}</div>
+      `;
+    }
 
     setTimeout(() => track.classList.remove('active'), 1200);
   } catch (e) {
@@ -2421,8 +3017,6 @@ function playTimerBeep() {
 // adding/removing a plot is a one-line change rather than a duplicated
 // copy of every function below.
 
-const PLOT_PADDING = { top: 16, right: 16, bottom: 24, left: 46 };
-
 // Decimal places to display, per sensor - matched to how much precision
 // the source data actually carries, so values aren't rounded away:
 // POM's Ozone_ppb comes in with 1 decimal, iMet's temp is a hundredths-
@@ -2437,24 +3031,6 @@ const PLOT_DECIMALS = {
   trisonica: 2, pops: 1, partector2pro: 0, miniaeth: 1, altitude_agl: 2,
 };
 
-function plotTimeOnly(ts) {
-  // "2026-07-06 15:15:11" -> "15:15:11"
-  const parts = String(ts).split(' ');
-  return parts.length > 1 ? parts[1] : ts;
-}
-
-function getCssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
-
-function hexToRgba(hex, alpha) {
-  const h = hex.replace('#', '');
-  const r = parseInt(h.substring(0, 2), 16);
-  const g = parseInt(h.substring(2, 4), 16);
-  const b = parseInt(h.substring(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
 function plotXY(points, width, height, minV, maxV) {
   const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
   const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
@@ -2462,25 +3038,6 @@ function plotXY(points, width, height, minV, maxV) {
   const xForIndex = (i) => PLOT_PADDING.left + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
   const yForValue = (v) => PLOT_PADDING.top + plotH - ((v - minV) / (maxV - minV)) * plotH;
   return { plotW, plotH, xForIndex, yForValue };
-}
-
-// Shared by both the live plots (createPlotController) and the Data
-// Viewer's historical plot (createStaticPlotController) - the canvas
-// resize/draw/hover mechanics are identical either way, only where the
-// points come from (a 4s poll vs. a one-shot fetch) differs.
-
-function getCanvasContext(canvas) {
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const targetW = Math.max(1, Math.round(rect.width * dpr));
-  const targetH = Math.max(1, Math.round(rect.height * dpr));
-  if (canvas.width !== targetW || canvas.height !== targetH) {
-    canvas.width = targetW;
-    canvas.height = targetH;
-  }
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { ctx, width: rect.width, height: rect.height };
 }
 
 function drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue, emptyMessage) {
@@ -2701,7 +3258,10 @@ function createPlotController(suffix, defaultSensor) {
   function startPolling() {
     stopPolling();
     fetchData();
-    pollInterval = setInterval(fetchData, 4000);
+    // 6 of these run at once (one per sensor panel), all sharing the one
+    // connection lock every other feature needs too - see switchTab(),
+    // which now only runs this poll while the Operation tab is visible.
+    pollInterval = setInterval(fetchData, 6000);
   }
 
   function stopPolling() {
@@ -2721,48 +3281,6 @@ function createPlotController(suffix, defaultSensor) {
   return { startPolling, stopPolling, draw };
 }
 
-function createStaticPlotController(canvasId, tooltipId) {
-  const canvas = document.getElementById(canvasId);
-  const tooltip = document.getElementById(tooltipId);
-
-  let points = [];
-  let decimals = 1;
-  let hoverIndex = null;
-  let emptyMessage = 'Pick a numeric column to plot';
-
-  function formatValue(v) {
-    return v.toFixed(decimals);
-  }
-
-  function draw() {
-    drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue, emptyMessage);
-  }
-
-  attachPlotHover(
-    canvas, tooltip,
-    () => points,
-    formatValue,
-    (idx) => { hoverIndex = idx; draw(); },
-  );
-
-  return {
-    setData(newPoints, newDecimals) {
-      points = newPoints;
-      decimals = (typeof newDecimals === 'number') ? newDecimals : 1;
-      hoverIndex = null;
-      emptyMessage = 'Pick a numeric column to plot';
-      draw();
-    },
-    setEmptyMessage(message) {
-      points = [];
-      hoverIndex = null;
-      emptyMessage = message;
-      draw();
-    },
-    draw,
-  };
-}
-
 const plotControllers = [
   createPlotController('-1', 'pom'),
   createPlotController('-2', 'imet'),
@@ -2772,11 +3290,25 @@ const plotControllers = [
   createPlotController('-6', 'trisonica'),
 ];
 
+// Starting all 6 controllers in the same tick used to mean all 6 landed
+// on the connection lock at the same instant, every 6s, forever - a
+// burst any other request (e.g. opening a run in the Data Viewer) could
+// get stuck queued behind. Staggering each one's start by 1s spreads
+// them across the polling window instead, and - since each controller's
+// own recurring interval is anchored to its own staggered start time -
+// they stay spread out on every later tick too, not just the first one.
+let plotStaggerTimeouts = [];
+
 function startPlotPolling() {
-  plotControllers.forEach(p => p.startPolling());
+  stopPlotPolling(); // clear any previous stagger timers before scheduling new ones
+  plotControllers.forEach((p, i) => {
+    plotStaggerTimeouts.push(setTimeout(() => p.startPolling(), i * 1000));
+  });
 }
 
 function stopPlotPolling() {
+  plotStaggerTimeouts.forEach((id) => clearTimeout(id));
+  plotStaggerTimeouts = [];
   plotControllers.forEach(p => p.stopPolling());
 }
 
@@ -2789,20 +3321,55 @@ window.addEventListener('resize', () => {
 
 // ---------- Data Viewer ----------
 // Browses every run folder on the Pi (not just the latest one, unlike
-// the live plots) - pick a run, pick a CSV in it, page through it as a
-// sheet, and plot any numeric column against the file's own time column.
-// Nothing here polls; every fetch is triggered by an explicit user pick.
+// the live plots): pick a run, then build an overlay plot from any
+// numeric variable in it (any instrument's CSV, plus data_from_drone's
+// latest telemetry) - each added variable remembers its own (source,
+// file) pair, so it's not limited to one file at a time. The raw sheet
+// (one file's actual rows) is secondary and starts collapsed.
+//
+// A column list is only ever fetched for a file once you actually pick
+// it - a file's full content has to be read to know its columns (same
+// SFTP round trip /data_viewer/table pays), and on a slow/high-latency
+// link that can take many seconds *per file*; fetching every file in a
+// run up front (an earlier version of this did, for a nicer one-step
+// picker) turned "open a run" into a multi-minute wait. Nothing here
+// polls; every fetch is triggered by an explicit user pick.
+
+// Fixed categorical order - same hexes as the --series-N CSS vars.
+// Assigned to picks by scanning for the lowest-indexed color not
+// currently in use (not just "next by count") so that removing one
+// variable and adding another never reuses a color still on screen.
+const DV_SERIES_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
 
 const dvState = {
   run: null,
-  file: null,
+  file: null,              // sheet's currently open file (always source "run")
   page: 1,
   totalPages: 1,
-  columns: [],
-  columnNumeric: [],
+  files: [],                 // this run's CSV paths (for both the sheet and plot file pickers)
+  droneLatestFile: null,      // basename of the latest data_from_drone telemetry file, or null
+  fileColumnsCache: {},         // { dvFileCacheKey(source,file): {columns, columnNumeric} }
+  activeSeries: [],               // [{source, file, column}] - the plotted variables
+  seriesColors: {},                // keyed by dvSeriesKey(source, file, column)
+  selectedInstrument: null,         // currently chosen in the instrument dropdown, or null
 };
 
-const dvPlot = createStaticPlotController('dv-plot-canvas', 'dv-plot-tooltip');
+let dvSheetOpen = false;
+
+const dvPlot = createStaticPlotController('dv-plot-canvas', 'dv-plot-tooltip', 'dv-plot-zoom-reset');
+
+function dvFileCacheKey(source, file) {
+  return source + '::' + file;
+}
+
+function dvSeriesKey(source, file, column) {
+  return dvFileCacheKey(source, file) + '::' + column;
+}
+
+function dvNextAvailableColor() {
+  const used = new Set(Object.values(dvState.seriesColors));
+  return DV_SERIES_COLORS.find((c) => !used.has(c)) || null;
+}
 
 function dvFormatRunLabel(name) {
   // "20260706_185920" -> "2026-07-06 18:59:20"
@@ -2816,26 +3383,53 @@ function dvFormatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// "csv/pom_data_20260813_151445.csv" -> "pom" - just enough to tell
+// instruments apart in the picker and legend without the full
+// path/timestamp.
+function dvShortFileLabel(path) {
+  const base = path.split('/').pop().replace(/\.csv$/i, '').replace(/_\d{8}_\d{6}$/, '');
+  return base.replace(/_data$/, '');
+}
+
+function dvToggleSheet() {
+  dvSheetOpen = !dvSheetOpen;
+  document.getElementById('dv-sheet-body').classList.toggle('open', dvSheetOpen);
+  document.getElementById('dv-sheet-toggle').textContent =
+    (dvSheetOpen ? '▾' : '▸') + " Raw sheet (browse one file's rows)";
+}
+
+function dvResetSelects() {
+  const fileSelect = document.getElementById('dv-file-select');
+  const plotFileSelect = document.getElementById('dv-plot-file-select');
+  fileSelect.innerHTML = '<option value="">Select a file...</option>';
+  fileSelect.disabled = true;
+  plotFileSelect.innerHTML = '<option value="">Select a file...</option>';
+  plotFileSelect.disabled = true;
+  dvState.files = [];
+  dvState.droneLatestFile = null;
+  dvState.fileColumnsCache = {};
+}
+
 async function refreshDvRuns(preserveSelection = false) {
   const runSelect = document.getElementById('dv-run-select');
   const statusEl = document.getElementById('dv-status');
 
   // The "Refresh" button (preserveSelection=true) re-fetches the run and
   // file lists (so a run that just appeared shows up) but keeps whatever
-  // run/file/page/column were already picked, instead of dropping back to
-  // the dropdown-selection screen every time - the whole point being to
-  // pick up newly-appended rows in the file you're already looking at
-  // without re-choosing it. Plain page-load calls this with no argument,
-  // which keeps the original reset-everything behavior.
+  // run/file/page/plot selection was already picked, instead of dropping
+  // back to the dropdown-selection screen every time - the whole point
+  // being to pick up newly-appended rows in the file you're already
+  // looking at without re-choosing it. Plain page-load calls this with no
+  // argument, which keeps the original reset-everything behavior.
   const keepRun = preserveSelection ? dvState.run : null;
   const keepFile = preserveSelection ? dvState.file : null;
   const keepPage = preserveSelection ? dvState.page : 1;
-  const keepColumn = preserveSelection ? document.getElementById('dv-column-select').value : null;
+  const keepSeries = preserveSelection ? dvState.activeSeries.map((s) => ({ ...s })) : null;
+  const keepColors = preserveSelection ? { ...dvState.seriesColors } : null;
 
   if (!preserveSelection) {
     runSelect.innerHTML = '<option value="">Select a run...</option>';
-    document.getElementById('dv-file-select').innerHTML = '<option value="">Select a file...</option>';
-    document.getElementById('dv-file-select').disabled = true;
+    dvResetSelects();
     dvState.run = null;
     dvState.file = null;
     dvClearTable();
@@ -2861,12 +3455,11 @@ async function refreshDvRuns(preserveSelection = false) {
 
     if (keepRun && data.runs.includes(keepRun)) {
       runSelect.value = keepRun;
-      await onDvRunChange(keepFile, keepPage, keepColumn);
+      await onDvRunChange(keepFile, keepPage, keepSeries, keepColors);
       return;
     }
 
-    document.getElementById('dv-file-select').innerHTML = '<option value="">Select a file...</option>';
-    document.getElementById('dv-file-select').disabled = true;
+    dvResetSelects();
     dvState.run = null;
     dvState.file = null;
     dvClearTable();
@@ -2881,22 +3474,44 @@ async function refreshDvRuns(preserveSelection = false) {
   }
 }
 
-async function onDvRunChange(keepFile = null, keepPage = 1, keepColumn = null) {
+// The plot-file <select>'s options carry both which source a file came
+// from and its path - encoded as "source:file" since none of these
+// filenames contain a colon.
+function dvPlotFileValue(source, file) {
+  return source + ':' + file;
+}
+
+function dvParsePlotFileValue(value) {
+  const idx = value.indexOf(':');
+  if (idx === -1) return null;
+  return { source: value.slice(0, idx), file: value.slice(idx + 1) };
+}
+
+async function onDvRunChange(keepFile = null, keepPage = 1, keepSeries = null, keepColors = null) {
   const run = document.getElementById('dv-run-select').value;
   dvState.run = run || null;
   dvState.file = null;
+  dvResetSelects();
   dvClearTable();
   dvClearPlot();
-
-  const fileSelect = document.getElementById('dv-file-select');
-  fileSelect.innerHTML = '<option value="">Select a file...</option>';
-  fileSelect.disabled = true;
+  dvClearAssistantChat();
   if (!run) return;
 
+  const fileSelect = document.getElementById('dv-file-select');
+  const plotFileSelect = document.getElementById('dv-plot-file-select');
   const statusEl = document.getElementById('dv-status');
   try {
-    const res = await fetch('/data_viewer/files?run=' + encodeURIComponent(run));
-    const data = await res.json();
+    // Both of these are cheap directory listings, not file reads - safe
+    // to fetch up front regardless of connection speed. A file's actual
+    // columns are only fetched once you pick it (see
+    // onDvPlotFileChange), since that costs a real per-file round trip.
+    const [filesRes, droneRes] = await Promise.all([
+      fetch('/data_viewer/files?run=' + encodeURIComponent(run)),
+      fetch('/data_viewer/drone_latest'),
+    ]);
+    const data = await filesRes.json();
+    const droneData = await droneRes.json();
+
     if (!data.ok) {
       statusEl.textContent = data.error;
       statusEl.style.color = 'var(--err)';
@@ -2914,36 +3529,129 @@ async function onDvRunChange(keepFile = null, keepPage = 1, keepColumn = null) {
       fileSelect.appendChild(opt);
     });
     fileSelect.disabled = false;
+    dvState.files = data.files.map((f) => f.path);
 
-    const filePaths = data.files.map((f) => f.path);
-    if (keepFile && filePaths.includes(keepFile)) {
+    const runGroup = document.createElement('optgroup');
+    runGroup.label = 'This run';
+    dvState.files.forEach((path) => {
+      const opt = document.createElement('option');
+      opt.value = dvPlotFileValue('run', path);
+      opt.textContent = dvShortFileLabel(path);
+      runGroup.appendChild(opt);
+    });
+    plotFileSelect.appendChild(runGroup);
+
+    dvState.droneLatestFile = (droneData.ok && droneData.file) ? droneData.file : null;
+    if (dvState.droneLatestFile) {
+      const droneGroup = document.createElement('optgroup');
+      droneGroup.label = 'data_from_drone';
+      const opt = document.createElement('option');
+      opt.value = dvPlotFileValue('drone', dvState.droneLatestFile);
+      opt.textContent = dvShortFileLabel(dvState.droneLatestFile);
+      droneGroup.appendChild(opt);
+      plotFileSelect.appendChild(droneGroup);
+    }
+    plotFileSelect.disabled = false;
+
+    let restored = false;
+
+    if (keepFile && dvState.files.includes(keepFile)) {
       fileSelect.value = keepFile;
       dvState.file = keepFile;
       await dvGoToPage(keepPage || 1);
-      if (keepColumn && dvState.columns.includes(keepColumn)) {
-        document.getElementById('dv-column-select').value = keepColumn;
-        await onDvColumnChange();
-      }
-      return;
+      plotFileSelect.value = dvPlotFileValue('run', keepFile);
+      await onDvPlotFileChange();
+      restored = true;
     }
 
-    statusEl.textContent = `${data.files.length} CSV file${data.files.length === 1 ? '' : 's'} in this run - pick one.`;
-    statusEl.style.color = 'var(--text-dim)';
+    // A previously-active pick is kept as long as its source file still
+    // exists; the plot fetch below surfaces an error if a specific
+    // column happened to go away rather than silently dropping it.
+    const validSeries = (keepSeries || []).filter((s) =>
+      s.source === 'drone' ? s.file === dvState.droneLatestFile : dvState.files.includes(s.file));
+    if (validSeries.length) {
+      dvState.activeSeries = validSeries;
+      validSeries.forEach((s, i) => {
+        const key = dvSeriesKey(s.source, s.file, s.column);
+        dvState.seriesColors[key] = (keepColors && keepColors[key]) || DV_SERIES_COLORS[i % DV_SERIES_COLORS.length];
+      });
+      await dvFetchAndRenderPlot();
+      restored = true;
+    }
+
+    if (!restored) {
+      statusEl.textContent = `${data.files.length} CSV file${data.files.length === 1 ? '' : 's'} in this run - pick one to browse, or add a variable to the plot above.`;
+      statusEl.style.color = 'var(--text-dim)';
+    }
   } catch (e) {
     statusEl.textContent = 'Could not reach the local app server.';
     statusEl.style.color = 'var(--err)';
   }
 }
 
-function onDvFileChange() {
+async function onDvFileChange() {
   const file = document.getElementById('dv-file-select').value;
   dvState.file = file || null;
-  dvClearPlot();
   if (!file) {
     dvClearTable();
     return;
   }
-  dvGoToPage(1);
+  await dvGoToPage(1);
+  // Default "add variable" to whichever file you just opened in the
+  // sheet - the common case is plotting from the file you're looking
+  // at. Its columns are already known from the table fetch above (see
+  // dvGoToPage), so this doesn't cost a second round trip.
+  document.getElementById('dv-plot-file-select').value = dvPlotFileValue('run', file);
+  await onDvPlotFileChange();
+}
+
+async function onDvPlotFileChange() {
+  const raw = document.getElementById('dv-plot-file-select').value;
+  // Instrument choice is scoped to whichever file is picked here - a
+  // fresh file means starting that pick over.
+  dvState.selectedInstrument = null;
+  if (!raw) {
+    dvRenderColumnSelect();
+    return;
+  }
+  const { source, file } = dvParsePlotFileValue(raw);
+  const cacheKey = dvFileCacheKey(source, file);
+  if (dvState.fileColumnsCache[cacheKey]) {
+    dvRenderColumnSelect();
+    return;
+  }
+
+  // Not seen yet - fetch page 1 purely for its column list (same call
+  // the sheet itself uses), then cache it so picking this file again is
+  // free. This is the one real per-file round trip in this whole flow;
+  // on a slow link it can take a while, so say so rather than leaving
+  // the picker looking stuck.
+  const columnSelect = document.getElementById('dv-column-select');
+  const statusEl = document.getElementById('dv-plot-status');
+  columnSelect.innerHTML = '<option value="">Loading columns...</option>';
+  columnSelect.disabled = true;
+  statusEl.textContent = `Reading ${dvShortFileLabel(file)}'s columns - this reads the whole file over the connection, so it can take a while on a slow link...`;
+  statusEl.style.color = 'var(--text-dim)';
+
+  try {
+    const url = `/data_viewer/table?run=${encodeURIComponent(dvState.run)}` +
+      `&file=${encodeURIComponent(file)}&page=1&source=${encodeURIComponent(source)}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      columnSelect.innerHTML = '<option value="">Select a column...</option>';
+      return;
+    }
+    dvState.fileColumnsCache[cacheKey] = { columns: data.columns, columnNumeric: data.column_numeric };
+    dvRenderColumnSelect();
+    statusEl.textContent = '';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+    columnSelect.innerHTML = '<option value="">Select a column...</option>';
+  }
 }
 
 async function dvGoToPage(page) {
@@ -2963,11 +3671,12 @@ async function dvGoToPage(page) {
 
     dvState.page = data.page;
     dvState.totalPages = data.total_pages;
-    dvState.columns = data.columns;
-    dvState.columnNumeric = data.column_numeric;
+    // Already read as part of this table fetch - cache it so
+    // onDvPlotFileChange doesn't re-read the same file if this one's
+    // also picked as a plot source (the common case).
+    dvState.fileColumnsCache[dvFileCacheKey('run', dvState.file)] = { columns: data.columns, columnNumeric: data.column_numeric };
 
     dvRenderTable(data);
-    dvRenderColumnSelect();
     statusEl.textContent = `${data.total_rows} row${data.total_rows === 1 ? '' : 's'} total.`;
     statusEl.style.color = 'var(--text-dim)';
   } catch (e) {
@@ -3009,35 +3718,179 @@ function dvClearTable() {
   document.getElementById('dv-page-info').textContent = '';
   document.getElementById('dv-prev-btn').disabled = true;
   document.getElementById('dv-next-btn').disabled = true;
-  document.getElementById('dv-column-select').innerHTML = '<option value="">Select a column...</option>';
-  document.getElementById('dv-column-select').disabled = true;
 }
 
+// Most per-run CSVs hold one instrument's columns and this just shows
+// them flat, same as always. merged_data.csv (every instrument's
+// columns in one file, ~80 of them, each already prefixed
+// imet_/pom_/trisonica_/...) is the case this instrument picker is
+// for - it goes in front of the column picker so that list isn't one
+// long alphabetical scroll (columnInstrumentOf/columnFieldLabelOf/
+// isMergedDataFile in plot-engine.js). Gated on the merged_data_
+// filename, not just the instrument-count heuristic - some raw
+// per-sensor files (e.g. cavity's own LDD_/TEC_/pressure_ field
+// groups) coincidentally look like they mix instruments by that count
+// alone, without actually being a merge of several.
 function dvRenderColumnSelect() {
+  const instrumentSelect = document.getElementById('dv-instrument-select');
   const columnSelect = document.getElementById('dv-column-select');
+  const raw = document.getElementById('dv-plot-file-select').value;
   columnSelect.innerHTML = '<option value="">Select a column...</option>';
 
-  // Column 0 is always the time axis (see /data_viewer/plot), so it's
-  // never itself offered as something to plot - and only numeric
-  // columns (column_numeric, computed server-side over the whole file)
-  // are worth offering at all.
-  for (let i = 1; i < dvState.columns.length; i++) {
-    if (!dvState.columnNumeric[i]) continue;
-    const opt = document.createElement('option');
-    opt.value = dvState.columns[i];
-    opt.textContent = dvState.columns[i];
-    columnSelect.appendChild(opt);
+  if (!raw) {
+    instrumentSelect.style.display = 'none';
+    instrumentSelect.disabled = true;
+    dvState.selectedInstrument = null;
+    columnSelect.disabled = true;
+    return;
+  }
+  const { source, file } = dvParsePlotFileValue(raw);
+  const info = dvState.fileColumnsCache[dvFileCacheKey(source, file)];
+  if (!info) {
+    instrumentSelect.style.display = 'none';
+    instrumentSelect.disabled = true;
+    columnSelect.disabled = true;
+    return;
   }
 
-  columnSelect.disabled = columnSelect.options.length <= 1;
+  // Column 0 is always that file's time axis (see /data_viewer/plot), so
+  // it's never itself offered as something to plot - and only numeric
+  // columns (column_numeric, computed server-side over the whole file)
+  // and not already-plotted ones are worth offering.
+  const available = [];
+  for (let i = 1; i < info.columns.length; i++) {
+    if (!info.columnNumeric[i]) continue;
+    const name = info.columns[i];
+    if (dvState.activeSeries.some((s) => s.source === source && s.file === file && s.column === name)) continue;
+    available.push(name);
+  }
+
+  const atCap = dvState.activeSeries.length >= DV_SERIES_COLORS.length;
+
+  if (!isMergedDataFile(file) || !hasMultipleInstruments(available)) {
+    instrumentSelect.style.display = 'none';
+    instrumentSelect.disabled = true;
+    dvState.selectedInstrument = null;
+    available.forEach((name) => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      columnSelect.appendChild(opt);
+    });
+    columnSelect.disabled = !available.length || atCap;
+    return;
+  }
+
+  const instruments = [...new Set(available.map(columnInstrumentOf))].sort();
+
+  instrumentSelect.style.display = '';
+  instrumentSelect.disabled = atCap;
+  instrumentSelect.innerHTML = '<option value="">Instrument...</option>';
+  instruments.forEach((inst) => {
+    const count = available.filter((name) => columnInstrumentOf(name) === inst).length;
+    const opt = document.createElement('option');
+    opt.value = inst;
+    opt.textContent = `${inst} (${count})`;
+    instrumentSelect.appendChild(opt);
+  });
+  if (dvState.selectedInstrument && !instruments.includes(dvState.selectedInstrument)) {
+    dvState.selectedInstrument = null;
+  }
+  instrumentSelect.value = dvState.selectedInstrument || '';
+
+  if (dvState.selectedInstrument) {
+    available
+      .filter((name) => columnInstrumentOf(name) === dvState.selectedInstrument)
+      .forEach((name) => {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = columnFieldLabelOf(name);
+        columnSelect.appendChild(opt);
+      });
+  }
+  columnSelect.disabled = !dvState.selectedInstrument || columnSelect.options.length <= 1 || atCap;
 }
 
-async function onDvColumnChange() {
-  const column = document.getElementById('dv-column-select').value;
+function dvInstrumentChange() {
+  dvState.selectedInstrument = document.getElementById('dv-instrument-select').value || null;
+  dvRenderColumnSelect();
+}
+
+function dvAddColumn() {
+  const columnSelect = document.getElementById('dv-column-select');
+  const raw = document.getElementById('dv-plot-file-select').value;
+  const column = columnSelect.value;
+  columnSelect.value = '';
+  if (!raw || !column) return;
+  const { source, file } = dvParsePlotFileValue(raw);
+  if (dvState.activeSeries.some((s) => s.source === source && s.file === file && s.column === column)) return;
+
+  const color = dvNextAvailableColor();
+  if (!color) {
+    const statusEl = document.getElementById('dv-plot-status');
+    statusEl.textContent = `Up to ${DV_SERIES_COLORS.length} variables at once.`;
+    statusEl.style.color = 'var(--err)';
+    return;
+  }
+
+  dvState.activeSeries.push({ source, file, column });
+  dvState.seriesColors[dvSeriesKey(source, file, column)] = color;
+  dvRenderColumnSelect();
+  dvFetchAndRenderPlot();
+}
+
+function dvRemoveSeries(source, file, column) {
+  dvState.activeSeries = dvState.activeSeries.filter((s) => !(s.source === source && s.file === file && s.column === column));
+  delete dvState.seriesColors[dvSeriesKey(source, file, column)];
+  dvRenderColumnSelect();
+  if (!dvState.activeSeries.length) {
+    dvClearPlot();
+    return;
+  }
+  dvFetchAndRenderPlot();
+}
+
+function dvRenderLegend(seriesData) {
+  const legend = document.getElementById('dv-plot-legend');
+  legend.innerHTML = '';
+
+  dvState.activeSeries.forEach(({ source, file, column }) => {
+    const key = dvSeriesKey(source, file, column);
+    const s = seriesData ? seriesData.find((x) => x.source === source && x.file === file && x.column === column) : null;
+
+    const chip = document.createElement('div');
+    chip.className = 'dv-legend-chip';
+
+    const dot = document.createElement('span');
+    dot.className = 'dv-legend-dot';
+    dot.style.background = dvState.seriesColors[key];
+
+    const nameEl = document.createElement('span');
+    nameEl.textContent = `${dvShortFileLabel(file)} · ${column}`;
+
+    const valueEl = document.createElement('span');
+    valueEl.className = 'dv-legend-value';
+    valueEl.textContent = (s && s.points.length) ? s.points[s.points.length - 1].v.toFixed(s.decimals) : '--';
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'dv-legend-remove';
+    removeBtn.textContent = '×';
+    removeBtn.title = `Remove ${column}`;
+    removeBtn.onclick = () => dvRemoveSeries(source, file, column);
+
+    chip.appendChild(dot);
+    chip.appendChild(nameEl);
+    chip.appendChild(valueEl);
+    chip.appendChild(removeBtn);
+    legend.appendChild(chip);
+  });
+}
+
+async function dvFetchAndRenderPlot() {
   const statusEl = document.getElementById('dv-plot-status');
   const valueEl = document.getElementById('dv-plot-stat-value');
 
-  if (!column) {
+  if (!dvState.activeSeries.length) {
     dvClearPlot();
     return;
   }
@@ -3045,27 +3898,77 @@ async function onDvColumnChange() {
   statusEl.textContent = 'Loading...';
   statusEl.style.color = 'var(--text-dim)';
 
-  try {
-    const url = `/data_viewer/plot?run=${encodeURIComponent(dvState.run)}` +
-      `&file=${encodeURIComponent(dvState.file)}&column=${encodeURIComponent(column)}`;
-    const res = await fetch(url);
-    const data = await res.json();
+  // Group by (source, file) so each distinct file is fetched once no
+  // matter how many of its columns are plotted - same cost as before
+  // when everything comes from one file, one extra request per
+  // additional instrument (or data_from_drone) when it doesn't.
+  const byFile = new Map();
+  dvState.activeSeries.forEach(({ source, file, column }) => {
+    const key = source + '::' + file;
+    if (!byFile.has(key)) byFile.set(key, { source, file, columns: [] });
+    byFile.get(key).columns.push(column);
+  });
 
-    if (!data.ok) {
-      statusEl.textContent = data.error;
+  try {
+    const responses = await Promise.all([...byFile.values()].map(async ({ source, file, columns }) => {
+      const url = `/data_viewer/plot_multi?run=${encodeURIComponent(dvState.run)}` +
+        `&file=${encodeURIComponent(file)}&columns=${encodeURIComponent(columns.join(','))}&source=${encodeURIComponent(source)}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      return { source, file, data };
+    }));
+
+    const failed = responses.find((r) => !r.data.ok);
+    if (failed) {
+      statusEl.textContent = failed.data.error;
       statusEl.style.color = 'var(--err)';
-      dvPlot.setEmptyMessage('Could not load this column.');
+      dvPlot.setEmptyMessage('Could not load this selection.');
       valueEl.textContent = '--';
+      dvRenderLegend(null);
       return;
     }
 
-    dvPlot.setData(data.points, data.decimals);
-    valueEl.textContent = data.points.length
-      ? data.points[data.points.length - 1].v.toFixed(data.decimals)
-      : '--';
-    statusEl.textContent = data.points.length
-      ? `${data.points.length} points plotted against "${data.time_column}".`
-      : 'No numeric values found in this column.';
+    let timeColumnLabel = null;
+    let allSeries = [];
+    responses.forEach(({ source, file, data }) => {
+      timeColumnLabel = timeColumnLabel || data.time_column;
+      data.series.forEach((s) => {
+        allSeries.push({ source, file, column: s.column, points: s.points, decimals: s.decimals });
+      });
+    });
+    // Keep the order variables were added in, not the arbitrary
+    // per-file grouping order used for fetching above.
+    allSeries.sort((a, b) => {
+      const ai = dvState.activeSeries.findIndex((s) => s.source === a.source && s.file === a.file && s.column === a.column);
+      const bi = dvState.activeSeries.findIndex((s) => s.source === b.source && s.file === b.file && s.column === b.column);
+      return ai - bi;
+    });
+
+    dvPlot.setSeries(allSeries.map((s) => ({
+      column: s.column,
+      points: s.points,
+      decimals: s.decimals,
+      color: dvState.seriesColors[dvSeriesKey(s.source, s.file, s.column)],
+    })));
+    dvRenderLegend(allSeries);
+
+    // The big headline number only makes sense for a single variable;
+    // with 2+, each one's last value already rides its legend chip.
+    if (allSeries.length === 1) {
+      const s = allSeries[0];
+      valueEl.textContent = s.points.length ? s.points[s.points.length - 1].v.toFixed(s.decimals) : '--';
+    } else {
+      valueEl.textContent = '';
+    }
+
+    const totalPoints = allSeries.reduce((sum, s) => sum + s.points.length, 0);
+    if (!totalPoints) {
+      statusEl.textContent = 'No numeric values found in this selection.';
+    } else if (allSeries.length === 1) {
+      statusEl.textContent = `${totalPoints} points plotted against "${timeColumnLabel}".`;
+    } else {
+      statusEl.textContent = `${allSeries.length} variables vs "${timeColumnLabel}" - each scaled to its own range; hover for actual values.`;
+    }
     statusEl.style.color = 'var(--text-dim)';
   } catch (e) {
     statusEl.textContent = 'Could not reach the local app server.';
@@ -3074,9 +3977,16 @@ async function onDvColumnChange() {
 }
 
 function dvClearPlot() {
+  dvState.activeSeries = [];
+  dvState.seriesColors = {};
   dvPlot.setEmptyMessage('Pick a numeric column to plot');
   document.getElementById('dv-plot-status').textContent = '';
   document.getElementById('dv-plot-stat-value').textContent = '--';
+  document.getElementById('dv-plot-legend').innerHTML = '';
+  // Re-render rather than just blanking it out - if a plot-source file is
+  // still selected (e.g. this ran because the last variable was just
+  // removed), its columns should still be pickable, not force a re-pick.
+  dvRenderColumnSelect();
 }
 
 // ---------- Time Sync ----------
@@ -3090,7 +4000,12 @@ function startTimeSync() {
   tickMacClock();
   macClockInterval = setInterval(tickMacClock, 1000);
   refreshPiTime();
-  piTimePollInterval = setInterval(refreshPiTime, 15000);
+  // A real SSH round trip (used to notice a dead physical link, per the
+  // comment in the /pi_time route), which on a slow field connection can
+  // itself take several seconds - 15s left it competing for the shared
+  // connection lock nearly half the time; 30s still catches a dropped
+  // link promptly enough.
+  piTimePollInterval = setInterval(refreshPiTime, 30000);
 }
 
 function stopTimeSync() {
@@ -3609,7 +4524,12 @@ function connectTerminal() {
   fitAddon.fit();
 
   connectBtn.disabled = true;
-  statusEl.textContent = 'connecting...';
+  // Opening a shell means a PTY + shell handshake over the SSH
+  // transport, on top of whatever the link's own latency is - on a slow
+  // connection this alone has been observed taking most of a minute
+  // before the first byte (the login banner) arrives, so say so up
+  // front rather than leaving this looking hung.
+  statusEl.textContent = 'connecting... (can take up to a minute on a slow connection)';
   statusEl.style.color = 'var(--text-dim)';
 
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -3662,6 +4582,89 @@ window.addEventListener('resize', () => {
     fitAddon.fit();
     terminalSocket.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
   }
+});
+
+// ---- data viewer "ask about this data" assistant ----
+// Scoped to whatever's currently added to the plot above - every
+// question is answered from statistics/correlation computed live over
+// SFTP for those variables, not the raw data or general knowledge.
+// Conversation history lives only in this array (the backend is
+// stateless like the rest of this app) and resets whenever the
+// selected run changes (see onDvRunChange).
+
+const dvAssistant = {
+  history: [], // [{role: 'user'|'assistant', content: string}]
+};
+
+function dvRenderAssistantMessage(role, text) {
+  const log = document.getElementById('assistant-log');
+  const div = document.createElement('div');
+  div.className = `assistant-msg ${role}`;
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function dvClearAssistantChat() {
+  dvAssistant.history = [];
+  const log = document.getElementById('assistant-log');
+  if (log) log.innerHTML = '';
+  const statusEl = document.getElementById('assistant-status');
+  if (statusEl) statusEl.textContent = '';
+}
+
+async function dvAskAssistant() {
+  const input = document.getElementById('assistant-input');
+  const btn = document.getElementById('assistant-ask-btn');
+  const statusEl = document.getElementById('assistant-status');
+  const question = input.value.trim();
+  if (!question) return;
+
+  input.value = '';
+  input.disabled = true;
+  btn.disabled = true;
+  statusEl.textContent = 'Thinking...';
+  statusEl.style.color = 'var(--text-dim)';
+  dvRenderAssistantMessage('user', question);
+
+  try {
+    const res = await fetch('/assistant/ask_online', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        run: dvState.run,
+        columns: dvState.activeSeries.map((s) => ({ source: s.source, file: s.file, column: s.column })),
+        question,
+        history: dvAssistant.history,
+      }),
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      statusEl.textContent = data.error || 'Could not get an answer.';
+      statusEl.style.color = 'var(--err)';
+      return;
+    }
+
+    dvRenderAssistantMessage('assistant', data.answer);
+    dvAssistant.history.push({ role: 'user', content: question });
+    dvAssistant.history.push({ role: 'assistant', content: data.answer });
+    statusEl.textContent = data.usage
+      ? `${data.usage.input_tokens + data.usage.output_tokens} tokens used.`
+      : '';
+    statusEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  } finally {
+    input.disabled = false;
+    btn.disabled = false;
+    input.focus();
+  }
+}
+
+document.getElementById('assistant-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') dvAskAssistant();
 });
 
 renderLog();

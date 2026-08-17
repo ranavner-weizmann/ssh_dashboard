@@ -1,0 +1,1586 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MAMP Dashboard — Offline Data Exploration</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #e9edf2;
+    --panel: #ffffff;
+    --panel-border: #c3ccd7;
+    --text: #16202c;
+    --text-dim: #4c5a68;
+    --accent: #1d5fa3;
+    --accent-dim: #123f6e;
+    --accent-text: #ffffff;
+    --ok: #1f8a55;
+    --err: #c62828;
+    --surface-sunken: #e2e7ee;
+    --mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+    --sans: "Inter", -apple-system, sans-serif;
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #eda100;
+    --series-5: #e87ba4;
+    --series-6: #008300;
+    --series-7: #4a3aa7;
+    --series-8: #e34948;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 20px 16px;
+  }
+
+  .wrap { width: 100%; max-width: 760px; }
+
+  .back-link {
+    display: inline-block;
+    margin-bottom: 14px;
+    color: var(--text-dim);
+    text-decoration: none;
+    font-size: 13px;
+  }
+  .back-link:hover { color: var(--accent); }
+
+  .eyebrow {
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+
+  h1 { margin: 0 0 4px; font-size: 22px; }
+
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-bottom: 20px;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .panel-header label { font-size: 13px; color: var(--text-dim); }
+
+  .btn-ghost {
+    background: none;
+    border: 1px solid var(--panel-border);
+    color: var(--text-dim);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: var(--sans);
+  }
+  .btn-ghost:hover { color: var(--text); border-color: var(--text-dim); }
+  .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-primary-sm {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: var(--sans);
+  }
+  .btn-primary-sm:hover { background: var(--accent-dim); }
+
+  .select-input {
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: var(--mono);
+    outline: none;
+  }
+  .select-input:focus { border-color: var(--accent); }
+  .select-input:disabled { opacity: 0.5; }
+
+  .hint { font-size: 12px; color: var(--text-dim); }
+  .error-msg { font-size: 12px; color: var(--err); margin-top: 6px; }
+
+  .session-list { display: flex; flex-direction: column; gap: 8px; }
+
+  .session-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    cursor: pointer;
+  }
+  .session-row:hover { border-color: var(--text-dim); }
+  .session-row.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+
+  .session-name {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .session-meta {
+    font-size: 12px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  .day-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+
+  .day-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    flex-wrap: wrap;
+  }
+
+  .day-info {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .day-actions { display: flex; gap: 8px; }
+
+  /* ---- plot (mirrors the online Data Viewer's plot chrome) ---- */
+
+  .plot-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .plot-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 10px 0;
+  }
+
+  .plot-stat-value {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 24px;
+    color: var(--text);
+  }
+
+  .plot-canvas-wrap {
+    position: relative;
+    width: 100%;
+    height: 220px;
+  }
+
+  .plot-canvas-el {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  .plot-tooltip {
+    position: absolute;
+    display: none;
+    pointer-events: none;
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: nowrap;
+    transform: translate(-50%, calc(-100% - 10px));
+    z-index: 5;
+  }
+  .plot-tooltip .tt-value { color: var(--text); font-weight: 700; }
+  .plot-tooltip .tt-time { color: var(--text-dim); }
+  .plot-tooltip .tt-row { display: flex; align-items: center; gap: 6px; }
+  .plot-tooltip .tt-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+  .dv-zoom-reset {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-family: var(--sans);
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    z-index: 4;
+  }
+  .dv-zoom-reset:hover { color: var(--text); border-color: var(--text-dim); }
+
+  .dv-legend { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+
+  .dv-legend-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    border-radius: 999px;
+    padding: 4px 6px 4px 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+  }
+
+  .dv-legend-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dv-legend-value { color: var(--text-dim); }
+
+  .dv-legend-remove {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+  }
+  .dv-legend-remove:hover { color: var(--err); }
+
+  /* ---- merge-destination modal (mirrors the main dashboard's modal chrome) ---- */
+
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(8, 11, 14, 0.7);
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    padding: 20px;
+  }
+  .modal-overlay.active { display: flex; }
+  .modal-box {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 24px;
+    width: 100%;
+    max-width: 440px;
+  }
+  .modal-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
+  .modal-body label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+    font-family: var(--mono);
+  }
+  .modal-body input[type=text] {
+    width: 100%;
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: var(--mono);
+    outline: none;
+  }
+  .modal-body input[type=text]:focus { border-color: var(--accent); }
+  .modal-body p { font-size: 14px; color: var(--text); line-height: 1.5; margin: 0; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+  .modal-actions button { width: auto; }
+
+  .dest-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .dest-chip {
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-family: var(--sans);
+    cursor: pointer;
+  }
+  .dest-chip:hover { border-color: var(--accent); }
+  .dest-chip.selected { border-color: var(--accent); color: var(--accent); background: #eaf1fa; }
+
+  /* ---- offline exploration: stats / correlation / histogram / scatter ---- */
+
+  .explore-grid { display: flex; flex-direction: column; gap: 22px; }
+  .explore-section-title {
+    display: block;
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+
+  .stats-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  .stats-table th, .stats-table td {
+    padding: 6px 8px;
+    text-align: right;
+    border-bottom: 1px solid var(--panel-border);
+    white-space: nowrap;
+  }
+  .stats-table th:first-child, .stats-table td:first-child { text-align: left; font-family: var(--sans); }
+  .stats-table th { color: var(--text-dim); font-weight: 500; font-size: 11px; }
+  .stats-table tbody tr:last-child td { border-bottom: none; }
+
+  .corr-wrap { overflow-x: auto; }
+  .corr-table { border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
+  .corr-table th, .corr-table td {
+    padding: 6px 8px;
+    text-align: center;
+    min-width: 52px;
+  }
+  .corr-table th {
+    color: var(--text-dim);
+    font-weight: 500;
+    font-family: var(--sans);
+    font-size: 11px;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .corr-table td.corr-label {
+    text-align: left;
+    font-family: var(--sans);
+    color: var(--text-dim);
+    font-size: 11px;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .corr-cell { border-radius: 4px; font-weight: 600; }
+  .corr-cell.empty { color: var(--text-dim); font-weight: 400; }
+
+  .explore-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+
+  .explore-plot-canvas-wrap { position: relative; width: 100%; height: 180px; }
+  .explore-plot-canvas { width: 100%; height: 100%; display: block; }
+
+  /* ---- assistant chat panel ---- */
+
+  .assistant-log {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 320px;
+    overflow-y: auto;
+    margin-bottom: 10px;
+  }
+
+  .assistant-msg {
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    max-width: 90%;
+  }
+  .assistant-msg.user {
+    background: var(--surface-sunken);
+    align-self: flex-end;
+    max-width: 80%;
+  }
+  .assistant-msg.assistant {
+    background: #eaf1fa;
+    border: 1px solid var(--panel-border);
+    align-self: flex-start;
+  }
+
+  .assistant-input-row { display: flex; gap: 8px; }
+  .assistant-input-row input {
+    flex: 1;
+    background: var(--surface-sunken);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 8px 12px;
+    font-size: 13px;
+    font-family: var(--sans);
+    outline: none;
+  }
+  .assistant-input-row input:focus { border-color: var(--accent); }
+  .assistant-input-row input:disabled { opacity: 0.6; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back-link" href="/">&larr; Back</a>
+
+  <div class="eyebrow">drone_air_system // offline</div>
+  <h1>Offline Data Exploration</h1>
+  <div class="subtitle">Browse data already on this machine - no connection to the Pi needed.</div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <label>downloaded sessions</label>
+      <button class="btn-ghost" onclick="loadSessions()">Refresh</button>
+    </div>
+    <div class="session-list" id="session-list"></div>
+    <div class="hint" id="session-status">Loading...</div>
+  </div>
+
+  <div class="panel" id="days-panel" style="display:none;">
+    <div class="panel-header">
+      <label id="days-title">days</label>
+    </div>
+    <div class="hint" style="margin-bottom: 10px;">A session can hold several runs from the same day (e.g. stopped and restarted between flights) - merge a day's runs into one continuous CSV with every instrument in it, then plot it below.</div>
+    <div class="day-list" id="day-list"></div>
+    <div class="hint" id="day-status"></div>
+  </div>
+
+  <div class="panel" id="merged-plot-panel" style="display:none;">
+    <label id="ofl-plot-title" style="display:block; margin-bottom: 8px;">plot</label>
+    <div class="plot-toolbar">
+      <select id="ofl-add-instrument-select" class="select-input" onchange="oflInstrumentChange()" disabled style="display:none;">
+        <option value="">Instrument...</option>
+      </select>
+      <select id="ofl-add-variable-select" class="select-input" onchange="oflAddColumn()" disabled>
+        <option value="">Add a variable...</option>
+      </select>
+    </div>
+    <div class="dv-legend" id="ofl-plot-legend"></div>
+    <div class="plot-header">
+      <div><span class="plot-stat-value" id="ofl-plot-stat-value">--</span></div>
+      <div class="hint" id="ofl-plot-status"></div>
+    </div>
+    <div class="plot-canvas-wrap">
+      <canvas id="ofl-plot-canvas" class="plot-canvas-el"></canvas>
+      <div class="plot-tooltip" id="ofl-plot-tooltip"></div>
+      <button class="dv-zoom-reset" id="ofl-plot-zoom-reset" onclick="oflPlot.resetZoom()" style="display:none;">⤢ Reset zoom</button>
+    </div>
+    <div class="hint">Scroll to zoom, drag to pan, double-click to reset.</div>
+  </div>
+
+  <div class="panel" id="explore-panel" style="display:none;">
+    <div class="panel-header">
+      <label>explore</label>
+    </div>
+    <div class="hint" style="margin-bottom: 14px;">Statistics and correlation cover every variable added to the plot above. Distribution and relationship pick from that same set.</div>
+    <div class="explore-grid">
+
+      <div>
+        <label class="explore-section-title">summary statistics</label>
+        <div id="explore-stats-wrap"><div class="hint">Add a variable to the plot above to see its statistics.</div></div>
+      </div>
+
+      <div id="explore-corr-section" style="display:none;">
+        <label class="explore-section-title">correlation</label>
+        <div class="corr-wrap"><table class="corr-table" id="explore-corr-table"></table></div>
+        <div class="hint" id="explore-corr-hint" style="margin-top: 6px;"></div>
+      </div>
+
+      <div id="explore-hist-section" style="display:none;">
+        <label class="explore-section-title">distribution</label>
+        <div class="explore-toolbar">
+          <select id="explore-hist-select" class="select-input" onchange="oflRenderHistogram()"></select>
+        </div>
+        <div class="explore-plot-canvas-wrap">
+          <canvas id="explore-hist-canvas" class="explore-plot-canvas"></canvas>
+          <div class="plot-tooltip" id="explore-hist-tooltip"></div>
+        </div>
+        <div class="hint" id="explore-hist-status"></div>
+      </div>
+
+      <div id="explore-scatter-section" style="display:none;">
+        <label class="explore-section-title">relationship</label>
+        <div class="explore-toolbar">
+          <select id="explore-scatter-x-select" class="select-input" onchange="oflRenderScatter()"></select>
+          <span class="hint">vs.</span>
+          <select id="explore-scatter-y-select" class="select-input" onchange="oflRenderScatter()"></select>
+        </div>
+        <div class="explore-plot-canvas-wrap">
+          <canvas id="explore-scatter-canvas" class="explore-plot-canvas"></canvas>
+          <div class="plot-tooltip" id="explore-scatter-tooltip"></div>
+        </div>
+        <div class="hint" id="explore-scatter-status"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="panel" id="assistant-panel" style="display:none;">
+    <div class="panel-header">
+      <label>ask about this data</label>
+      <button class="btn-ghost" onclick="oflClearAssistantChat()">Clear</button>
+    </div>
+    <div class="hint" style="margin-bottom: 10px;">Answers are grounded in the statistics and correlation for whichever variables are added to the plot above - not the raw data, so ask about trends and relationships rather than specific rows. Needs an Anthropic API key configured on this machine.</div>
+    <div class="assistant-log" id="assistant-log"></div>
+    <div class="assistant-input-row">
+      <input type="text" id="assistant-input" placeholder="e.g. is ozone correlated with temperature today?" autocomplete="off">
+      <button class="btn-primary-sm" id="assistant-ask-btn" onclick="oflAskAssistant()">Ask</button>
+    </div>
+    <div class="hint" id="assistant-status"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="merge-modal-overlay">
+  <div class="modal-box">
+    <div class="modal-title" id="merge-modal-title">Merge this day's runs</div>
+    <div class="modal-body" id="merge-modal-body"></div>
+    <div class="modal-actions" id="merge-modal-actions"></div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='plot-engine.js') }}"></script>
+<script>
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+function formatDate(epochSeconds) {
+  return new Date(epochSeconds * 1000).toLocaleString();
+}
+
+// "20260813" -> "2026-08-13"
+function formatRunDate(yyyymmdd) {
+  return `${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}-${yyyymmdd.slice(6, 8)}`;
+}
+
+async function loadSessions() {
+  const listEl = document.getElementById('session-list');
+  const statusEl = document.getElementById('session-status');
+  statusEl.textContent = 'Loading...';
+  statusEl.style.color = 'var(--text-dim)';
+  listEl.innerHTML = '';
+
+  try {
+    const res = await fetch('/offline/sessions');
+    const data = await res.json();
+
+    if (!data.ok) {
+      statusEl.textContent = data.error || 'Could not load sessions.';
+      statusEl.style.color = 'var(--err)';
+      return;
+    }
+
+    if (!data.sessions.length) {
+      statusEl.textContent = 'No downloaded sessions found yet - use "Download All Data" from the main dashboard first.';
+      statusEl.style.color = 'var(--text-dim)';
+      return;
+    }
+
+    data.sessions.forEach((s) => {
+      const row = document.createElement('div');
+      row.className = 'session-row';
+      row.dataset.name = s.name;
+      row.onclick = () => selectSession(s.name);
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'session-name';
+      nameEl.textContent = s.name;
+
+      const metaEl = document.createElement('span');
+      metaEl.className = 'session-meta';
+      const runLabel = `${s.run_count} run${s.run_count === 1 ? '' : 's'}`;
+      metaEl.textContent = `${runLabel} · ${formatDate(s.modified)}`;
+
+      row.appendChild(nameEl);
+      row.appendChild(metaEl);
+      listEl.appendChild(row);
+    });
+
+    statusEl.textContent = `${data.sessions.length} session${data.sessions.length === 1 ? '' : 's'} found - click one to see its days.`;
+    statusEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+}
+
+// ---------- Days within a session, and merging them ----------
+
+async function selectSession(name) {
+  document.querySelectorAll('.session-row').forEach((el) => {
+    el.classList.toggle('selected', el.dataset.name === name);
+  });
+
+  const daysPanel = document.getElementById('days-panel');
+  const dayList = document.getElementById('day-list');
+  const dayStatus = document.getElementById('day-status');
+  daysPanel.style.display = 'block';
+  document.getElementById('days-title').textContent = `days in "${name}"`;
+  dayList.innerHTML = '';
+  dayStatus.textContent = 'Loading...';
+  dayStatus.style.color = 'var(--text-dim)';
+  oflClearPlotPanel();
+
+  try {
+    const res = await fetch('/offline/session/' + encodeURIComponent(name) + '/days');
+    const data = await res.json();
+    if (!data.ok) {
+      dayStatus.textContent = data.error;
+      dayStatus.style.color = 'var(--err)';
+      return;
+    }
+    if (!data.days.length) {
+      dayStatus.textContent = 'No dated run folders found in this session.';
+      dayStatus.style.color = 'var(--text-dim)';
+      return;
+    }
+
+    data.days.forEach((d) => {
+      const row = document.createElement('div');
+      row.className = 'day-row';
+
+      const droneCount = d.drone_files.length;
+      const infoEl = document.createElement('span');
+      infoEl.className = 'day-info';
+      infoEl.textContent = `${formatRunDate(d.date)}` +
+        (d.run_count ? ` · ${d.run_count} run${d.run_count === 1 ? '' : 's'}${d.merged ? ' · merged' : ''}` : '') +
+        (droneCount ? ` · ${droneCount} drone file${droneCount === 1 ? '' : 's'}${d.drone_merged ? ' · merged' : ''}` : '');
+
+      const actions = document.createElement('div');
+      actions.className = 'day-actions';
+
+      // A drone-only date (the drone flew with no sensor rig running)
+      // has nothing to merge - only offer Merge where there's at least
+      // one sensor run to fold in.
+      if (d.run_count) {
+        const mergeBtn = document.createElement('button');
+        mergeBtn.className = 'btn-ghost';
+        mergeBtn.textContent = d.merged ? 'Re-merge' : 'Merge';
+        mergeBtn.onclick = () => mergeDay(name, d.date, mergeBtn);
+        actions.appendChild(mergeBtn);
+      }
+
+      // Only worth merging with 2+ flights - a single flight has no
+      // duplicate-columns problem for merging to solve (see
+      // oflInstrumentGroupOf's comment on why this exists at all).
+      if (droneCount >= 2) {
+        const mergeDroneBtn = document.createElement('button');
+        mergeDroneBtn.className = 'btn-ghost';
+        mergeDroneBtn.textContent = d.drone_merged ? 'Re-merge drone' : 'Merge drone';
+        mergeDroneBtn.onclick = () => mergeDroneDay(name, d.date, mergeDroneBtn);
+        actions.appendChild(mergeDroneBtn);
+      }
+
+      // One combined view now that merged sensor data and drone
+      // telemetry can be plotted on top of each other (viewOfflineDay
+      // loads whichever of the two exist for this date) - only worth
+      // showing once there's at least one of them to look at.
+      if (d.merged || droneCount) {
+        const viewBtn = document.createElement('button');
+        viewBtn.className = 'btn-primary-sm';
+        viewBtn.textContent = 'View data';
+        viewBtn.onclick = () => viewOfflineDay(name, d.date);
+        actions.appendChild(viewBtn);
+      }
+
+      row.appendChild(infoEl);
+      row.appendChild(actions);
+      dayList.appendChild(row);
+    });
+
+    dayStatus.textContent = '';
+  } catch (e) {
+    dayStatus.textContent = 'Could not reach the local app server.';
+    dayStatus.style.color = 'var(--err)';
+  }
+}
+
+// ---------- Merge destination modal ----------
+// Merging always writes its canonical copy under this app's own
+// <session>/merged/<date>/ folder (that's what the plot/explore panels
+// below read from) - this modal only offers an *additional* "also save
+// a copy of the finished CSV somewhere else on this machine" folder,
+// same idea as the main dashboard's "Backup to External Drive" quick-
+// pick + custom-path pattern.
+
+let mergePending = null; // {session, date, btn, kind} for the day currently being merged - kind: 'runs' | 'drone'
+
+function closeMergeModal() {
+  document.getElementById('merge-modal-overlay').classList.remove('active');
+}
+
+async function mergeDay(session, date, btn) {
+  await openMergeModal(session, date, btn, 'runs');
+}
+
+async function mergeDroneDay(session, date, btn) {
+  await openMergeModal(session, date, btn, 'drone');
+}
+
+// Same modal and "also save a copy elsewhere" flow for both kinds -
+// only the label, endpoint, and status wording differ (see
+// confirmMerge). kind: 'runs' merges a day's sensor runs into
+// merged_data_<date>_merged.csv; 'drone' merges a day's flights into
+// telemetry_<date>_merged.csv (see _merge_drone_day) - the reason it
+// exists is the same one that motivated treating drone as its own
+// instrument group in the variable picker: several flights the same
+// day otherwise show as duplicate copies of the same handful of column
+// names.
+async function openMergeModal(session, date, btn, kind) {
+  mergePending = { session, date, btn, kind };
+  const label = kind === 'drone' ? "drone flights" : "runs";
+  document.getElementById('merge-modal-title').textContent = `Merge ${formatRunDate(date)}'s ${label}`;
+  document.getElementById('merge-modal-body').innerHTML = `<p>Looking for common folders and drives...</p>`;
+  document.getElementById('merge-modal-actions').innerHTML = `<button class="btn-ghost" onclick="closeMergeModal()">Cancel</button>`;
+  document.getElementById('merge-modal-overlay').classList.add('active');
+
+  let common = [], volumes = [];
+  try {
+    const res = await fetch('/offline/merge_destination_options');
+    const data = await res.json();
+    if (data.ok) { common = data.common; volumes = data.volumes; }
+  } catch (e) { /* leave both empty - the custom-path field still works */ }
+
+  const chips = [...common, ...volumes];
+  const chipsHtml = chips.map((c, i) =>
+    `<button type="button" class="dest-chip" data-path="${escapeHtml(c.path)}" onclick="mergeDestChipClick(this)">${escapeHtml(c.name)}</button>`
+  ).join('');
+
+  document.getElementById('merge-modal-body').innerHTML = `
+    <p style="margin-bottom: 12px;">This day's ${label} will be merged into one CSV for browsing here. Optionally also save a copy of it somewhere else:</p>
+    ${chips.length ? `<div class="dest-chip-row">${chipsHtml}<button type="button" class="dest-chip" data-path="" onclick="mergeDestChipClick(this)">None</button></div>` : ''}
+    <label for="merge-dest-input">destination folder (leave blank for none)</label>
+    <input type="text" id="merge-dest-input" placeholder="/Users/you/wherever" autocomplete="off">
+    <div class="error-msg" id="merge-modal-error"></div>
+  `;
+  document.getElementById('merge-modal-actions').innerHTML = `
+    <button class="btn-ghost" onclick="closeMergeModal()">Cancel</button>
+    <button class="btn-primary-sm" onclick="confirmMerge()">Merge</button>
+  `;
+}
+
+function mergeDestChipClick(chipEl) {
+  document.querySelectorAll('#merge-modal-body .dest-chip').forEach((el) => el.classList.remove('selected'));
+  chipEl.classList.add('selected');
+  document.getElementById('merge-dest-input').value = chipEl.dataset.path;
+}
+
+async function confirmMerge() {
+  if (!mergePending) return;
+  const { session, date, btn, kind } = mergePending;
+  const endpoint = kind === 'drone' ? 'merge_drone' : 'merge';
+  const label = kind === 'drone' ? 'drone flights' : 'runs';
+  const destInput = document.getElementById('merge-dest-input');
+  const dest_dir = destInput ? destInput.value.trim() : '';
+  const errBox = document.getElementById('merge-modal-error');
+
+  if (dest_dir && !dest_dir.startsWith('/') && !/^[a-zA-Z]:[\\/]/.test(dest_dir)) {
+    errBox.textContent = 'Destination must be a full absolute path.';
+    return;
+  }
+
+  closeMergeModal();
+  mergePending = null;
+
+  const dayStatus = document.getElementById('day-status');
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Merging...';
+  dayStatus.textContent = `Merging ${formatRunDate(date)}'s ${label}...`;
+  dayStatus.style.color = 'var(--text-dim)';
+
+  try {
+    const res = await fetch(`/offline/session/${encodeURIComponent(session)}/${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, dest_dir: dest_dir || undefined }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      dayStatus.textContent = data.error || 'Merge failed.';
+      dayStatus.style.color = 'var(--err)';
+      btn.disabled = false;
+      btn.textContent = original;
+      return;
+    }
+
+    let msg = `Merged into one CSV, ${data.rows} rows total` +
+      (data.skipped_rows ? ` (${data.skipped_rows} malformed row${data.skipped_rows === 1 ? '' : 's'} skipped)` : '');
+    if (data.dest_path) msg += `, and copied to ${data.dest_path}.`;
+    else if (data.dest_error) msg += `. ${data.dest_error}`;
+    else msg += '.';
+    dayStatus.textContent = msg;
+    dayStatus.style.color = data.dest_error ? 'var(--err)' : 'var(--ok)';
+
+    await selectSession(session); // refresh the day list so it now shows "merged"
+    await viewOfflineDay(session, date);
+  } catch (e) {
+    dayStatus.textContent = 'Could not reach the local app server.';
+    dayStatus.style.color = 'var(--err)';
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+// ---------- Plotting a merged day ----------
+// Same overlay-plot engine (static/plot-engine.js) and interaction model
+// as the online Data Viewer's "add variable" picker - just backed by
+// local files for one already-merged day instead of SFTP.
+
+const OFL_SERIES_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
+
+const oflState = {
+  session: null,
+  date: null,
+  availableVariables: [], // [{source, file, column}] - both sources loaded at once, see viewOfflineDay
+  activeSeries: [],         // [{source, file, column}]
+  seriesColors: {},          // keyed by oflSeriesKey(source, file, column)
+  selectedInstrument: null,   // currently chosen in the instrument dropdown, or null
+};
+
+const oflPlot = createStaticPlotController('ofl-plot-canvas', 'ofl-plot-tooltip', 'ofl-plot-zoom-reset');
+
+// 'source' distinguishes a day's merged sensor CSV from that day's
+// drone telemetry file(s) - both can be loaded and plotted together
+// (see viewOfflineDay), so every variable's identity needs all three
+// parts, not just file+column, to stay unambiguous. Same idea as the
+// online Data Viewer's dvSeriesKey.
+function oflSeriesKey(source, file, column) {
+  return source + '::' + file + '::' + column;
+}
+
+function oflNextAvailableColor() {
+  const used = new Set(Object.values(oflState.seriesColors));
+  return OFL_SERIES_COLORS.find((c) => !used.has(c)) || null;
+}
+
+// source: 'merged' (a day's merged sensor CSV) or 'drone' (that date's
+// data_from_drone/telemetry_*.csv flight(s), listed separately in /days
+// since that folder isn't itself split into per-day subfolders the way
+// a merged day's own folder is - see _offline_files_for_date in app.py).
+// Both are fetched and offered together, same as the online Data
+// Viewer's run+drone file lists, so a plot can mix a day's sensor
+// readings with its drone telemetry. Every endpoint below
+// (plot_multi/stats/correlation/histogram/scatter) still takes one
+// ?source= per request - grouped per (source, file), same as the
+// online page.
+async function viewOfflineDay(session, date) {
+  oflState.session = session;
+  oflState.date = date;
+  oflState.activeSeries = [];
+  oflState.seriesColors = {};
+  oflState.selectedInstrument = null;
+
+  const plotPanel = document.getElementById('merged-plot-panel');
+  const instrumentSelect = document.getElementById('ofl-add-instrument-select');
+  const addSelect = document.getElementById('ofl-add-variable-select');
+  const statusEl = document.getElementById('ofl-plot-status');
+
+  plotPanel.style.display = 'block';
+  document.getElementById('explore-panel').style.display = 'block';
+  document.getElementById('assistant-panel').style.display = 'block';
+  oflClearAssistantChat(); // new day = new context - last conversation no longer applies
+  document.getElementById('ofl-plot-title').textContent = `plot - ${formatRunDate(date)}`;
+  oflPlot.setEmptyMessage('Loading variables...');
+  document.getElementById('ofl-plot-legend').innerHTML = '';
+  document.getElementById('ofl-plot-stat-value').textContent = '--';
+  instrumentSelect.style.display = 'none';
+  instrumentSelect.disabled = true;
+  addSelect.innerHTML = '<option value="">Loading variables...</option>';
+  addSelect.disabled = true;
+
+  try {
+    const [mergedRes, droneRes] = await Promise.all(['merged', 'drone'].map((source) => {
+      const url = `/offline/session/${encodeURIComponent(session)}/merged/${encodeURIComponent(date)}/columns` +
+        `?source=${encodeURIComponent(source)}`;
+      return fetch(url).then((r) => r.json());
+    }));
+
+    // A date only ever has one of these missing outright (no drone
+    // flights, or runs not merged yet) - /columns itself never errors
+    // for "nothing here", just returns an empty files list, so a
+    // failure here is a real problem worth surfacing.
+    const failed = [mergedRes, droneRes].find((d) => !d.ok);
+    if (failed) {
+      addSelect.innerHTML = '<option value="">Add a variable...</option>';
+      statusEl.textContent = failed.error;
+      statusEl.style.color = 'var(--err)';
+      oflPlot.setEmptyMessage('Could not load this day.');
+      return;
+    }
+
+    const variables = [];
+    [{ source: 'merged', data: mergedRes }, { source: 'drone', data: droneRes }].forEach(({ source, data }) => {
+      data.files.forEach(({ file, columns, column_numeric }) => {
+        // Column 0 is always that file's time axis (see /data_viewer/plot
+        // and the merge step, which keeps it in position 0) - never
+        // itself offered as something to plot.
+        for (let i = 1; i < columns.length; i++) {
+          if (!column_numeric[i]) continue;
+          variables.push({ source, file, column: columns[i] });
+        }
+      });
+    });
+    oflState.availableVariables = variables;
+    oflRenderAddVariableSelect();
+    oflPlot.setEmptyMessage('Pick a numeric column to plot');
+    oflRenderExplorePanel();
+    statusEl.textContent = '';
+
+    plotPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (e) {
+    addSelect.innerHTML = '<option value="">Add a variable...</option>';
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+}
+
+// A merged day is one CSV with every instrument's columns in it
+// (dozens+), already instrument-prefixed (imet_pressure, pom_Ozone_ppb,
+// ...) - grouped by that prefix (columnInstrumentOf/columnFieldLabelOf/
+// isMergedDataFile in plot-engine.js) rather than one long alphabetical
+// scroll. Drone telemetry isn't instrument-prefixed the same way, but
+// is treated as one more peer group in the same picker - one group per
+// *flight* (data_from_drone/telemetry_<date>_<time>.csv - a day can
+// have several flights, unlike a merged day's single file), not one
+// combined "drone" bucket, since every flight logs the same handful of
+// column names (alt, speed, ...) and lumping them together would show
+// each name duplicated once per flight instead of picking one flight's
+// reading of it. The picker only appears once there are 2+ groups to
+// disambiguate; with just one (e.g. a single flight and no merged data)
+// its variables show directly, same as before this existed.
+function oflInstrumentGroupOf(v) {
+  if (v.source === 'drone') {
+    const m = v.file.match(/_(\d{2})(\d{2})\d{2}\.csv$/);
+    return { key: 'drone::' + v.file, label: m ? `drone ${m[1]}:${m[2]}` : 'drone' };
+  }
+  if (isMergedDataFile(v.file)) {
+    const inst = columnInstrumentOf(v.column);
+    return { key: inst, label: inst };
+  }
+  // A raw per-sensor file offered under source="merged" (not a genuine
+  // merged_data_ file) has no real per-column instrument concept - see
+  // isMergedDataFile's docstring - so it gets one group named after
+  // itself. Doesn't happen in practice (a merged day is always exactly
+  // one merged_data_ file), kept for correctness if that ever changes.
+  return { key: '__file__::' + v.file, label: v.file };
+}
+
+function oflRenderAddVariableSelect() {
+  const instrumentSelect = document.getElementById('ofl-add-instrument-select');
+  const select = document.getElementById('ofl-add-variable-select');
+
+  const available = oflState.availableVariables.filter((v) =>
+    !oflState.activeSeries.some((s) => oflSeriesKey(s.source, s.file, s.column) === oflSeriesKey(v.source, v.file, v.column)));
+  const atCap = oflState.activeSeries.length >= OFL_SERIES_COLORS.length;
+
+  const addOption = (v, label) => {
+    const opt = document.createElement('option');
+    opt.value = oflSeriesKey(v.source, v.file, v.column);
+    opt.textContent = label;
+    select.appendChild(opt);
+  };
+
+  const groups = new Map(); // group key -> { label, variables: [...] }
+  available.forEach((v) => {
+    const { key, label } = oflInstrumentGroupOf(v);
+    if (!groups.has(key)) groups.set(key, { label, variables: [] });
+    groups.get(key).variables.push(v);
+  });
+
+  if (groups.size <= 1) {
+    instrumentSelect.style.display = 'none';
+    instrumentSelect.disabled = true;
+    oflState.selectedInstrument = null;
+
+    select.innerHTML = '<option value="">Add a variable...</option>';
+    available.forEach((v) => addOption(v, v.column));
+    select.disabled = select.options.length <= 1 || atCap;
+    return;
+  }
+
+  const groupKeys = [...groups.keys()].sort((a, b) => groups.get(a).label.localeCompare(groups.get(b).label));
+
+  instrumentSelect.style.display = '';
+  instrumentSelect.disabled = atCap;
+  instrumentSelect.innerHTML = '<option value="">Instrument...</option>';
+  groupKeys.forEach((key) => {
+    const g = groups.get(key);
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = `${g.label} (${g.variables.length})`;
+    instrumentSelect.appendChild(opt);
+  });
+  if (oflState.selectedInstrument && !groups.has(oflState.selectedInstrument)) {
+    oflState.selectedInstrument = null;
+  }
+  instrumentSelect.value = oflState.selectedInstrument || '';
+
+  select.innerHTML = '<option value="">Add a variable...</option>';
+  if (oflState.selectedInstrument) {
+    groups.get(oflState.selectedInstrument).variables.forEach((v) => {
+      const label = (v.source === 'merged' && isMergedDataFile(v.file)) ? columnFieldLabelOf(v.column) : v.column;
+      addOption(v, label);
+    });
+  }
+  select.disabled = select.options.length <= 1 || atCap;
+}
+
+function oflInstrumentChange() {
+  oflState.selectedInstrument = document.getElementById('ofl-add-instrument-select').value || null;
+  oflRenderAddVariableSelect();
+}
+
+function oflAddColumn() {
+  const select = document.getElementById('ofl-add-variable-select');
+  const key = select.value;
+  select.value = '';
+  if (!key) return;
+  const v = oflState.availableVariables.find((x) => oflSeriesKey(x.source, x.file, x.column) === key);
+  if (!v || oflState.activeSeries.some((s) => oflSeriesKey(s.source, s.file, s.column) === key)) return;
+
+  const color = oflNextAvailableColor();
+  if (!color) {
+    const statusEl = document.getElementById('ofl-plot-status');
+    statusEl.textContent = `Up to ${OFL_SERIES_COLORS.length} variables at once.`;
+    statusEl.style.color = 'var(--err)';
+    return;
+  }
+
+  oflState.activeSeries.push({ ...v });
+  oflState.seriesColors[key] = color;
+  oflRenderAddVariableSelect();
+  oflFetchAndRenderPlot();
+  oflRenderExplorePanel();
+}
+
+function oflRemoveSeries(source, file, column) {
+  const key = oflSeriesKey(source, file, column);
+  oflState.activeSeries = oflState.activeSeries.filter((s) => oflSeriesKey(s.source, s.file, s.column) !== key);
+  delete oflState.seriesColors[key];
+  oflRenderAddVariableSelect();
+  oflRenderExplorePanel();
+  if (!oflState.activeSeries.length) {
+    oflClearPlot();
+    return;
+  }
+  oflFetchAndRenderPlot();
+}
+
+function oflRenderLegend(seriesData) {
+  const legend = document.getElementById('ofl-plot-legend');
+  legend.innerHTML = '';
+
+  oflState.activeSeries.forEach(({ source, file, column }) => {
+    const key = oflSeriesKey(source, file, column);
+    const s = seriesData ? seriesData.find((x) => x.source === source && x.file === file && x.column === column) : null;
+
+    const chip = document.createElement('div');
+    chip.className = 'dv-legend-chip';
+
+    const dot = document.createElement('span');
+    dot.className = 'dv-legend-dot';
+    dot.style.background = oflState.seriesColors[key];
+
+    const nameEl = document.createElement('span');
+    nameEl.textContent = source === 'drone' ? `${column} (drone)` : column;
+
+    const valueEl = document.createElement('span');
+    valueEl.className = 'dv-legend-value';
+    valueEl.textContent = (s && s.points.length) ? s.points[s.points.length - 1].v.toFixed(s.decimals) : '--';
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'dv-legend-remove';
+    removeBtn.textContent = '×';
+    removeBtn.title = `Remove ${column}`;
+    removeBtn.onclick = () => oflRemoveSeries(source, file, column);
+
+    chip.appendChild(dot);
+    chip.appendChild(nameEl);
+    chip.appendChild(valueEl);
+    chip.appendChild(removeBtn);
+    legend.appendChild(chip);
+  });
+}
+
+async function oflFetchAndRenderPlot() {
+  const statusEl = document.getElementById('ofl-plot-status');
+  const valueEl = document.getElementById('ofl-plot-stat-value');
+
+  if (!oflState.activeSeries.length) {
+    oflClearPlot();
+    return;
+  }
+
+  statusEl.textContent = 'Loading...';
+  statusEl.style.color = 'var(--text-dim)';
+
+  // Group by (source, file) so each distinct file is read once no
+  // matter how many of its columns are plotted - same grouping as the
+  // online Data Viewer, now that a plot here can mix a day's merged
+  // sensor CSV with its drone telemetry file(s).
+  const byFile = new Map();
+  oflState.activeSeries.forEach(({ source, file, column }) => {
+    const key = source + '::' + file;
+    if (!byFile.has(key)) byFile.set(key, { source, file, columns: [] });
+    byFile.get(key).columns.push(column);
+  });
+
+  try {
+    const responses = await Promise.all([...byFile.values()].map(async ({ source, file, columns }) => {
+      const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/plot_multi` +
+        `?source=${encodeURIComponent(source)}&file=${encodeURIComponent(file)}&columns=${encodeURIComponent(columns.join(','))}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      return { source, file, data };
+    }));
+
+    const failed = responses.find((r) => !r.data.ok);
+    if (failed) {
+      statusEl.textContent = failed.data.error;
+      statusEl.style.color = 'var(--err)';
+      oflPlot.setEmptyMessage('Could not load this selection.');
+      valueEl.textContent = '--';
+      oflRenderLegend(null);
+      return;
+    }
+
+    let timeColumnLabel = null;
+    let allSeries = [];
+    responses.forEach(({ source, file, data }) => {
+      timeColumnLabel = timeColumnLabel || data.time_column;
+      data.series.forEach((s) => {
+        allSeries.push({ source, file, column: s.column, points: s.points, decimals: s.decimals });
+      });
+    });
+    allSeries.sort((a, b) => {
+      const ai = oflState.activeSeries.findIndex((s) => s.source === a.source && s.file === a.file && s.column === a.column);
+      const bi = oflState.activeSeries.findIndex((s) => s.source === b.source && s.file === b.file && s.column === b.column);
+      return ai - bi;
+    });
+
+    oflPlot.setSeries(allSeries.map((s) => ({
+      column: s.column,
+      points: s.points,
+      decimals: s.decimals,
+      color: oflState.seriesColors[oflSeriesKey(s.source, s.file, s.column)],
+    })));
+    oflRenderLegend(allSeries);
+
+    if (allSeries.length === 1) {
+      const s = allSeries[0];
+      valueEl.textContent = s.points.length ? s.points[s.points.length - 1].v.toFixed(s.decimals) : '--';
+    } else {
+      valueEl.textContent = '';
+    }
+
+    const totalPoints = allSeries.reduce((sum, s) => sum + s.points.length, 0);
+    if (!totalPoints) {
+      statusEl.textContent = 'No numeric values found in this selection.';
+    } else if (allSeries.length === 1) {
+      statusEl.textContent = `${totalPoints} points plotted against "${timeColumnLabel}".`;
+    } else {
+      statusEl.textContent = `${allSeries.length} variables vs "${timeColumnLabel}" - each scaled to its own range; hover for actual values.`;
+    }
+    statusEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+}
+
+function oflClearPlot() {
+  oflState.activeSeries = [];
+  oflState.seriesColors = {};
+  oflPlot.setEmptyMessage('Pick a numeric column to plot');
+  document.getElementById('ofl-plot-status').textContent = '';
+  document.getElementById('ofl-plot-stat-value').textContent = '--';
+  document.getElementById('ofl-plot-legend').innerHTML = '';
+  oflRenderAddVariableSelect();
+}
+
+function oflClearPlotPanel() {
+  document.getElementById('merged-plot-panel').style.display = 'none';
+  document.getElementById('explore-panel').style.display = 'none';
+  document.getElementById('assistant-panel').style.display = 'none';
+  oflClearAssistantChat();
+  oflState.session = null;
+  oflState.date = null;
+  oflState.availableVariables = [];
+  oflState.selectedInstrument = null;
+  oflClearPlot();
+}
+
+// ---------- Explore: statistics / correlation / distribution / relationship ----------
+// All four summarize whatever's currently in the plot above
+// (oflState.activeSeries) - deepening exploration of the same selection
+// rather than introducing a second, separate variable picker.
+
+const oflHist = createHistogramController('explore-hist-canvas', 'explore-hist-tooltip');
+const oflScatter = createScatterController('explore-scatter-canvas', 'explore-scatter-tooltip');
+
+// Correlation/scatter both need row-aligned pairs, which only makes
+// sense within one file's columns (see /offline/.../correlation's
+// docstring) - and now that a plot can mix a day's merged sensor CSV
+// with its drone telemetry, "one file" means one (source, file) pair,
+// not just one filename. In practice each source is still just one
+// file, so this grouping rarely excludes anything within a source; it
+// matters now mainly to keep merged and drone columns from being
+// treated as row-aligned with each other, which they aren't. Picks the
+// group with the most active columns as "the" group for
+// correlation/scatter.
+function oflPrimaryFileGroup() {
+  const byFile = new Map();
+  oflState.activeSeries.forEach((s) => {
+    const key = s.source + '::' + s.file;
+    if (!byFile.has(key)) byFile.set(key, []);
+    byFile.get(key).push(s);
+  });
+  let best = [];
+  byFile.forEach((list) => { if (list.length > best.length) best = list; });
+  return best;
+}
+
+function oflPopulateVariableSelect(selectId, list, defaultKey) {
+  const select = document.getElementById(selectId);
+  const prevValue = select.value;
+  select.innerHTML = list.map((v) => {
+    const key = oflSeriesKey(v.source, v.file, v.column);
+    const label = v.source === 'drone' ? `${v.column} (drone)` : v.column;
+    return `<option value="${escapeHtml(key)}">${escapeHtml(label)}</option>`;
+  }).join('');
+  select.value = list.some((v) => oflSeriesKey(v.source, v.file, v.column) === prevValue) ? prevValue : defaultKey;
+}
+
+function oflRenderExplorePanel() {
+  const corrSection = document.getElementById('explore-corr-section');
+  const histSection = document.getElementById('explore-hist-section');
+  const scatterSection = document.getElementById('explore-scatter-section');
+
+  if (!oflState.activeSeries.length) {
+    document.getElementById('explore-stats-wrap').innerHTML = '<div class="hint">Add a variable to the plot above to see its statistics.</div>';
+    corrSection.style.display = 'none';
+    histSection.style.display = 'none';
+    scatterSection.style.display = 'none';
+    return;
+  }
+
+  oflRenderStats();
+
+  histSection.style.display = 'block';
+  const first = oflState.activeSeries[0];
+  oflPopulateVariableSelect('explore-hist-select', oflState.activeSeries, oflSeriesKey(first.source, first.file, first.column));
+  oflRenderHistogram();
+
+  const group = oflPrimaryFileGroup();
+  if (group.length >= 2) {
+    corrSection.style.display = 'block';
+    scatterSection.style.display = 'block';
+    oflPopulateVariableSelect('explore-scatter-x-select', group, oflSeriesKey(group[0].source, group[0].file, group[0].column));
+    oflPopulateVariableSelect('explore-scatter-y-select', group, oflSeriesKey(group[1].source, group[1].file, group[1].column));
+    oflRenderCorrelation(group);
+    oflRenderScatter();
+  } else {
+    corrSection.style.display = 'none';
+    scatterSection.style.display = 'none';
+  }
+}
+
+async function oflRenderStats() {
+  const wrap = document.getElementById('explore-stats-wrap');
+  wrap.innerHTML = '<div class="hint">Loading...</div>';
+
+  const byFile = new Map();
+  oflState.activeSeries.forEach((s) => {
+    const key = s.source + '::' + s.file;
+    if (!byFile.has(key)) byFile.set(key, { source: s.source, file: s.file, columns: [] });
+    byFile.get(key).columns.push(s.column);
+  });
+
+  try {
+    const groups = [...byFile.values()];
+    const responses = await Promise.all(groups.map(async ({ source, file, columns }) => {
+      const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/stats` +
+        `?source=${encodeURIComponent(source)}&file=${encodeURIComponent(file)}&columns=${encodeURIComponent(columns.join(','))}`;
+      const res = await fetch(url);
+      return res.json();
+    }));
+    const failed = responses.find((d) => !d.ok);
+    if (failed) { wrap.innerHTML = `<div class="error-msg">${escapeHtml(failed.error || 'Could not load statistics.')}</div>`; return; }
+
+    // Keyed by the same composite identity as everywhere else here - a
+    // bare column name isn't enough to look a stat back up once merged
+    // and drone columns can share the table.
+    const byColumn = {};
+    groups.forEach(({ source, file }, i) => {
+      responses[i].stats.forEach((s) => { byColumn[oflSeriesKey(source, file, s.column)] = s; });
+    });
+    const fmt = (v) => (v === null || v === undefined) ? '--' : v.toFixed(3);
+
+    const rows = oflState.activeSeries.map(({ source, file, column }) => {
+      const key = oflSeriesKey(source, file, column);
+      const s = byColumn[key];
+      const label = source === 'drone' ? `${column} (drone)` : column;
+      const dot = `<span class="dv-legend-dot" style="background:${oflState.seriesColors[key]}; display:inline-block; margin-right:6px;"></span>`;
+      if (!s) return `<tr><td>${dot}${escapeHtml(label)}</td><td colspan="8">--</td></tr>`;
+      return `<tr>
+        <td>${dot}${escapeHtml(label)}</td>
+        <td>${s.count}</td><td>${fmt(s.mean)}</td><td>${fmt(s.std)}</td>
+        <td>${fmt(s.min)}</td><td>${fmt(s.p25)}</td><td>${fmt(s.median)}</td>
+        <td>${fmt(s.p75)}</td><td>${fmt(s.max)}</td>
+      </tr>`;
+    }).join('');
+
+    wrap.innerHTML = `<table class="stats-table">
+      <thead><tr><th>variable</th><th>n</th><th>mean</th><th>std</th><th>min</th><th>p25</th><th>median</th><th>p75</th><th>max</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  } catch (e) {
+    wrap.innerHTML = '<div class="error-msg">Could not reach the local app server.</div>';
+  }
+}
+
+// Diverging blue<->red through a neutral gray midpoint at r=0 (the
+// dataviz palette's diverging formula), interpolated in RGB rather than
+// a fixed handful of steps since r is continuous. Same blue/red hexes
+// as this app's own --series-1/--series-8, reused here for a different
+// (diverging, not categorical) job.
+const OFL_CORR_NEG = [42, 120, 214];   // blue, #2a78d6 - negative pole
+const OFL_CORR_POS = [227, 73, 72];    // red,  #e34948 - positive pole
+const OFL_CORR_MID = [240, 239, 236];  // neutral gray at r=0
+
+function oflCorrColor(r) {
+  const mag = Math.min(1, Math.abs(r));
+  const pole = r >= 0 ? OFL_CORR_POS : OFL_CORR_NEG;
+  const mix = OFL_CORR_MID.map((m, i) => Math.round(m + (pole[i] - m) * mag));
+  return { bg: `rgb(${mix[0]}, ${mix[1]}, ${mix[2]})`, fg: mag > 0.55 ? '#ffffff' : 'var(--text)' };
+}
+
+async function oflRenderCorrelation(group) {
+  const table = document.getElementById('explore-corr-table');
+  const hint = document.getElementById('explore-corr-hint');
+  const source = group[0].source;
+  const file = group[0].file;
+  const columns = group.map((g) => g.column);
+  table.innerHTML = '';
+  hint.textContent = 'Loading...';
+  hint.style.color = 'var(--text-dim)';
+
+  try {
+    const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/correlation` +
+      `?source=${encodeURIComponent(source)}&file=${encodeURIComponent(file)}&columns=${encodeURIComponent(columns.join(','))}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) { hint.textContent = data.error; hint.style.color = 'var(--err)'; return; }
+
+    const rLookup = {};
+    data.matrix.forEach((m) => {
+      rLookup[m.a + '::' + m.b] = m;
+      rLookup[m.b + '::' + m.a] = m;
+    });
+
+    const headerCells = columns.map((c) => `<th title="${escapeHtml(c)}">${escapeHtml(c)}</th>`).join('');
+    const rows = columns.map((rowCol) => {
+      const cells = columns.map((colCol) => {
+        const m = rLookup[rowCol + '::' + colCol];
+        if (!m || m.r === null) return `<td class="corr-cell empty">--</td>`;
+        const { bg, fg } = oflCorrColor(m.r);
+        return `<td class="corr-cell" style="background:${bg}; color:${fg};" title="n=${m.n}">${m.r.toFixed(2)}</td>`;
+      }).join('');
+      return `<tr><td class="corr-label" title="${escapeHtml(rowCol)}">${escapeHtml(rowCol)}</td>${cells}</tr>`;
+    }).join('');
+
+    table.innerHTML = `<thead><tr><th></th>${headerCells}</tr></thead><tbody>${rows}</tbody>`;
+    hint.textContent = 'Pearson r, -1 to 1. Each pair only uses rows where both variables have a value - hover a cell for its sample size.';
+    hint.style.color = 'var(--text-dim)';
+  } catch (e) {
+    hint.textContent = 'Could not reach the local app server.';
+    hint.style.color = 'var(--err)';
+  }
+}
+
+async function oflRenderHistogram() {
+  const select = document.getElementById('explore-hist-select');
+  const statusEl = document.getElementById('explore-hist-status');
+  const chosen = oflState.activeSeries.find((s) => oflSeriesKey(s.source, s.file, s.column) === select.value) || oflState.activeSeries[0];
+  if (!chosen) { oflHist.setEmptyMessage('Pick a variable to see its distribution'); return; }
+
+  statusEl.textContent = 'Loading...';
+  statusEl.style.color = 'var(--text-dim)';
+
+  try {
+    const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/histogram` +
+      `?source=${encodeURIComponent(chosen.source)}&file=${encodeURIComponent(chosen.file)}&column=${encodeURIComponent(chosen.column)}&bins=20`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      oflHist.setEmptyMessage('Could not load this column.');
+      return;
+    }
+
+    oflHist.setData({ edges: data.edges, counts: data.counts, decimals: 2 });
+    statusEl.textContent = data.n ? `${data.n} values across ${data.counts.length} bins.` : 'No numeric values found.';
+    statusEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+}
+
+async function oflRenderScatter() {
+  const xSelect = document.getElementById('explore-scatter-x-select');
+  const ySelect = document.getElementById('explore-scatter-y-select');
+  const statusEl = document.getElementById('explore-scatter-status');
+  const group = oflPrimaryFileGroup();
+  const xVar = group.find((s) => oflSeriesKey(s.source, s.file, s.column) === xSelect.value) || group[0];
+  const yVar = group.find((s) => oflSeriesKey(s.source, s.file, s.column) === ySelect.value) || group[1];
+  if (!xVar || !yVar) { oflScatter.setEmptyMessage('Pick two variables to compare'); return; }
+
+  statusEl.textContent = 'Loading...';
+  statusEl.style.color = 'var(--text-dim)';
+
+  try {
+    // xVar and yVar always share a source - they came from the same
+    // oflPrimaryFileGroup(), which is now grouped by (source, file).
+    const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/scatter` +
+      `?source=${encodeURIComponent(xVar.source)}&x=${encodeURIComponent(xVar.column)}&y=${encodeURIComponent(yVar.column)}&file=${encodeURIComponent(xVar.file)}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      oflScatter.setEmptyMessage('Could not load this pair.');
+      return;
+    }
+
+    oflScatter.setData({
+      points: data.points, regression: data.regression,
+      xLabel: xVar.column, yLabel: yVar.column, decimals: 2,
+    });
+
+    if (!data.n) {
+      statusEl.textContent = 'No rows have both variables at once.';
+    } else {
+      const rTxt = data.r === null ? 'undefined (a constant variable)' : data.r.toFixed(3);
+      statusEl.textContent = `n=${data.n}, r=${rTxt}` + (data.r_squared !== null ? `, R²=${data.r_squared.toFixed(3)}` : '') + '.';
+    }
+    statusEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
+}
+
+// ---------- Ask about this data (Claude-backed chat) ----------
+// Scoped to whatever's currently in the plot above - every question is
+// answered from the same statistics/correlation numbers the explore
+// panel shows, not the raw data or general knowledge. Conversation
+// history lives only in this array (the backend is stateless like the
+// rest of this app) and resets whenever a new day is opened.
+
+const oflAssistant = {
+  history: [], // [{role: 'user'|'assistant', content: string}]
+};
+
+function oflRenderAssistantMessage(role, text) {
+  const log = document.getElementById('assistant-log');
+  const div = document.createElement('div');
+  div.className = `assistant-msg ${role}`;
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function oflClearAssistantChat() {
+  oflAssistant.history = [];
+  const log = document.getElementById('assistant-log');
+  if (log) log.innerHTML = '';
+  const statusEl = document.getElementById('assistant-status');
+  if (statusEl) statusEl.textContent = '';
+}
+
+async function oflAskAssistant() {
+  const input = document.getElementById('assistant-input');
+  const btn = document.getElementById('assistant-ask-btn');
+  const statusEl = document.getElementById('assistant-status');
+  const question = input.value.trim();
+  if (!question || !oflState.session) return;
+
+  input.value = '';
+  input.disabled = true;
+  btn.disabled = true;
+  statusEl.textContent = 'Thinking...';
+  statusEl.style.color = 'var(--text-dim)';
+  oflRenderAssistantMessage('user', question);
+
+  try {
+    const res = await fetch('/assistant/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session: oflState.session,
+        date: oflState.date,
+        columns: oflState.activeSeries.map((s) => ({ file: s.file, column: s.column, source: s.source })),
+        question,
+        history: oflAssistant.history,
+      }),
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      statusEl.textContent = data.error || 'Could not get an answer.';
+      statusEl.style.color = 'var(--err)';
+      return;
+    }
+
+    oflRenderAssistantMessage('assistant', data.answer);
+    oflAssistant.history.push({ role: 'user', content: question });
+    oflAssistant.history.push({ role: 'assistant', content: data.answer });
+    statusEl.textContent = data.usage
+      ? `${data.usage.input_tokens + data.usage.output_tokens} tokens used.`
+      : '';
+    statusEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  } finally {
+    input.disabled = false;
+    btn.disabled = false;
+    input.focus();
+  }
+}
+
+document.getElementById('assistant-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') oflAskAssistant();
+});
+
+loadSessions();
+</script>
+</body>
+</html>

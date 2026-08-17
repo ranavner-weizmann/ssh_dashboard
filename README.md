@@ -1,4 +1,6 @@
-# Remote PC Notes — Drone Air System
+# MAMP Dashboard — Drone Air System
+
+MAMP stands for Mobile Atmospheric Measurement Platform.
 
 A local web dashboard that connects to a remote machine over SSH, creates a
 timestamped notes CSV in `/home/rsp/drone_air_system/`, and appends each note
