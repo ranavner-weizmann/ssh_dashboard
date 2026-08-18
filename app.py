@@ -2128,7 +2128,7 @@ def _get_pi_time_info(ssh):
     stdin, stdout, stderr = ssh.exec_command(
         "top -bn1 | grep -m1 '^%Cpu'; "
         "echo '---time---'; "
-        "timedatectl show --property=NTP --property=NTPSynchronized; "
+        "timedatectl show --property=NTP --property=NTPSynchronized --property=Timezone; "
         "date '+%Y-%m-%d %H:%M:%S %Z'; "
         "date +%s",
         timeout=10,
@@ -2166,6 +2166,7 @@ def _get_pi_time_info(ssh):
     return {
         "pi_time": pi_datetime_str,
         "pi_epoch": pi_epoch,
+        "pi_timezone": info.get("Timezone"),
         "ntp_active": ntp_active,
         "ntp_synchronized": ntp_synced,
         "cpu_percent": _parse_cpu_percent(cpu_part),

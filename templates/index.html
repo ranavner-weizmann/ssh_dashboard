@@ -65,12 +65,16 @@
   .top-strip {
     display: grid;
     gap: 12px;
-    align-items: start;
+    align-items: stretch;
     margin-bottom: 14px;
   }
 
   .top-strip > .panel {
     margin-bottom: 0;
+    /* Same reasoning as .debug-row > .panel above - without this, a long
+       timezone name (e.g. "America/Argentina/Buenos_Aires") could force
+       this column wider than its grid share. */
+    min-width: 0;
   }
 
   .top-strip-primary {
@@ -106,6 +110,10 @@
 
   .debug-row > .panel {
     margin-bottom: 0;
+    /* Grid items default to min-width: auto, which lets long unbroken
+       content (e.g. a raw CSV header line with no spaces) force this
+       column wider than its 1fr share and blow out the row. */
+    min-width: 0;
   }
 
   /* Below ~1100px there isn't enough room for a 3-column top strip or
@@ -640,6 +648,7 @@
     max-height: 160px;
     overflow-y: auto;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
     background: var(--surface-sunken);
     border: 1px solid var(--panel-border);
     border-radius: 6px;
@@ -874,6 +883,20 @@
     padding: 6px 0 2px 0;
     letter-spacing: 0.02em;
   }
+  /* Now that .top-strip stretches this panel to match its (taller)
+     siblings, let the countdown itself grow into and center within
+     whatever extra room that leaves, instead of the box just ending in
+     a stretch of blank space below the Pause/Reset buttons. */
+  .timer-panel {
+    display: flex;
+    flex-direction: column;
+  }
+  .timer-panel .timer-display {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
   .timer-display.done {
     color: var(--accent);
   }
@@ -978,8 +1001,10 @@
 
   /* Red warning shown when the Mac and Pi clocks have drifted apart -
      distinct from .ntp-warning, which is about NTP fighting a manual
-     sync rather than the clocks currently being out of sync. */
-  .clock-drift-warning {
+     sync rather than the clocks currently being out of sync. Also used
+     by .timezone-mismatch-warning below, which shares the same "act on
+     this before trusting Sync Time" urgency and visual treatment. */
+  .clock-drift-warning, .timezone-mismatch-warning {
     display: none;
     background: #fbe4e2;
     border: 1px solid var(--err);
@@ -992,7 +1017,7 @@
     border-radius: 6px;
     margin: 12px 0;
   }
-  .clock-drift-warning.active { display: block; }
+  .clock-drift-warning.active, .timezone-mismatch-warning.active { display: block; }
 
   .btn-sync {
     width: 100%;
@@ -1141,7 +1166,7 @@
 
     <div id="tab-operation" class="tab-panel active">
       <div class="top-strip top-strip-primary">
-        <div class="panel">
+        <div class="panel timer-panel">
           <label style="margin-bottom: 8px;">timer</label>
           <div class="button-row">
             <button class="btn-ghost timer-preset" onclick="startTimerPreset(30, this)">30s</button>
@@ -1172,32 +1197,54 @@
             <button class="btn-primary" id="save-btn" onclick="saveNote()" style="width:auto;">Save note</button>
           </div>
           <div class="hint" id="save-status"></div>
+          <label style="margin-top: 14px; margin-bottom: 8px;">session log</label>
+          <div class="log" id="log"></div>
         </div>
 
         <div class="panel">
           <label style="margin-bottom: 8px;">time sync</label>
           <div class="time-row">
-            <span class="time-label">mac</span>
+            <span class="time-label">local machine</span>
             <span class="time-value" id="mac-time-display">--:--:--</span>
           </div>
           <div class="time-row">
-            <span class="time-label">pi <span id="pi-time-asof"></span></span>
+            <span class="time-label">on-board computer <span id="pi-time-asof"></span></span>
             <span class="time-value stale" id="pi-time-display">checking...</span>
           </div>
+          <div class="time-row">
+            <span class="time-label">local timezone</span>
+            <span class="time-value" id="mac-timezone-display">--</span>
+          </div>
+          <div class="time-row">
+            <span class="time-label">on-board timezone</span>
+            <span class="time-value stale" id="pi-timezone-display">checking...</span>
+          </div>
           <div class="clock-drift-warning" id="clock-drift-warning"></div>
+          <div class="timezone-mismatch-warning" id="timezone-mismatch-warning"></div>
           <div class="ntp-warning" id="ntp-warning">
-            NTP sync is active on the Pi — a manual time set won't stick.
+            NTP sync is active on the on-board computer — a manual time set won't stick.
             Disable it first over SSH with <code>sudo timedatectl set-ntp false</code>,
             then sync again.
           </div>
           <button class="btn-sync" id="sync-time-btn" onclick="syncTime()">Sync Time</button>
           <div class="hint" id="sync-time-status"></div>
-        </div>
-      </div>
 
-      <div class="panel">
-        <label style="margin-bottom: 8px;">session log</label>
-        <div class="log" id="log"></div>
+          <button class="btn-download" id="vscode-ssh-btn" style="margin-top: 14px;" onclick="openVSCodeSSH()">Open SSH connection with VS Code</button>
+
+          <button class="btn-download" id="download-btn" style="margin-top: 14px;" onclick="startDownload()">⬇ Download Data</button>
+          <div class="progress-bar-track" id="progress-bar-track">
+            <div class="progress-bar-fill" id="progress-bar-fill"></div>
+          </div>
+          <div class="hint" id="download-status"></div>
+          <div id="download-results"></div>
+
+          <button class="btn-download" id="backup-btn" style="margin-top: 14px;" onclick="startBackup()">Backup to External Drive</button>
+          <div class="progress-bar-track" id="backup-progress-bar-track">
+            <div class="progress-bar-fill" id="backup-progress-bar-fill"></div>
+          </div>
+          <div class="hint" id="backup-status"></div>
+          <div id="backup-results"></div>
+        </div>
       </div>
 
       <div class="panel">
@@ -1401,36 +1448,9 @@
           </div>
         </div>
       </div>
-
-      <div class="panel">
-        <button class="btn-download" id="download-btn" onclick="startDownload()">⬇ Download Data</button>
-        <div class="progress-bar-track" id="progress-bar-track">
-          <div class="progress-bar-fill" id="progress-bar-fill"></div>
-        </div>
-        <div class="hint" id="download-status"></div>
-        <div id="download-results"></div>
-
-        <button class="btn-download" id="backup-btn" style="margin-top: 14px;" onclick="startBackup()">💾 Backup to External Drive</button>
-        <div class="progress-bar-track" id="backup-progress-bar-track">
-          <div class="progress-bar-fill" id="backup-progress-bar-fill"></div>
-        </div>
-        <div class="hint" id="backup-status"></div>
-        <div id="backup-results"></div>
-      </div>
     </div>
 
     <div id="tab-debug" class="tab-panel">
-      <div class="panel">
-        <label style="margin-bottom: 8px;">run sensors log</label>
-        <div class="button-row">
-          <label for="runall-log-select" class="hint" style="margin: 0;">Log:</label>
-          <select id="runall-log-select" onchange="onRunallLogSelectChange()">
-            <option value="controller">Controller (runall.log)</option>
-          </select>
-        </div>
-        <div id="runall-output" class="output-panel wide-output"></div>
-      </div>
-
       <div class="panel">
         <label style="margin-bottom: 8px;">terminal</label>
         <div class="button-row">
@@ -1458,6 +1478,17 @@
           <div class="hint" id="sensor-check-status">Connect to load the sensor list.</div>
           <div id="sensor-check-output" class="output-panel"></div>
         </div>
+      </div>
+
+      <div class="panel">
+        <label style="margin-bottom: 8px;">run sensors log</label>
+        <div class="button-row">
+          <label for="runall-log-select" class="hint" style="margin: 0;">Log:</label>
+          <select id="runall-log-select" onchange="onRunallLogSelectChange()">
+            <option value="controller">Controller (runall.log)</option>
+          </select>
+        </div>
+        <div id="runall-output" class="output-panel wide-output"></div>
       </div>
 
       <div class="panel">
@@ -1590,6 +1621,18 @@
 <script src="{{ url_for('static', filename='plot-engine.js') }}"></script>
 <script>
 const notes = [];
+// Populated in showNotesView()/cleared in showConnectView() so
+// openVSCodeSSH() can build a vscode-remote URI without having to parse
+// it back out of the header's "· user@host" text.
+let connectedHost = null;
+let connectedUsername = null;
+// True whenever the clock-drift warning is showing (see refreshPiTime).
+// Gates saveNote/runAllSensors/runCApp - see applyClockSyncGate().
+let clockOutOfSync = false;
+// This browser's own configured timezone (IANA name, e.g. "Africa/Nairobi") -
+// constant for the life of the page, so it's resolved once rather than on
+// every refreshPiTime() poll.
+const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 async function refreshStatus() {
   try {
@@ -1612,6 +1655,8 @@ function showNotesView(data) {
   document.getElementById('status-text').textContent = 'connected';
   document.getElementById('header-host').textContent = `· ${data.username}@${data.host}`;
   document.getElementById('header-disconnect-btn').style.display = '';
+  connectedHost = data.host;
+  connectedUsername = data.username;
   startTimeSync();
   startPlotPolling();
   startConnectionHealthCheck();
@@ -1653,6 +1698,8 @@ function showConnectView() {
   document.getElementById('header-host').textContent = '';
   document.getElementById('header-cpu').textContent = '';
   document.getElementById('header-disconnect-btn').style.display = 'none';
+  connectedHost = null;
+  connectedUsername = null;
   stopTimeSync();
   stopPlotPolling();
   stopConnectionHealthCheck();
@@ -1756,12 +1803,14 @@ async function saveNote() {
     statusEl.textContent = 'Failed to reach local app server.';
     statusEl.style.color = 'var(--err)';
   } finally {
-    btn.disabled = false;
+    btn.disabled = clockOutOfSync;
   }
 }
 
 function setRunallButtonsRunning(isRunning) {
-  document.getElementById('runall-btn').disabled = isRunning;
+  // OR in clockOutOfSync so a periodic "not running" poll here doesn't
+  // silently re-enable the button out from under applyClockSyncGate().
+  document.getElementById('runall-btn').disabled = isRunning || clockOutOfSync;
   document.getElementById('stop-runall-btn').disabled = !isRunning;
   setSensorTogglesDisabled(isRunning);
 }
@@ -1879,7 +1928,7 @@ async function runAllSensors() {
     statusEl.textContent = 'Could not reach the local app server.';
     statusEl.style.color = 'var(--err)';
   }
-  btn.disabled = false;
+  btn.disabled = clockOutOfSync;
 }
 
 async function refreshRunAllOutput() {
@@ -2006,7 +2055,7 @@ async function runCApp() {
     statusEl.textContent = 'Could not reach the local app server.';
     statusEl.style.color = 'var(--err)';
   } finally {
-    btn.disabled = false;
+    btn.disabled = clockOutOfSync;
   }
 }
 
@@ -2850,6 +2899,11 @@ async function pollBackupProgress() {
 }
 
 document.addEventListener('keydown', (e) => {
+  const connectFieldIds = ['host', 'username', 'password'];
+  if (e.key === 'Enter' && connectFieldIds.includes(document.activeElement.id)) {
+    e.preventDefault();
+    connect();
+  }
   if (e.key === 'Enter' && document.getElementById('download-modal-overlay').classList.contains('active')) {
     const input = document.getElementById('folder-name-input');
     if (input && document.activeElement === input) {
@@ -2867,6 +2921,13 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && document.activeElement === document.getElementById('timer-custom-input')) {
     e.preventDefault();
     startTimerCustom();
+  }
+  // Enter saves the note; Shift+Enter still inserts a newline, same as
+  // chat apps - a note is usually one quick line, but this doesn't shut
+  // the door on a longer, multi-line one.
+  if (e.key === 'Enter' && !e.shiftKey && document.activeElement === document.getElementById('note-text')) {
+    e.preventDefault();
+    saveNote();
   }
 });
 
@@ -3997,6 +4058,7 @@ let runallPollInterval = null;
 
 function startTimeSync() {
   stopTimeSync(); // guard against double-starting if called twice
+  document.getElementById('mac-timezone-display').textContent = localTimezone;
   tickMacClock();
   macClockInterval = setInterval(tickMacClock, 1000);
   refreshPiTime();
@@ -4028,6 +4090,8 @@ async function refreshPiTime() {
   const ntpWarning = document.getElementById('ntp-warning');
   const driftWarning = document.getElementById('clock-drift-warning');
   const cpuDisplay = document.getElementById('header-cpu');
+  const piTzDisplay = document.getElementById('pi-timezone-display');
+  const tzWarning = document.getElementById('timezone-mismatch-warning');
 
   try {
     const res = await fetch('/pi_time');
@@ -4046,11 +4110,33 @@ async function refreshPiTime() {
         const driftSeconds = Math.abs((Date.now() / 1000) - data.pi_epoch);
         const outOfSync = driftSeconds > CLOCK_DRIFT_WARN_SECONDS;
         driftWarning.textContent = outOfSync
-          ? `⚠ Mac and Pi clocks are ~${Math.round(driftSeconds)}s apart — run Sync Time.`
+          ? `⚠ Local machine and on-board computer clocks are ~${Math.round(driftSeconds)}s apart — run Sync Time.`
           : '';
         driftWarning.classList.toggle('active', outOfSync);
+        clockOutOfSync = outOfSync;
       } else {
         driftWarning.classList.remove('active');
+        clockOutOfSync = false;
+      }
+
+      // Sync Time just copies wall-clock digits over without any timezone
+      // info attached, so it only sets the *correct* absolute time when
+      // both machines already agree on what timezone those digits mean -
+      // surfacing a mismatch here, the same way clock drift is surfaced,
+      // is what actually catches that before it silently sets the Pi's
+      // clock to the wrong instant.
+      if (data.pi_timezone) {
+        piTzDisplay.textContent = data.pi_timezone;
+        piTzDisplay.classList.remove('stale');
+        const tzMismatch = data.pi_timezone !== localTimezone;
+        tzWarning.textContent = tzMismatch
+          ? `⚠ Local machine (${localTimezone}) and on-board computer (${data.pi_timezone}) are set to different timezones — Sync Time will set the wrong absolute time until these match.`
+          : '';
+        tzWarning.classList.toggle('active', tzMismatch);
+      } else {
+        piTzDisplay.textContent = '(unavailable)';
+        piTzDisplay.classList.add('stale');
+        tzWarning.classList.remove('active');
       }
     } else {
       piDisplay.textContent = '(not connected)';
@@ -4059,13 +4145,37 @@ async function refreshPiTime() {
       ntpWarning.classList.remove('active');
       driftWarning.classList.remove('active');
       cpuDisplay.textContent = '';
+      clockOutOfSync = false;
+      piTzDisplay.textContent = 'checking...';
+      piTzDisplay.classList.add('stale');
+      tzWarning.classList.remove('active');
     }
   } catch (e) {
     piDisplay.textContent = '(error checking)';
     piDisplay.classList.add('stale');
     driftWarning.classList.remove('active');
     cpuDisplay.textContent = '';
+    clockOutOfSync = false;
+    piTzDisplay.textContent = '(error checking)';
+    piTzDisplay.classList.add('stale');
+    tzWarning.classList.remove('active');
   }
+  applyClockSyncGate();
+}
+
+// Grays out actions where a wrong clock does real damage - a note gets
+// logged with a misleading timestamp, or a flight's sensor/PSDK data
+// gets stamped with a clock that's since drifted, both far more annoying
+// to untangle after the fact than being blocked here for the few seconds
+// Sync Time takes. runall-btn's disabled state also depends on whether
+// runall.py is already running - read that off stop-runall-btn (which
+// setRunallButtonsRunning() always keeps accurate) rather than tracking
+// a second, possibly-stale copy of the same fact.
+function applyClockSyncGate() {
+  document.getElementById('save-btn').disabled = clockOutOfSync;
+  document.getElementById('capp-btn').disabled = clockOutOfSync;
+  const runallIsRunning = !document.getElementById('stop-runall-btn').disabled;
+  document.getElementById('runall-btn').disabled = clockOutOfSync || runallIsRunning;
 }
 
 async function syncTime() {
@@ -4575,6 +4685,23 @@ function disconnectTerminal() {
   if (terminalSocket) {
     terminalSocket.close();
   }
+}
+
+// Hands off to VS Code's own Remote-SSH extension instead of this
+// dashboard's in-page terminal. A vscode-remote URI can't carry a
+// password (VS Code has no way to accept one that way, by design), so
+// this only ever gets VS Code to *prompt* for it (or use an SSH key,
+// if one's already set up) - it can't reuse the password typed into
+// the Connect form here.
+function openVSCodeSSH() {
+  if (!connectedHost || !connectedUsername) return;
+  const target = encodeURIComponent(`${connectedUsername}@${connectedHost}`);
+  // windowId=_blank tells VS Code to open a new window for this rather
+  // than reusing/replacing whatever window (and session) was already
+  // open - without it, clicking this while VS Code is already open on
+  // something else jumps that same window over to the Pi instead of
+  // adding a new one.
+  window.location.href = `vscode://vscode-remote/ssh-remote+${target}/home/rsp?windowId=_blank`;
 }
 
 window.addEventListener('resize', () => {
