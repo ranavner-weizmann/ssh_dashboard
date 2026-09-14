@@ -395,6 +395,15 @@
   .explore-plot-canvas-wrap { position: relative; width: 100%; height: 180px; }
   .explore-plot-canvas { width: 100%; height: 100%; display: block; }
 
+  /* ---- altitude profile: one tall, narrow chart per detected flight ---- */
+
+  .alt-profile-grid { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 4px; }
+  .alt-profile-chart { flex: 0 0 240px; }
+  .alt-profile-chart-title { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; text-align: center; }
+  .alt-profile-canvas-wrap { position: relative; width: 100%; height: 480px; }
+  .alt-profile-canvas-wrap canvas { width: 100%; height: 100%; display: block; }
+  .alt-profile-chart-status { font-size: 11px; color: var(--text-dim); margin-top: 6px; text-align: center; }
+
   /* ---- assistant chat panel ---- */
 
   .assistant-log {
@@ -494,22 +503,16 @@
     <div class="panel-header">
       <label>altitude profile</label>
     </div>
-    <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Pick a flight and a sensor variable to see its vertical profile for just that flight - each drone reading is paired with the nearest sensor reading within 40s (farther than that, it's dropped rather than shown as a stale match), then grouped into 5m altitude bins and plotted as a mean line with a shaded ±1 std band.</div>
+    <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Pick a sensor variable to see its vertical profile for every flight that day, one chart each - each drone reading is paired with the nearest sensor reading within 40s (farther than that, it's dropped rather than shown as a stale match), then grouped into 5m altitude bins and plotted as a mean line with a shaded ±1 std band.</div>
     <div class="plot-toolbar">
-      <select id="alt-profile-flight-select" class="select-input" onchange="altProfileRender()">
-        <option value="">Flight...</option>
-      </select>
       <select id="alt-profile-instrument-select" class="select-input" onchange="altProfileInstrumentChange()" style="display:none;">
         <option value="">Instrument...</option>
       </select>
-      <select id="alt-profile-variable-select" class="select-input" onchange="altProfileRender()">
+      <select id="alt-profile-variable-select" class="select-input" onchange="altProfileRenderAll()">
         <option value="">Variable...</option>
       </select>
     </div>
-    <div class="explore-plot-canvas-wrap">
-      <canvas id="alt-profile-canvas" class="explore-plot-canvas"></canvas>
-      <div class="plot-tooltip" id="alt-profile-tooltip"></div>
-    </div>
+    <div class="alt-profile-grid" id="alt-profile-grid"></div>
     <div class="hint" id="alt-profile-status"></div>
   </div>
 
@@ -1259,26 +1262,33 @@ function oflClearPlotPanel() {
   oflState.selectedInstrument = null;
   oflClearPlot();
   altProfileFlights = [];
-  altProfileChart.setEmptyMessage('Pick a flight and a variable');
+  altProfileCharts = [];
+  document.getElementById('alt-profile-grid').innerHTML = '';
 }
 
-// ---------- Altitude profile: one flight's instrument readings vs. altitude ----------
+// ---------- Altitude profile: one chart per flight, instrument vs. altitude ----------
 // Flights are detected server-side from a date's merged drone telemetry
 // (see _detect_flights in app.py) rather than from file boundaries, since
-// one recorded telemetry file can hold more than one takeoff/landing.
-// Each plotted point pairs one drone altitude_agl_m reading with the
-// nearest sensor reading for the chosen column (see _nearest_within
-// server-side) - dropped instead of paired once the nearest sensor
-// reading is more than 40s away, since the sensor and drone files run on
-// independent timebases that can go quiet for many minutes between runs.
+// one recorded telemetry file can hold more than one takeoff/landing. One
+// chart is built per detected flight up front (altProfileBuildGrid) so
+// picking a variable just re-fills all of them at once, rather than
+// picking a flight first - a day's flights are usually the same handful
+// of survey passes, so seeing every one of them side by side for the
+// variable you're looking at is more useful than one at a time. Each
+// chart's points pair one drone altitude_agl_m reading with the nearest
+// sensor reading for the chosen column (see _nearest_within server-side)
+// - dropped instead of paired once the nearest sensor reading is more
+// than 40s away, since the sensor and drone files run on independent
+// timebases that can go quiet for many minutes between runs.
 
-const altProfileChart = createProfileController('alt-profile-canvas', 'alt-profile-tooltip');
 let altProfileFlights = [];
+let altProfileCharts = []; // [{flight, controller, statusEl}], one per flight, built once per date
 
 async function altProfileLoadFlights() {
   const panel = document.getElementById('altitude-profile-panel');
-  const flightSelect = document.getElementById('alt-profile-flight-select');
   altProfileFlights = [];
+  altProfileCharts = [];
+  document.getElementById('alt-profile-grid').innerHTML = '';
   panel.style.display = 'none';
 
   try {
@@ -1288,22 +1298,50 @@ async function altProfileLoadFlights() {
     if (!data.ok || !data.flights.length) return; // no merged drone data yet, or nothing detected - stays hidden
 
     altProfileFlights = data.flights;
-    flightSelect.innerHTML = '<option value="">Flight...</option>';
-    data.flights.forEach((f) => {
-      const opt = document.createElement('option');
-      opt.value = f.index;
-      const mins = Math.round(f.duration_s / 60);
-      opt.textContent = `Flight ${f.index + 1} (${f.start.slice(11)}–${f.end.slice(11)}, ${mins} min)`;
-      flightSelect.appendChild(opt);
-    });
+    altProfileBuildGrid();
     altProfilePopulateVariableSelect();
-    altProfileChart.setEmptyMessage('Pick a flight and a variable');
     document.getElementById('alt-profile-status').textContent = '';
     panel.style.display = 'block';
   } catch (e) {
     // Leave the panel hidden - same "nothing to show" treatment as other
     // fetch failures on this page when there's simply nothing there yet.
   }
+}
+
+// One canvas+tooltip+status per detected flight, built once when the day
+// loads - altProfileRenderAll below only ever re-fills these, it never
+// rebuilds the grid, so a hover/controller state isn't thrown away every
+// time the variable changes.
+function altProfileBuildGrid() {
+  const grid = document.getElementById('alt-profile-grid');
+  grid.innerHTML = '';
+  altProfileCharts = altProfileFlights.map((f) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'alt-profile-chart';
+
+    const title = document.createElement('div');
+    title.className = 'alt-profile-chart-title';
+    const mins = Math.round(f.duration_s / 60);
+    title.textContent = `Flight ${f.index + 1} (${f.start.slice(11)}–${f.end.slice(11)}, ${mins} min)`;
+
+    const canvasId = `alt-profile-canvas-${f.index}`;
+    const tooltipId = `alt-profile-tooltip-${f.index}`;
+    const canvasWrap = document.createElement('div');
+    canvasWrap.className = 'alt-profile-canvas-wrap';
+    canvasWrap.innerHTML = `<canvas id="${canvasId}"></canvas><div class="plot-tooltip" id="${tooltipId}"></div>`;
+
+    const status = document.createElement('div');
+    status.className = 'alt-profile-chart-status';
+
+    wrap.appendChild(title);
+    wrap.appendChild(canvasWrap);
+    wrap.appendChild(status);
+    grid.appendChild(wrap);
+
+    const controller = createProfileController(canvasId, tooltipId);
+    controller.setEmptyMessage('Pick a variable');
+    return { flight: f, controller, statusEl: status };
+  });
 }
 
 // Only merged-sensor columns make sense here (altitude vs. itself, or
@@ -1361,18 +1399,21 @@ function altProfileInstrumentChange() {
       select.appendChild(opt);
     });
   }
-  altProfileRender();
+  altProfileRenderAll();
 }
 
-async function altProfileRender() {
-  const flightSelect = document.getElementById('alt-profile-flight-select');
-  const varSelect = document.getElementById('alt-profile-variable-select');
+// Fills every flight's chart for the chosen variable - one request per
+// flight, in parallel, since each is an independent join+binning on the
+// server (see /altitude_profile).
+async function altProfileRenderAll() {
+  const column = document.getElementById('alt-profile-variable-select').value;
   const statusEl = document.getElementById('alt-profile-status');
-  const flightIndex = flightSelect.value;
-  const column = varSelect.value;
 
-  if (flightIndex === '' || !column) {
-    altProfileChart.setEmptyMessage('Pick a flight and a variable');
+  if (!column) {
+    altProfileCharts.forEach((c) => {
+      c.controller.setEmptyMessage('Pick a variable');
+      c.statusEl.textContent = '';
+    });
     statusEl.textContent = '';
     return;
   }
@@ -1380,30 +1421,33 @@ async function altProfileRender() {
   statusEl.textContent = 'Loading...';
   statusEl.style.color = 'var(--text-dim)';
   try {
-    const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/altitude_profile` +
-      `?flight_index=${encodeURIComponent(flightIndex)}&column=${encodeURIComponent(column)}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    if (!data.ok) {
-      statusEl.textContent = data.error;
-      statusEl.style.color = 'var(--err)';
-      altProfileChart.setEmptyMessage('Could not load this selection.');
-      return;
-    }
+    await Promise.all(altProfileCharts.map(async (c) => {
+      const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/altitude_profile` +
+        `?flight_index=${encodeURIComponent(c.flight.index)}&column=${encodeURIComponent(column)}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!data.ok) {
+        c.controller.setEmptyMessage('Could not load this selection.');
+        c.statusEl.textContent = data.error;
+        c.statusEl.style.color = 'var(--err)';
+        return;
+      }
 
-    altProfileChart.setData({
-      bins: data.bins,
-      binSize: data.bin_size,
-      xLabel: column,
-      yLabel: 'altitude_agl_m',
-      decimals: 2,
-    });
+      c.controller.setData({
+        bins: data.bins,
+        binSize: data.bin_size,
+        xLabel: column,
+        yLabel: 'altitude_agl_m',
+        decimals: 2,
+      });
 
-    let msg = `${data.n} point${data.n === 1 ? '' : 's'} in ${data.bins.length} ${data.bin_size}m bin${data.bins.length === 1 ? '' : 's'}`;
-    if (data.dropped) msg += ` (${data.dropped} dropped - no sensor reading within ${data.max_gap_seconds}s)`;
-    if (data.r !== null && data.r !== undefined) msg += ` · r = ${data.r.toFixed(3)}`;
-    statusEl.textContent = msg + '.';
-    statusEl.style.color = 'var(--text-dim)';
+      let msg = `${data.n} pt${data.n === 1 ? '' : 's'}, ${data.bins.length} bin${data.bins.length === 1 ? '' : 's'}`;
+      if (data.dropped) msg += `, ${data.dropped} dropped`;
+      if (data.r !== null && data.r !== undefined) msg += ` · r=${data.r.toFixed(2)}`;
+      c.statusEl.textContent = msg;
+      c.statusEl.style.color = 'var(--text-dim)';
+    }));
+    statusEl.textContent = '';
   } catch (e) {
     statusEl.textContent = 'Could not reach the local app server.';
     statusEl.style.color = 'var(--err)';

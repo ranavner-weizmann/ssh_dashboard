@@ -927,12 +927,30 @@ function drawProfileLine(canvas, bins, xLabel, yLabel, decimals, hoverBin) {
   ctx.fillStyle = getCssVar('--text-dim');
   ctx.font = '11px ' + getCssVar('--mono');
   ctx.textBaseline = 'alphabetic';
+  const minLabel = minX.toFixed(decimals ?? 1);
+  const maxLabel = maxX.toFixed(decimals ?? 1);
+  const centerLabel = `${xLabel} (mean ± std) →`;
   ctx.textAlign = 'left';
-  ctx.fillText(minX.toFixed(decimals ?? 1), PLOT_PADDING.left, height - 6);
+  const minLabelW = ctx.measureText(minLabel).width;
+  const maxLabelW = ctx.measureText(maxLabel).width;
+  const centerLabelW = ctx.measureText(centerLabel).width;
+
+  ctx.fillText(minLabel, PLOT_PADDING.left, height - 6);
   ctx.textAlign = 'right';
-  ctx.fillText(maxX.toFixed(decimals ?? 1), width - PLOT_PADDING.right, height - 6);
-  ctx.textAlign = 'center';
-  ctx.fillText(`${xLabel} (mean ± std) →`, PLOT_PADDING.left + plotW / 2, height - 6);
+  ctx.fillText(maxLabel, width - PLOT_PADDING.right, height - 6);
+
+  // The narrow small-multiple charts this feeds (one per flight, several
+  // per row - see the altitude-profile panel) don't have room for all
+  // three bottom labels at once - skip the center one rather than let it
+  // overlap min/max, since the variable is already named in the picker
+  // above every chart on this page.
+  const centerX = PLOT_PADDING.left + plotW / 2;
+  const gap = 8;
+  if (centerX - centerLabelW / 2 > PLOT_PADDING.left + minLabelW + gap &&
+      centerX + centerLabelW / 2 < width - PLOT_PADDING.right - maxLabelW - gap) {
+    ctx.textAlign = 'center';
+    ctx.fillText(centerLabel, centerX, height - 6);
+  }
 
   ctx.save();
   ctx.translate(12, PLOT_PADDING.top + plotH / 2);
