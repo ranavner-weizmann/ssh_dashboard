@@ -490,6 +490,29 @@
     <div class="hint">Scroll to zoom, drag to pan, double-click to reset.</div>
   </div>
 
+  <div class="panel" id="altitude-profile-panel" style="display:none;">
+    <div class="panel-header">
+      <label>altitude profile</label>
+    </div>
+    <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Pick a flight and a sensor variable to plot it against altitude for just that flight - each point pairs a drone reading with the nearest sensor reading within 40s; farther than that, it's dropped rather than shown as a stale match.</div>
+    <div class="plot-toolbar">
+      <select id="alt-profile-flight-select" class="select-input" onchange="altProfileRender()">
+        <option value="">Flight...</option>
+      </select>
+      <select id="alt-profile-instrument-select" class="select-input" onchange="altProfileInstrumentChange()" style="display:none;">
+        <option value="">Instrument...</option>
+      </select>
+      <select id="alt-profile-variable-select" class="select-input" onchange="altProfileRender()">
+        <option value="">Variable...</option>
+      </select>
+    </div>
+    <div class="explore-plot-canvas-wrap">
+      <canvas id="alt-profile-canvas" class="explore-plot-canvas"></canvas>
+      <div class="plot-tooltip" id="alt-profile-tooltip"></div>
+    </div>
+    <div class="hint" id="alt-profile-status"></div>
+  </div>
+
   <div class="panel" id="explore-panel" style="display:none;">
     <div class="panel-header">
       <label>explore</label>
@@ -949,6 +972,7 @@ async function viewOfflineDay(session, date) {
     oflRenderAddVariableSelect();
     oflPlot.setEmptyMessage('Pick a numeric column to plot');
     oflRenderExplorePanel();
+    altProfileLoadFlights();
     statusEl.textContent = '';
 
     plotPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1225,6 +1249,7 @@ function oflClearPlot() {
 
 function oflClearPlotPanel() {
   document.getElementById('merged-plot-panel').style.display = 'none';
+  document.getElementById('altitude-profile-panel').style.display = 'none';
   document.getElementById('explore-panel').style.display = 'none';
   document.getElementById('assistant-panel').style.display = 'none';
   oflClearAssistantChat();
@@ -1233,6 +1258,156 @@ function oflClearPlotPanel() {
   oflState.availableVariables = [];
   oflState.selectedInstrument = null;
   oflClearPlot();
+  altProfileFlights = [];
+  altProfileScatter.setEmptyMessage('Pick a flight and a variable');
+}
+
+// ---------- Altitude profile: one flight's instrument readings vs. altitude ----------
+// Flights are detected server-side from a date's merged drone telemetry
+// (see _detect_flights in app.py) rather than from file boundaries, since
+// one recorded telemetry file can hold more than one takeoff/landing.
+// Each plotted point pairs one drone altitude_agl_m reading with the
+// nearest sensor reading for the chosen column (see _nearest_within
+// server-side) - dropped instead of paired once the nearest sensor
+// reading is more than 40s away, since the sensor and drone files run on
+// independent timebases that can go quiet for many minutes between runs.
+
+const altProfileScatter = createScatterController('alt-profile-canvas', 'alt-profile-tooltip');
+let altProfileFlights = [];
+
+async function altProfileLoadFlights() {
+  const panel = document.getElementById('altitude-profile-panel');
+  const flightSelect = document.getElementById('alt-profile-flight-select');
+  altProfileFlights = [];
+  panel.style.display = 'none';
+
+  try {
+    const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/flights`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok || !data.flights.length) return; // no merged drone data yet, or nothing detected - stays hidden
+
+    altProfileFlights = data.flights;
+    flightSelect.innerHTML = '<option value="">Flight...</option>';
+    data.flights.forEach((f) => {
+      const opt = document.createElement('option');
+      opt.value = f.index;
+      const mins = Math.round(f.duration_s / 60);
+      opt.textContent = `Flight ${f.index + 1} (${f.start.slice(11)}–${f.end.slice(11)}, ${mins} min)`;
+      flightSelect.appendChild(opt);
+    });
+    altProfilePopulateVariableSelect();
+    altProfileScatter.setEmptyMessage('Pick a flight and a variable');
+    document.getElementById('alt-profile-status').textContent = '';
+    panel.style.display = 'block';
+  } catch (e) {
+    // Leave the panel hidden - same "nothing to show" treatment as other
+    // fetch failures on this page when there's simply nothing there yet.
+  }
+}
+
+// Only merged-sensor columns make sense here (altitude vs. itself, or
+// vs. another drone field, isn't the point of this panel) - reuses
+// oflInstrumentGroupOf so instruments group the same way the main plot's
+// "add a variable" picker does.
+function altProfilePopulateVariableSelect() {
+  const instrumentSelect = document.getElementById('alt-profile-instrument-select');
+  const select = document.getElementById('alt-profile-variable-select');
+  const sensorVars = oflState.availableVariables.filter((v) => v.source === 'merged');
+
+  const groups = new Map();
+  sensorVars.forEach((v) => {
+    const { key, label } = oflInstrumentGroupOf(v);
+    if (!groups.has(key)) groups.set(key, { label, variables: [] });
+    groups.get(key).variables.push(v);
+  });
+
+  if (groups.size <= 1) {
+    instrumentSelect.style.display = 'none';
+    select.innerHTML = '<option value="">Variable...</option>';
+    sensorVars.forEach((v) => {
+      const opt = document.createElement('option');
+      opt.value = v.column;
+      opt.textContent = isMergedDataFile(v.file) ? columnFieldLabelOf(v.column) : v.column;
+      select.appendChild(opt);
+    });
+    return;
+  }
+
+  instrumentSelect.style.display = '';
+  const groupKeys = [...groups.keys()].sort((a, b) => groups.get(a).label.localeCompare(groups.get(b).label));
+  instrumentSelect.innerHTML = '<option value="">Instrument...</option>';
+  groupKeys.forEach((key) => {
+    const g = groups.get(key);
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = `${g.label} (${g.variables.length})`;
+    instrumentSelect.appendChild(opt);
+  });
+  select.innerHTML = '<option value="">Variable...</option>';
+}
+
+function altProfileInstrumentChange() {
+  const instrumentSelect = document.getElementById('alt-profile-instrument-select');
+  const select = document.getElementById('alt-profile-variable-select');
+  const sensorVars = oflState.availableVariables.filter((v) => v.source === 'merged');
+  const key = instrumentSelect.value;
+  select.innerHTML = '<option value="">Variable...</option>';
+  if (key) {
+    sensorVars.filter((v) => oflInstrumentGroupOf(v).key === key).forEach((v) => {
+      const opt = document.createElement('option');
+      opt.value = v.column;
+      opt.textContent = isMergedDataFile(v.file) ? columnFieldLabelOf(v.column) : v.column;
+      select.appendChild(opt);
+    });
+  }
+  altProfileRender();
+}
+
+async function altProfileRender() {
+  const flightSelect = document.getElementById('alt-profile-flight-select');
+  const varSelect = document.getElementById('alt-profile-variable-select');
+  const statusEl = document.getElementById('alt-profile-status');
+  const flightIndex = flightSelect.value;
+  const column = varSelect.value;
+
+  if (flightIndex === '' || !column) {
+    altProfileScatter.setEmptyMessage('Pick a flight and a variable');
+    statusEl.textContent = '';
+    return;
+  }
+
+  statusEl.textContent = 'Loading...';
+  statusEl.style.color = 'var(--text-dim)';
+  try {
+    const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/altitude_profile` +
+      `?flight_index=${encodeURIComponent(flightIndex)}&column=${encodeURIComponent(column)}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--err)';
+      altProfileScatter.setEmptyMessage('Could not load this selection.');
+      return;
+    }
+
+    altProfileScatter.setData({
+      points: data.points,
+      regression: data.regression,
+      xLabel: column,
+      yLabel: 'altitude_agl_m',
+      decimals: 2,
+    });
+
+    let msg = `${data.n} point${data.n === 1 ? '' : 's'} plotted`;
+    if (data.dropped) msg += ` (${data.dropped} dropped - no sensor reading within ${data.max_gap_seconds}s)`;
+    if (data.r !== null && data.r !== undefined) msg += ` · r = ${data.r.toFixed(3)}`;
+    statusEl.textContent = msg + '.';
+    statusEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
+  }
 }
 
 // ---------- Explore: statistics / correlation / distribution / relationship ----------

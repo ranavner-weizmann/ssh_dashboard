@@ -25,6 +25,7 @@ Can also be packaged as a double-clickable macOS .app with PyInstaller;
 see build_app.sh / app.spec in the same project for the build steps.
 """
 
+import bisect
 import csv
 import io
 import json
@@ -41,7 +42,7 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import anthropic
 import paramiko
@@ -1231,6 +1232,275 @@ def offline_merged_scatter(name, date):
         "points": points, "n": n, "r": r,
         "r_squared": (r * r) if r is not None else None,
         "regression": regression,
+    })
+
+
+# ---------- Offline: per-flight altitude profiles ----------
+# One flight's instrument readings plotted against the drone's own
+# altitude_agl_m, rather than against time. Two problems this solves that
+# the plot/scatter endpoints above don't: (1) a day's merged drone
+# telemetry is just every flight concatenated (see _merge_drone_day) with
+# no per-flight boundaries recorded, so where one flight ends and the
+# next begins has to be re-derived from the altitude trace itself; (2) a
+# flight's altitude readings and the day's sensor readings are two files
+# on independent timebases (sensors sample roughly every second in normal
+# operation but the merged sensor CSV can have multi-minute gaps between
+# runs - see _merge_day), so they need a nearest-timestamp join rather
+# than the same-row pairing /scatter above does within one file.
+
+FLIGHT_TAKEOFF_ALTITUDE_M = 2.0
+FLIGHT_LANDING_ALTITUDE_M = 0.5
+FLIGHT_LEAD_IN_SECONDS = 120
+FLIGHT_TRAIL_OUT_SECONDS = 120
+ALTITUDE_JOIN_MAX_GAP_SECONDS = 40
+
+
+def _parse_csv_timestamp(raw):
+    try:
+        return datetime.strptime((raw or "").strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _read_drone_altitude_series(session_name, date):
+    """
+    (datetime, altitude_agl_m) pairs for one date's merged drone
+    telemetry, sorted by time. Reads the merged file rather than the raw
+    per-flight files because flight detection needs one continuous,
+    chronologically-ordered stream across the whole day - _merge_drone_day
+    already did that concatenation once, no reason to redo it here.
+
+    Returns (None, error_response) if this date's drone flights haven't
+    been merged yet (see _merge_drone_day) or have no altitude_agl_m
+    column.
+    """
+    merged_dir = _drone_day_merged_dir_if_present(session_name, date)
+    if not merged_dir:
+        return None, (jsonify({"ok": False, "error": "This date's drone flights haven't been merged yet - use \"Merge drone\" first."}), 400)
+
+    csv_path = os.path.join(merged_dir, f"telemetry_{date}_merged.csv")
+    try:
+        with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            if "altitude_agl_m" not in fieldnames:
+                return None, (jsonify({"ok": False, "error": "No altitude_agl_m column in this date's drone telemetry."}), 400)
+            time_column = fieldnames[0]
+            rows = []
+            for row in reader:
+                ts = _parse_csv_timestamp(row.get(time_column))
+                alt = _parse_numeric(row.get("altitude_agl_m"))
+                if ts is not None and alt is not None:
+                    rows.append((ts, alt))
+    except Exception as e:
+        return None, (jsonify({"ok": False, "error": f"Could not read this date's drone telemetry: {e}"}), 500)
+
+    rows.sort(key=lambda r: r[0])
+    return rows, None
+
+
+def _detect_flights(rows):
+    """
+    Splits one day's continuous (timestamp, altitude_agl_m) stream into
+    individual flights, using altitude alone rather than file boundaries -
+    a day's merged drone telemetry is a plain concatenation of whatever
+    files existed (see _merge_drone_day), and one recorded file can hold
+    more than one takeoff/landing.
+
+    A flight starts once altitude climbs to FLIGHT_TAKEOFF_ALTITUDE_M,
+    backdated by FLIGHT_LEAD_IN_SECONDS so some ground time right before
+    takeoff is included. It ends FLIGHT_TRAIL_OUT_SECONDS after altitude
+    drops to and *stays* at or below FLIGHT_LANDING_ALTITUDE_M - climbing
+    back above that landing threshold before the wait is up resets the
+    timer, so a brief mid-flight dip doesn't cut the flight short. No
+    separate noise band is applied on top of these two thresholds: ground
+    readings observed in this project's real telemetry sit dead flat
+    (e.g. -0.01 m) with no jitter, so a plain crossing is enough.
+
+    Returns [{"start": datetime, "end": datetime}, ...] in time order.
+    """
+    if not rows:
+        return []
+
+    flights = []
+    state = "ground"
+    takeoff_crossed_at = None
+    landing_crossed_at = None
+    data_start = rows[0][0]
+    data_end = rows[-1][0]
+
+    for ts, alt in rows:
+        if state == "ground":
+            if alt >= FLIGHT_TAKEOFF_ALTITUDE_M:
+                state = "airborne"
+                takeoff_crossed_at = ts
+                landing_crossed_at = None
+        else:
+            if alt <= FLIGHT_LANDING_ALTITUDE_M:
+                if landing_crossed_at is None:
+                    landing_crossed_at = ts
+                elif (ts - landing_crossed_at).total_seconds() >= FLIGHT_TRAIL_OUT_SECONDS:
+                    start = max(data_start, takeoff_crossed_at - timedelta(seconds=FLIGHT_LEAD_IN_SECONDS))
+                    end = min(data_end, landing_crossed_at + timedelta(seconds=FLIGHT_TRAIL_OUT_SECONDS))
+                    flights.append({"start": start, "end": end})
+                    state = "ground"
+                    takeoff_crossed_at = None
+                    landing_crossed_at = None
+            else:
+                landing_crossed_at = None
+
+    # Still airborne when the data runs out (e.g. logging stopped before
+    # a landing crossing was ever seen) - show it anyway rather than
+    # silently dropping a flight that's simply missing its tail end.
+    if state == "airborne" and takeoff_crossed_at is not None:
+        start = max(data_start, takeoff_crossed_at - timedelta(seconds=FLIGHT_LEAD_IN_SECONDS))
+        flights.append({"start": start, "end": data_end})
+
+    return flights
+
+
+def _nearest_within(sorted_times, sorted_values, query_time, max_gap_seconds):
+    """
+    Nearest-timestamp lookup into a (sorted_times, sorted_values) series -
+    the join between one drone reading and the sensor data at
+    /altitude_profile below. Returns (value, gap_seconds) for the closest
+    reading, or (None, None) if nothing is within max_gap_seconds - a real
+    sensor gap (e.g. between two runs, see _merge_day) that should be
+    dropped rather than paired with a stale value that would otherwise
+    look like real, unchanging data.
+    """
+    if not sorted_times:
+        return None, None
+    idx = bisect.bisect_left(sorted_times, query_time)
+    candidates = [i for i in (idx - 1, idx) if 0 <= i < len(sorted_times)]
+    best_idx, best_gap = None, None
+    for i in candidates:
+        gap = abs((sorted_times[i] - query_time).total_seconds())
+        if best_gap is None or gap < best_gap:
+            best_idx, best_gap = i, gap
+    if best_idx is not None and best_gap <= max_gap_seconds:
+        return sorted_values[best_idx], best_gap
+    return None, None
+
+
+@app.route("/offline/session/<name>/merged/<date>/flights")
+def offline_merged_flights(name, date):
+    """
+    Auto-detected flights for one date - see _detect_flights. Powers the
+    altitude-profile picker's flight dropdown in offline.html.
+    """
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+
+    rows, err = _read_drone_altitude_series(name, date)
+    if err:
+        return err
+
+    flights = _detect_flights(rows)
+    return jsonify({
+        "ok": True,
+        "flights": [
+            {
+                "index": i,
+                "start": f["start"].strftime("%Y-%m-%d %H:%M:%S"),
+                "end": f["end"].strftime("%Y-%m-%d %H:%M:%S"),
+                "duration_s": (f["end"] - f["start"]).total_seconds(),
+            }
+            for i, f in enumerate(flights)
+        ],
+    })
+
+
+@app.route("/offline/session/<name>/merged/<date>/altitude_profile")
+def offline_merged_altitude_profile(name, date):
+    """
+    Pairs one flight's altitude_agl_m readings with one sensor column's
+    readings by nearest timestamp (see _nearest_within), for an altitude-
+    vs-instrument scatter plot scoped to a single flight. flight_index
+    refers to _detect_flights' output for this date - re-detected here
+    rather than passed in as a time range, so the frontend only ever needs
+    what /flights already gave it.
+    """
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+    column = (request.args.get("column") or "").strip()
+    if not column:
+        return jsonify({"ok": False, "error": "A column is required."}), 400
+    try:
+        flight_index = int(request.args.get("flight_index", ""))
+    except ValueError:
+        return jsonify({"ok": False, "error": "Invalid flight_index."}), 400
+
+    drone_rows, err = _read_drone_altitude_series(name, date)
+    if err:
+        return err
+    flights = _detect_flights(drone_rows)
+    if flight_index < 0 or flight_index >= len(flights):
+        return jsonify({"ok": False, "error": "That flight was not found for this date."}), 400
+    flight = flights[flight_index]
+
+    sensor_path = os.path.join(_session_merged_dir(name, date), f"merged_data_{date}_merged.csv")
+    if not os.path.isfile(sensor_path):
+        return jsonify({"ok": False, "error": "This date's sensor runs haven't been merged yet - use \"Merge\" first."}), 400
+    try:
+        with open(sensor_path, "r", encoding="utf-8", errors="replace") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            if column not in fieldnames:
+                return jsonify({"ok": False, "error": f'Column "{column}" not found in this date\'s sensor data.'}), 400
+            time_column = fieldnames[0]
+            sensor_series = []
+            for row in reader:
+                ts = _parse_csv_timestamp(row.get(time_column))
+                val = _parse_numeric(row.get(column))
+                if ts is not None and val is not None:
+                    sensor_series.append((ts, val))
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not read this date's sensor data: {e}"}), 500
+
+    sensor_series.sort(key=lambda r: r[0])
+    sensor_times = [r[0] for r in sensor_series]
+    sensor_values = [r[1] for r in sensor_series]
+
+    points = []
+    dropped = 0
+    for ts, alt in drone_rows:
+        if ts < flight["start"] or ts > flight["end"]:
+            continue
+        value, gap_s = _nearest_within(sensor_times, sensor_values, ts, ALTITUDE_JOIN_MAX_GAP_SECONDS)
+        if value is None:
+            dropped += 1
+            continue
+        points.append({"x": value, "y": alt, "gap_s": round(gap_s, 1)})
+
+    xs = [p["x"] for p in points]
+    ys = [p["y"] for p in points]
+    r, n = _pearson(xs, ys)
+    regression = None
+    if n >= 2:
+        mean_x = sum(xs) / n
+        mean_y = sum(ys) / n
+        var_x = sum((x - mean_x) ** 2 for x in xs)
+        if var_x > 0:
+            slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / var_x
+            regression = {"slope": slope, "intercept": mean_y - slope * mean_x}
+
+    return jsonify({
+        "ok": True,
+        "column": column,
+        "flight": {
+            "index": flight_index,
+            "start": flight["start"].strftime("%Y-%m-%d %H:%M:%S"),
+            "end": flight["end"].strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        "points": points, "n": n, "dropped": dropped, "r": r,
+        "r_squared": (r * r) if r is not None else None,
+        "regression": regression,
+        "max_gap_seconds": ALTITUDE_JOIN_MAX_GAP_SECONDS,
     })
 
 
