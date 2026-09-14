@@ -503,15 +503,16 @@
     <div class="panel-header">
       <label>altitude profile</label>
     </div>
-    <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Pick a sensor variable to see its vertical profile for every flight that day, one chart each - each drone reading is paired with the nearest sensor reading within 40s (farther than that, it's dropped rather than shown as a stale match), then grouped into 5m altitude bins and plotted as a mean line with a shaded ±1 std band.</div>
+    <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Add one or more sensor variables to see their vertical profiles overlaid, for every flight that day, one chart each - each drone reading is paired with the nearest sensor reading within 40s (farther than that, it's dropped rather than shown as a stale match), then grouped into 5m altitude bins and plotted as a mean line with a shaded ±1 std band. With several variables on one chart, each is scaled to its own mean±std range (real units in the tooltip), same as the plot above.</div>
     <div class="plot-toolbar">
       <select id="alt-profile-instrument-select" class="select-input" onchange="altProfileInstrumentChange()" style="display:none;">
         <option value="">Instrument...</option>
       </select>
-      <select id="alt-profile-variable-select" class="select-input" onchange="altProfileRenderAll()">
-        <option value="">Variable...</option>
+      <select id="alt-profile-variable-select" class="select-input" onchange="altProfileAddColumn()">
+        <option value="">Add a variable...</option>
       </select>
     </div>
+    <div class="dv-legend" id="alt-profile-legend"></div>
     <div class="alt-profile-grid" id="alt-profile-grid"></div>
     <div class="hint" id="alt-profile-status"></div>
   </div>
@@ -1263,7 +1264,10 @@ function oflClearPlotPanel() {
   oflClearPlot();
   altProfileFlights = [];
   altProfileCharts = [];
+  altProfileActiveColumns = [];
+  altProfileSeriesColors = {};
   document.getElementById('alt-profile-grid').innerHTML = '';
+  document.getElementById('alt-profile-legend').innerHTML = '';
 }
 
 // ---------- Altitude profile: one chart per flight, instrument vs. altitude ----------
@@ -1283,12 +1287,17 @@ function oflClearPlotPanel() {
 
 let altProfileFlights = [];
 let altProfileCharts = []; // [{flight, controller, statusEl}], one per flight, built once per date
+let altProfileActiveColumns = []; // [column, ...], in add order - merged-source columns only
+let altProfileSeriesColors = {}; // column -> color, same palette as the plot above
 
 async function altProfileLoadFlights() {
   const panel = document.getElementById('altitude-profile-panel');
   altProfileFlights = [];
   altProfileCharts = [];
+  altProfileActiveColumns = [];
+  altProfileSeriesColors = {};
   document.getElementById('alt-profile-grid').innerHTML = '';
+  document.getElementById('alt-profile-legend').innerHTML = '';
   panel.style.display = 'none';
 
   try {
@@ -1339,19 +1348,27 @@ function altProfileBuildGrid() {
     grid.appendChild(wrap);
 
     const controller = createProfileController(canvasId, tooltipId);
-    controller.setEmptyMessage('Pick a variable');
+    controller.setEmptyMessage('Add a variable');
     return { flight: f, controller, statusEl: status };
   });
+}
+
+function altProfileNextAvailableColor() {
+  const used = new Set(Object.values(altProfileSeriesColors));
+  return OFL_SERIES_COLORS.find((c) => !used.has(c)) || null;
 }
 
 // Only merged-sensor columns make sense here (altitude vs. itself, or
 // vs. another drone field, isn't the point of this panel) - reuses
 // oflInstrumentGroupOf so instruments group the same way the main plot's
-// "add a variable" picker does.
+// "add a variable" picker does. Already-active columns are excluded,
+// same as the main plot's picker.
 function altProfilePopulateVariableSelect() {
   const instrumentSelect = document.getElementById('alt-profile-instrument-select');
   const select = document.getElementById('alt-profile-variable-select');
-  const sensorVars = oflState.availableVariables.filter((v) => v.source === 'merged');
+  const sensorVars = oflState.availableVariables.filter((v) =>
+    v.source === 'merged' && !altProfileActiveColumns.includes(v.column));
+  const atCap = altProfileActiveColumns.length >= OFL_SERIES_COLORS.length;
 
   const groups = new Map();
   sensorVars.forEach((v) => {
@@ -1362,17 +1379,19 @@ function altProfilePopulateVariableSelect() {
 
   if (groups.size <= 1) {
     instrumentSelect.style.display = 'none';
-    select.innerHTML = '<option value="">Variable...</option>';
+    select.innerHTML = '<option value="">Add a variable...</option>';
     sensorVars.forEach((v) => {
       const opt = document.createElement('option');
       opt.value = v.column;
       opt.textContent = isMergedDataFile(v.file) ? columnFieldLabelOf(v.column) : v.column;
       select.appendChild(opt);
     });
+    select.disabled = select.options.length <= 1 || atCap;
     return;
   }
 
   instrumentSelect.style.display = '';
+  instrumentSelect.disabled = atCap;
   const groupKeys = [...groups.keys()].sort((a, b) => groups.get(a).label.localeCompare(groups.get(b).label));
   instrumentSelect.innerHTML = '<option value="">Instrument...</option>';
   groupKeys.forEach((key) => {
@@ -1382,15 +1401,18 @@ function altProfilePopulateVariableSelect() {
     opt.textContent = `${g.label} (${g.variables.length})`;
     instrumentSelect.appendChild(opt);
   });
-  select.innerHTML = '<option value="">Variable...</option>';
+  select.innerHTML = '<option value="">Add a variable...</option>';
+  select.disabled = true;
 }
 
 function altProfileInstrumentChange() {
   const instrumentSelect = document.getElementById('alt-profile-instrument-select');
   const select = document.getElementById('alt-profile-variable-select');
-  const sensorVars = oflState.availableVariables.filter((v) => v.source === 'merged');
+  const sensorVars = oflState.availableVariables.filter((v) =>
+    v.source === 'merged' && !altProfileActiveColumns.includes(v.column));
+  const atCap = altProfileActiveColumns.length >= OFL_SERIES_COLORS.length;
   const key = instrumentSelect.value;
-  select.innerHTML = '<option value="">Variable...</option>';
+  select.innerHTML = '<option value="">Add a variable...</option>';
   if (key) {
     sensorVars.filter((v) => oflInstrumentGroupOf(v).key === key).forEach((v) => {
       const opt = document.createElement('option');
@@ -1399,19 +1421,74 @@ function altProfileInstrumentChange() {
       select.appendChild(opt);
     });
   }
+  select.disabled = select.options.length <= 1 || atCap;
+}
+
+function altProfileAddColumn() {
+  const select = document.getElementById('alt-profile-variable-select');
+  const column = select.value;
+  select.value = '';
+  if (!column || altProfileActiveColumns.includes(column)) return;
+
+  const color = altProfileNextAvailableColor();
+  if (!color) {
+    document.getElementById('alt-profile-status').textContent = `Up to ${OFL_SERIES_COLORS.length} variables at once.`;
+    document.getElementById('alt-profile-status').style.color = 'var(--err)';
+    return;
+  }
+
+  altProfileActiveColumns.push(column);
+  altProfileSeriesColors[column] = color;
+  altProfilePopulateVariableSelect();
+  altProfileRenderLegend();
   altProfileRenderAll();
 }
 
-// Fills every flight's chart for the chosen variable - one request per
-// flight, in parallel, since each is an independent join+binning on the
-// server (see /altitude_profile).
+function altProfileRemoveColumn(column) {
+  altProfileActiveColumns = altProfileActiveColumns.filter((c) => c !== column);
+  delete altProfileSeriesColors[column];
+  altProfilePopulateVariableSelect();
+  altProfileRenderLegend();
+  altProfileRenderAll();
+}
+
+function altProfileRenderLegend() {
+  const legend = document.getElementById('alt-profile-legend');
+  legend.innerHTML = '';
+  altProfileActiveColumns.forEach((column) => {
+    const chip = document.createElement('div');
+    chip.className = 'dv-legend-chip';
+
+    const dot = document.createElement('span');
+    dot.className = 'dv-legend-dot';
+    dot.style.background = altProfileSeriesColors[column];
+
+    const nameEl = document.createElement('span');
+    nameEl.textContent = column;
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'dv-legend-remove';
+    removeBtn.textContent = '×';
+    removeBtn.title = `Remove ${column}`;
+    removeBtn.onclick = () => altProfileRemoveColumn(column);
+
+    chip.appendChild(dot);
+    chip.appendChild(nameEl);
+    chip.appendChild(removeBtn);
+    legend.appendChild(chip);
+  });
+}
+
+// Fills every flight's chart for the active variables, overlaid - one
+// request per flight (each carrying every active column via columns=,
+// see /altitude_profile), in parallel, since each flight's join+binning
+// is independent server-side.
 async function altProfileRenderAll() {
-  const column = document.getElementById('alt-profile-variable-select').value;
   const statusEl = document.getElementById('alt-profile-status');
 
-  if (!column) {
+  if (!altProfileActiveColumns.length) {
     altProfileCharts.forEach((c) => {
-      c.controller.setEmptyMessage('Pick a variable');
+      c.controller.setEmptyMessage('Add a variable');
       c.statusEl.textContent = '';
     });
     statusEl.textContent = '';
@@ -1423,7 +1500,7 @@ async function altProfileRenderAll() {
   try {
     await Promise.all(altProfileCharts.map(async (c) => {
       const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/altitude_profile` +
-        `?flight_index=${encodeURIComponent(c.flight.index)}&column=${encodeURIComponent(column)}`;
+        `?flight_index=${encodeURIComponent(c.flight.index)}&columns=${encodeURIComponent(altProfileActiveColumns.join(','))}`;
       const res = await fetch(url);
       const data = await res.json();
       if (!data.ok) {
@@ -1434,17 +1511,18 @@ async function altProfileRenderAll() {
       }
 
       c.controller.setData({
-        bins: data.bins,
-        binSize: data.bin_size,
-        xLabel: column,
+        series: data.series.map((s) => ({ ...s, color: altProfileSeriesColors[s.column] })),
         yLabel: 'altitude_agl_m',
         decimals: 2,
       });
 
-      let msg = `${data.n} pt${data.n === 1 ? '' : 's'}, ${data.bins.length} bin${data.bins.length === 1 ? '' : 's'}`;
-      if (data.dropped) msg += `, ${data.dropped} dropped`;
-      if (data.r !== null && data.r !== undefined) msg += ` · r=${data.r.toFixed(2)}`;
-      c.statusEl.textContent = msg;
+      const parts = data.series.map((s) => {
+        let part = `${s.column}: ${s.n} pt${s.n === 1 ? '' : 's'}`;
+        if (s.dropped) part += ` (${s.dropped} dropped)`;
+        if (s.r !== null && s.r !== undefined) part += ` r=${s.r.toFixed(2)}`;
+        return part;
+      });
+      c.statusEl.textContent = parts.join(' · ');
       c.statusEl.style.color = 'var(--text-dim)';
     }));
     statusEl.textContent = '';

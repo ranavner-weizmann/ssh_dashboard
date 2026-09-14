@@ -1449,21 +1449,25 @@ def offline_merged_flights(name, date):
 @app.route("/offline/session/<name>/merged/<date>/altitude_profile")
 def offline_merged_altitude_profile(name, date):
     """
-    Pairs one flight's altitude_agl_m readings with one sensor column's
-    readings by nearest timestamp (see _nearest_within), then summarizes
-    them into altitude bins (see _bin_altitude_profile) for a vertical-
-    profile line (mean ± std by altitude) scoped to a single flight.
-    flight_index refers to _detect_flights' output for this date -
-    re-detected here rather than passed in as a time range, so the
+    Pairs one flight's altitude_agl_m readings with one or more sensor
+    columns' readings by nearest timestamp (see _nearest_within), then
+    summarizes each into altitude bins (see _bin_altitude_profile) for a
+    vertical-profile line (mean ± std by altitude) scoped to a single
+    flight - one line per requested column, so several can be overlaid on
+    one chart. columns is comma-separated (same convention as
+    /plot_multi's columns=) and all read from the sensor CSV in one pass,
+    so overlaying several variables doesn't re-read the file once per
+    variable. flight_index refers to _detect_flights' output for this
+    date - re-detected here rather than passed in as a time range, so the
     frontend only ever needs what /flights already gave it.
     """
     if not _valid_session_name(name):
         return jsonify({"ok": False, "error": "Invalid session name."}), 400
     if not re.match(r"^\d{8}$", date):
         return jsonify({"ok": False, "error": "Invalid date."}), 400
-    column = (request.args.get("column") or "").strip()
-    if not column:
-        return jsonify({"ok": False, "error": "A column is required."}), 400
+    columns = [c for c in (request.args.get("columns") or "").split(",") if c]
+    if not columns:
+        return jsonify({"ok": False, "error": "At least one column is required."}), 400
     try:
         flight_index = int(request.args.get("flight_index", ""))
     except ValueError:
@@ -1476,6 +1480,7 @@ def offline_merged_altitude_profile(name, date):
     if flight_index < 0 or flight_index >= len(flights):
         return jsonify({"ok": False, "error": "That flight was not found for this date."}), 400
     flight = flights[flight_index]
+    flight_drone_rows = [(ts, alt) for ts, alt in drone_rows if flight["start"] <= ts <= flight["end"]]
 
     sensor_path = os.path.join(_session_merged_dir(name, date), f"merged_data_{date}_merged.csv")
     if not os.path.isfile(sensor_path):
@@ -1484,49 +1489,55 @@ def offline_merged_altitude_profile(name, date):
         with open(sensor_path, "r", encoding="utf-8", errors="replace") as f:
             reader = csv.DictReader(f)
             fieldnames = reader.fieldnames or []
-            if column not in fieldnames:
-                return jsonify({"ok": False, "error": f'Column "{column}" not found in this date\'s sensor data.'}), 400
+            for column in columns:
+                if column not in fieldnames:
+                    return jsonify({"ok": False, "error": f'Column "{column}" not found in this date\'s sensor data.'}), 400
             time_column = fieldnames[0]
-            sensor_series = []
+            sensor_series = {column: [] for column in columns}
             for row in reader:
                 ts = _parse_csv_timestamp(row.get(time_column))
-                val = _parse_numeric(row.get(column))
-                if ts is not None and val is not None:
-                    sensor_series.append((ts, val))
+                if ts is None:
+                    continue
+                for column in columns:
+                    val = _parse_numeric(row.get(column))
+                    if val is not None:
+                        sensor_series[column].append((ts, val))
     except Exception as e:
         return jsonify({"ok": False, "error": f"Could not read this date's sensor data: {e}"}), 500
 
-    sensor_series.sort(key=lambda r: r[0])
-    sensor_times = [r[0] for r in sensor_series]
-    sensor_values = [r[1] for r in sensor_series]
+    series = []
+    for column in columns:
+        column_series = sorted(sensor_series[column], key=lambda r: r[0])
+        sensor_times = [r[0] for r in column_series]
+        sensor_values = [r[1] for r in column_series]
 
-    points = []
-    dropped = 0
-    for ts, alt in drone_rows:
-        if ts < flight["start"] or ts > flight["end"]:
-            continue
-        value, gap_s = _nearest_within(sensor_times, sensor_values, ts, ALTITUDE_JOIN_MAX_GAP_SECONDS)
-        if value is None:
-            dropped += 1
-            continue
-        points.append({"x": value, "y": alt, "gap_s": round(gap_s, 1)})
+        points = []
+        dropped = 0
+        for ts, alt in flight_drone_rows:
+            value, _gap_s = _nearest_within(sensor_times, sensor_values, ts, ALTITUDE_JOIN_MAX_GAP_SECONDS)
+            if value is None:
+                dropped += 1
+                continue
+            points.append({"x": value, "y": alt})
 
-    xs = [p["x"] for p in points]
-    ys = [p["y"] for p in points]
-    r, n = _pearson(xs, ys)
-    bins = _bin_altitude_profile(points)
+        xs = [p["x"] for p in points]
+        ys = [p["y"] for p in points]
+        r, n = _pearson(xs, ys)
+        series.append({
+            "column": column,
+            "bins": _bin_altitude_profile(points),
+            "n": n, "dropped": dropped, "r": r,
+            "r_squared": (r * r) if r is not None else None,
+        })
 
     return jsonify({
         "ok": True,
-        "column": column,
         "flight": {
             "index": flight_index,
             "start": flight["start"].strftime("%Y-%m-%d %H:%M:%S"),
             "end": flight["end"].strftime("%Y-%m-%d %H:%M:%S"),
         },
-        "bins": bins, "bin_size": ALTITUDE_BIN_SIZE_M,
-        "n": n, "dropped": dropped, "r": r,
-        "r_squared": (r * r) if r is not None else None,
+        "series": series, "bin_size": ALTITUDE_BIN_SIZE_M,
         "max_gap_seconds": ALTITUDE_JOIN_MAX_GAP_SECONDS,
     })
 
