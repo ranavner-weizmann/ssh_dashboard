@@ -829,3 +829,198 @@ function createScatterController(canvasId, tooltipId) {
     draw,
   };
 }
+
+// Vertical-profile plot: one bin per altitude band (see
+// _bin_altitude_profile in app.py), drawn as a mean line running through
+// each bin's (mean, altitude) with a shaded mean±std band behind it -
+// the altitude-profile panel's replacement for a raw per-point scatter,
+// which at ~1000+ points per flight was mostly noise. y is altitude (bin
+// center), x is the instrument variable - same axis convention drawScatter
+// already used for this panel, just summarized per bin instead of
+// per-point.
+function drawProfileLine(canvas, bins, xLabel, yLabel, decimals, hoverBin) {
+  const { ctx, width, height } = getCanvasContext(canvas);
+  ctx.clearRect(0, 0, width, height);
+
+  if (!bins.length) {
+    drawEmptyPlotMessage(ctx, width, height, 'No paired values found');
+    return;
+  }
+
+  const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
+  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+
+  let minX = Math.min(...bins.map((b) => b.mean - b.std)), maxX = Math.max(...bins.map((b) => b.mean + b.std));
+  let minY = Math.min(...bins.map((b) => b.altitude)), maxY = Math.max(...bins.map((b) => b.altitude));
+  if (minX === maxX) { minX -= 1; maxX += 1; } else { const pad = (maxX - minX) * 0.08; minX -= pad; maxX += pad; }
+  if (minY === maxY) { minY -= 1; maxY += 1; } else { const pad = (maxY - minY) * 0.08; minY -= pad; maxY += pad; }
+
+  const xFor = (x) => PLOT_PADDING.left + ((x - minX) / (maxX - minX)) * plotW;
+  const yFor = (y) => PLOT_PADDING.top + plotH - ((y - minY) / (maxY - minY)) * plotH;
+
+  const gridLines = 4;
+  ctx.strokeStyle = getCssVar('--panel-border');
+  ctx.lineWidth = 1;
+  ctx.fillStyle = getCssVar('--text-dim');
+  ctx.font = '11px ' + getCssVar('--mono');
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i <= gridLines; i++) {
+    const y = Math.round(PLOT_PADDING.top + (plotH * i) / gridLines) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(PLOT_PADDING.left, y);
+    ctx.lineTo(width - PLOT_PADDING.right, y);
+    ctx.stroke();
+    const label = minY + ((maxY - minY) * (gridLines - i)) / gridLines;
+    ctx.fillText(label.toFixed(1), PLOT_PADDING.left - 8, y - 0.5);
+  }
+
+  const accent = getCssVar('--accent');
+
+  // Shaded mean±std band - one polygon tracing (mean-std, altitude) up
+  // through every bin, then back down through (mean+std, altitude), so a
+  // single fill covers the whole envelope even where std varies bin to
+  // bin.
+  ctx.beginPath();
+  bins.forEach((b, i) => {
+    const x = xFor(b.mean - b.std), y = yFor(b.altitude);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  for (let i = bins.length - 1; i >= 0; i--) {
+    ctx.lineTo(xFor(bins[i].mean + bins[i].std), yFor(bins[i].altitude));
+  }
+  ctx.closePath();
+  ctx.fillStyle = hexToRgba(accent, 0.15);
+  ctx.fill();
+
+  // Mean line.
+  ctx.beginPath();
+  bins.forEach((b, i) => {
+    const x = xFor(b.mean), y = yFor(b.altitude);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // One dot per bin, on the mean line - hover targets, same idea as
+  // drawScatter's per-point dots but one per bin instead of one per raw
+  // reading.
+  bins.forEach((b) => {
+    ctx.beginPath();
+    ctx.arc(xFor(b.mean), yFor(b.altitude), 3, 0, Math.PI * 2);
+    ctx.fillStyle = accent;
+    ctx.fill();
+  });
+
+  if (hoverBin) {
+    ctx.beginPath();
+    ctx.arc(xFor(hoverBin.mean), yFor(hoverBin.altitude), 5, 0, Math.PI * 2);
+    ctx.fillStyle = getCssVar('--panel');
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(xFor(hoverBin.mean), yFor(hoverBin.altitude), 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = accent;
+    ctx.fill();
+  }
+
+  ctx.fillStyle = getCssVar('--text-dim');
+  ctx.font = '11px ' + getCssVar('--mono');
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+  ctx.fillText(minX.toFixed(decimals ?? 1), PLOT_PADDING.left, height - 6);
+  ctx.textAlign = 'right';
+  ctx.fillText(maxX.toFixed(decimals ?? 1), width - PLOT_PADDING.right, height - 6);
+  ctx.textAlign = 'center';
+  ctx.fillText(`${xLabel} (mean ± std) →`, PLOT_PADDING.left + plotW / 2, height - 6);
+
+  ctx.save();
+  ctx.translate(12, PLOT_PADDING.top + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(`${yLabel} →`, 0, 0);
+  ctx.restore();
+}
+
+function createProfileController(canvasId, tooltipId) {
+  const canvas = document.getElementById(canvasId);
+  const tooltip = document.getElementById(tooltipId);
+
+  let bins = [];
+  let binSize = 1;
+  let xLabel = 'x', yLabel = 'y', decimals = 1;
+  let emptyMessage = 'Pick a flight and a variable';
+  let hoverBin = null;
+
+  function draw() {
+    if (!bins.length) {
+      const { ctx, width, height } = getCanvasContext(canvas);
+      ctx.clearRect(0, 0, width, height);
+      drawEmptyPlotMessage(ctx, width, height, emptyMessage);
+      return;
+    }
+    drawProfileLine(canvas, bins, xLabel, yLabel, decimals, hoverBin);
+  }
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (!bins.length) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+
+    let minX = Math.min(...bins.map((b) => b.mean - b.std)), maxX = Math.max(...bins.map((b) => b.mean + b.std));
+    let minY = Math.min(...bins.map((b) => b.altitude)), maxY = Math.max(...bins.map((b) => b.altitude));
+    if (minX === maxX) { minX -= 1; maxX += 1; }
+    if (minY === maxY) { minY -= 1; maxY += 1; }
+    const plotW = rect.width - PLOT_PADDING.left - PLOT_PADDING.right;
+    const plotH = rect.height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+    const xFor = (x) => PLOT_PADDING.left + ((x - minX) / (maxX - minX)) * plotW;
+    const yFor = (y) => PLOT_PADDING.top + plotH - ((y - minY) / (maxY - minY)) * plotH;
+
+    let best = null, bestDist = Infinity;
+    bins.forEach((b) => {
+      const dx = xFor(b.mean) - mx, dy = yFor(b.altitude) - my;
+      const d = dx * dx + dy * dy;
+      if (d < bestDist) { bestDist = d; best = b; }
+    });
+    if (!best || bestDist > 400) { // ~20px
+      if (hoverBin) { hoverBin = null; tooltip.style.display = 'none'; draw(); }
+      return;
+    }
+    hoverBin = best;
+    draw();
+    const half = binSize / 2;
+    tooltip.innerHTML = `<div class="tt-row"><span class="tt-value">altitude: ${(best.altitude - half).toFixed(0)}–${(best.altitude + half).toFixed(0)}m</span></div>` +
+      `<div class="tt-row"><span class="tt-value">mean ${xLabel}: ${best.mean.toFixed(decimals)}</span></div>` +
+      `<div class="tt-row"><span class="tt-value">std: ${best.std.toFixed(decimals)}</span></div>` +
+      `<div class="tt-row"><span class="tt-value">n: ${best.n}</span></div>`;
+    tooltip.style.left = xFor(best.mean) + 'px';
+    tooltip.style.top = '0px';
+    tooltip.style.display = 'block';
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    hoverBin = null;
+    tooltip.style.display = 'none';
+    draw();
+  });
+
+  return {
+    // data: {bins: [{altitude, mean, std, n}], binSize, xLabel, yLabel, decimals}
+    setData(data) {
+      bins = data.bins || [];
+      binSize = data.binSize ?? 1;
+      xLabel = data.xLabel || 'x';
+      yLabel = data.yLabel || 'y';
+      decimals = data.decimals ?? 1;
+      hoverBin = null;
+      draw();
+    },
+    setEmptyMessage(message) {
+      bins = [];
+      emptyMessage = message;
+      draw();
+    },
+    draw,
+  };
+}

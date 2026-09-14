@@ -494,7 +494,7 @@
     <div class="panel-header">
       <label>altitude profile</label>
     </div>
-    <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Pick a flight and a sensor variable to plot it against altitude for just that flight - each point pairs a drone reading with the nearest sensor reading within 40s; farther than that, it's dropped rather than shown as a stale match.</div>
+    <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Pick a flight and a sensor variable to see its vertical profile for just that flight - each drone reading is paired with the nearest sensor reading within 40s (farther than that, it's dropped rather than shown as a stale match), then grouped into 5m altitude bins and plotted as a mean line with a shaded ±1 std band.</div>
     <div class="plot-toolbar">
       <select id="alt-profile-flight-select" class="select-input" onchange="altProfileRender()">
         <option value="">Flight...</option>
@@ -1259,7 +1259,7 @@ function oflClearPlotPanel() {
   oflState.selectedInstrument = null;
   oflClearPlot();
   altProfileFlights = [];
-  altProfileScatter.setEmptyMessage('Pick a flight and a variable');
+  altProfileChart.setEmptyMessage('Pick a flight and a variable');
 }
 
 // ---------- Altitude profile: one flight's instrument readings vs. altitude ----------
@@ -1272,7 +1272,7 @@ function oflClearPlotPanel() {
 // reading is more than 40s away, since the sensor and drone files run on
 // independent timebases that can go quiet for many minutes between runs.
 
-const altProfileScatter = createScatterController('alt-profile-canvas', 'alt-profile-tooltip');
+const altProfileChart = createProfileController('alt-profile-canvas', 'alt-profile-tooltip');
 let altProfileFlights = [];
 
 async function altProfileLoadFlights() {
@@ -1297,7 +1297,7 @@ async function altProfileLoadFlights() {
       flightSelect.appendChild(opt);
     });
     altProfilePopulateVariableSelect();
-    altProfileScatter.setEmptyMessage('Pick a flight and a variable');
+    altProfileChart.setEmptyMessage('Pick a flight and a variable');
     document.getElementById('alt-profile-status').textContent = '';
     panel.style.display = 'block';
   } catch (e) {
@@ -1372,7 +1372,7 @@ async function altProfileRender() {
   const column = varSelect.value;
 
   if (flightIndex === '' || !column) {
-    altProfileScatter.setEmptyMessage('Pick a flight and a variable');
+    altProfileChart.setEmptyMessage('Pick a flight and a variable');
     statusEl.textContent = '';
     return;
   }
@@ -1387,19 +1387,19 @@ async function altProfileRender() {
     if (!data.ok) {
       statusEl.textContent = data.error;
       statusEl.style.color = 'var(--err)';
-      altProfileScatter.setEmptyMessage('Could not load this selection.');
+      altProfileChart.setEmptyMessage('Could not load this selection.');
       return;
     }
 
-    altProfileScatter.setData({
-      points: data.points,
-      regression: data.regression,
+    altProfileChart.setData({
+      bins: data.bins,
+      binSize: data.bin_size,
       xLabel: column,
       yLabel: 'altitude_agl_m',
       decimals: 2,
     });
 
-    let msg = `${data.n} point${data.n === 1 ? '' : 's'} plotted`;
+    let msg = `${data.n} point${data.n === 1 ? '' : 's'} in ${data.bins.length} ${data.bin_size}m bin${data.bins.length === 1 ? '' : 's'}`;
     if (data.dropped) msg += ` (${data.dropped} dropped - no sensor reading within ${data.max_gap_seconds}s)`;
     if (data.r !== null && data.r !== undefined) msg += ` · r = ${data.r.toFixed(3)}`;
     statusEl.textContent = msg + '.';

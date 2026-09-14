@@ -1383,6 +1383,39 @@ def _nearest_within(sorted_times, sorted_values, query_time, max_gap_seconds):
     return None, None
 
 
+ALTITUDE_BIN_SIZE_M = 5.0
+
+
+def _bin_altitude_profile(points):
+    """
+    Groups (x=sensor value, y=altitude) points into ALTITUDE_BIN_SIZE_M-
+    wide altitude bands and summarizes each band's x values as mean ±
+    std - the vertical-profile line the altitude-profile panel actually
+    plots, rather than a raw ~1000+-point scatter per flight. A bin's std
+    is 0 when it holds a single point (statistics.pstdev handles that
+    without a special case - nothing to vary against).
+
+    Returns [{"altitude": bin_center, "mean", "std", "n"}, ...] sorted by
+    altitude ascending; bins with no points in range are simply absent
+    rather than interpolated.
+    """
+    buckets = {}
+    for p in points:
+        bin_index = math.floor(p["y"] / ALTITUDE_BIN_SIZE_M)
+        buckets.setdefault(bin_index, []).append(p["x"])
+
+    bins = []
+    for bin_index, values in buckets.items():
+        bins.append({
+            "altitude": bin_index * ALTITUDE_BIN_SIZE_M + ALTITUDE_BIN_SIZE_M / 2,
+            "mean": sum(values) / len(values),
+            "std": statistics.pstdev(values),
+            "n": len(values),
+        })
+    bins.sort(key=lambda b: b["altitude"])
+    return bins
+
+
 @app.route("/offline/session/<name>/merged/<date>/flights")
 def offline_merged_flights(name, date):
     """
@@ -1417,11 +1450,12 @@ def offline_merged_flights(name, date):
 def offline_merged_altitude_profile(name, date):
     """
     Pairs one flight's altitude_agl_m readings with one sensor column's
-    readings by nearest timestamp (see _nearest_within), for an altitude-
-    vs-instrument scatter plot scoped to a single flight. flight_index
-    refers to _detect_flights' output for this date - re-detected here
-    rather than passed in as a time range, so the frontend only ever needs
-    what /flights already gave it.
+    readings by nearest timestamp (see _nearest_within), then summarizes
+    them into altitude bins (see _bin_altitude_profile) for a vertical-
+    profile line (mean ± std by altitude) scoped to a single flight.
+    flight_index refers to _detect_flights' output for this date -
+    re-detected here rather than passed in as a time range, so the
+    frontend only ever needs what /flights already gave it.
     """
     if not _valid_session_name(name):
         return jsonify({"ok": False, "error": "Invalid session name."}), 400
@@ -1480,14 +1514,7 @@ def offline_merged_altitude_profile(name, date):
     xs = [p["x"] for p in points]
     ys = [p["y"] for p in points]
     r, n = _pearson(xs, ys)
-    regression = None
-    if n >= 2:
-        mean_x = sum(xs) / n
-        mean_y = sum(ys) / n
-        var_x = sum((x - mean_x) ** 2 for x in xs)
-        if var_x > 0:
-            slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / var_x
-            regression = {"slope": slope, "intercept": mean_y - slope * mean_x}
+    bins = _bin_altitude_profile(points)
 
     return jsonify({
         "ok": True,
@@ -1497,9 +1524,9 @@ def offline_merged_altitude_profile(name, date):
             "start": flight["start"].strftime("%Y-%m-%d %H:%M:%S"),
             "end": flight["end"].strftime("%Y-%m-%d %H:%M:%S"),
         },
-        "points": points, "n": n, "dropped": dropped, "r": r,
+        "bins": bins, "bin_size": ALTITUDE_BIN_SIZE_M,
+        "n": n, "dropped": dropped, "r": r,
         "r_squared": (r * r) if r is not None else None,
-        "regression": regression,
         "max_gap_seconds": ALTITUDE_JOIN_MAX_GAP_SECONDS,
     })
 
