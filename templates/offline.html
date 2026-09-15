@@ -448,6 +448,32 @@
   }
   .assistant-input-row input:focus { border-color: var(--accent); }
   .assistant-input-row input:disabled { opacity: 0.6; }
+
+  /* ---- day-view tabs (Plot / Altitude Profile / Explore / Assistant) - ---- */
+  /* same pattern as the main dashboard's Operation/Debug/Data Viewer tabs */
+  .tab-bar {
+    display: flex;
+    gap: 22px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .tab-btn {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 8px 2px;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
 </style>
 </head>
 <body>
@@ -476,7 +502,17 @@
     <div class="hint" id="day-status"></div>
   </div>
 
-  <div class="panel" id="merged-plot-panel" style="display:none;">
+  <div id="ofl-tabs-wrap" style="display:none;">
+    <div class="hint" id="ofl-current-day-label" style="margin-bottom: 10px; font-weight: 600;"></div>
+    <div class="tab-bar">
+      <button class="tab-btn active" id="ofl-tab-btn-plot" onclick="oflSwitchTab('plot')">Plot</button>
+      <button class="tab-btn" id="ofl-tab-btn-altitude" onclick="oflSwitchTab('altitude')">Altitude Profile</button>
+      <button class="tab-btn" id="ofl-tab-btn-explore" onclick="oflSwitchTab('explore')">Explore</button>
+      <button class="tab-btn" id="ofl-tab-btn-assistant" onclick="oflSwitchTab('assistant')">Assistant</button>
+    </div>
+
+  <div class="tab-panel active" id="ofl-tab-plot">
+  <div class="panel" id="merged-plot-panel">
     <label id="ofl-plot-title" style="display:block; margin-bottom: 8px;">plot</label>
     <div class="plot-toolbar">
       <select id="ofl-add-instrument-select" class="select-input" onchange="oflInstrumentChange()" disabled style="display:none;">
@@ -498,35 +534,41 @@
     </div>
     <div class="hint">Scroll to zoom, drag to pan, double-click to reset.</div>
   </div>
+  </div>
 
-  <div class="panel" id="altitude-profile-panel" style="display:none;">
+  <div class="tab-panel" id="ofl-tab-altitude">
+  <div class="panel" id="altitude-profile-panel">
     <div class="panel-header">
       <label>altitude profile</label>
     </div>
-    <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Add one or more sensor variables to see their vertical profiles overlaid, for every flight that day, one chart each - each drone reading is paired with the nearest sensor reading within 40s (farther than that, it's dropped rather than shown as a stale match), then grouped into 5m altitude bins and plotted as a mean line with a shaded ±1 std band. With several variables on one chart, each is scaled to its own mean±std range (real units in the tooltip), same as the plot above.</div>
-    <div class="plot-toolbar">
-      <select id="alt-profile-instrument-select" class="select-input" onchange="altProfileInstrumentChange()" style="display:none;">
-        <option value="">Instrument...</option>
-      </select>
-      <select id="alt-profile-variable-select" class="select-input" onchange="altProfileAddColumn()">
-        <option value="">Add a variable...</option>
-      </select>
+    <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Add one or more sensor variables to see their vertical profiles overlaid, for every flight that day, one chart each - each drone reading is paired with the nearest sensor reading within 40s (farther than that, it's dropped rather than shown as a stale match), then grouped into 5m altitude bins and plotted as a mean line with a shaded ±1 std band. With several variables on one chart, each is scaled to its own mean±std range (real units in the tooltip), same as the Plot tab.</div>
+    <div id="alt-profile-content" style="display:none;">
+      <div class="plot-toolbar">
+        <select id="alt-profile-instrument-select" class="select-input" onchange="altProfileInstrumentChange()" style="display:none;">
+          <option value="">Instrument...</option>
+        </select>
+        <select id="alt-profile-variable-select" class="select-input" onchange="altProfileAddColumn()">
+          <option value="">Add a variable...</option>
+        </select>
+      </div>
+      <div class="dv-legend" id="alt-profile-legend"></div>
+      <div class="alt-profile-grid" id="alt-profile-grid"></div>
     </div>
-    <div class="dv-legend" id="alt-profile-legend"></div>
-    <div class="alt-profile-grid" id="alt-profile-grid"></div>
     <div class="hint" id="alt-profile-status"></div>
   </div>
+  </div>
 
-  <div class="panel" id="explore-panel" style="display:none;">
+  <div class="tab-panel" id="ofl-tab-explore">
+  <div class="panel" id="explore-panel">
     <div class="panel-header">
       <label>explore</label>
     </div>
-    <div class="hint" style="margin-bottom: 14px;">Statistics and correlation cover every variable added to the plot above. Distribution and relationship pick from that same set.</div>
+    <div class="hint" style="margin-bottom: 14px;">Statistics and correlation cover every variable added on the Plot tab. Distribution and relationship pick from that same set.</div>
     <div class="explore-grid">
 
       <div>
         <label class="explore-section-title">summary statistics</label>
-        <div id="explore-stats-wrap"><div class="hint">Add a variable to the plot above to see its statistics.</div></div>
+        <div id="explore-stats-wrap"><div class="hint">Add a variable on the Plot tab to see its statistics.</div></div>
       </div>
 
       <div id="explore-corr-section" style="display:none;">
@@ -563,19 +605,24 @@
 
     </div>
   </div>
+  </div>
 
-  <div class="panel" id="assistant-panel" style="display:none;">
+  <div class="tab-panel" id="ofl-tab-assistant">
+  <div class="panel" id="assistant-panel">
     <div class="panel-header">
       <label>ask about this data</label>
       <button class="btn-ghost" onclick="oflClearAssistantChat()">Clear</button>
     </div>
-    <div class="hint" style="margin-bottom: 10px;">Answers are grounded in the statistics and correlation for whichever variables are added to the plot above - not the raw data, so ask about trends and relationships rather than specific rows. Needs an Anthropic API key configured on this machine.</div>
+    <div class="hint" style="margin-bottom: 10px;">Answers are grounded in the statistics and correlation for whichever variables are added on the Plot tab - not the raw data, so ask about trends and relationships rather than specific rows. Needs an Anthropic API key configured on this machine.</div>
     <div class="assistant-log" id="assistant-log"></div>
     <div class="assistant-input-row">
       <input type="text" id="assistant-input" placeholder="e.g. is ozone correlated with temperature today?" autocomplete="off">
       <button class="btn-primary-sm" id="assistant-ask-btn" onclick="oflAskAssistant()">Ask</button>
     </div>
     <div class="hint" id="assistant-status"></div>
+  </div>
+  </div>
+
   </div>
 </div>
 
@@ -922,14 +969,13 @@ async function viewOfflineDay(session, date) {
   oflState.seriesColors = {};
   oflState.selectedInstrument = null;
 
-  const plotPanel = document.getElementById('merged-plot-panel');
   const instrumentSelect = document.getElementById('ofl-add-instrument-select');
   const addSelect = document.getElementById('ofl-add-variable-select');
   const statusEl = document.getElementById('ofl-plot-status');
 
-  plotPanel.style.display = 'block';
-  document.getElementById('explore-panel').style.display = 'block';
-  document.getElementById('assistant-panel').style.display = 'block';
+  document.getElementById('ofl-tabs-wrap').style.display = 'block';
+  document.getElementById('ofl-current-day-label').textContent = `${session} — ${formatRunDate(date)}`;
+  oflSwitchTab('plot'); // new day - always start from the main plot, not wherever the last day left off
   oflClearAssistantChat(); // new day = new context - last conversation no longer applies
   document.getElementById('ofl-plot-title').textContent = `plot - ${formatRunDate(date)}`;
   oflPlot.setEmptyMessage('Loading variables...');
@@ -979,7 +1025,7 @@ async function viewOfflineDay(session, date) {
     altProfileLoadFlights();
     statusEl.textContent = '';
 
-    plotPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.getElementById('ofl-tabs-wrap').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
     addSelect.innerHTML = '<option value="">Add a variable...</option>';
     statusEl.textContent = 'Could not reach the local app server.';
@@ -1251,11 +1297,26 @@ function oflClearPlot() {
   oflRenderAddVariableSelect();
 }
 
+// Plot / Altitude Profile / Explore / Assistant - the same tab-bar/tab-panel
+// pattern the main dashboard uses for Operation/Debug/Data Viewer, just
+// scoped to this page's own elements (ofl-tab-* rather than tab-*, since
+// this is a separate template with its own script). No special handling
+// needed for canvases inside a tab that's currently hidden - they're only
+// ever drawn in response to a direct user action within that tab (picking
+// a variable, hovering, ...), which can't happen while its controls are
+// display:none, so nothing draws at a stale 0x0 size.
+const OFL_TAB_NAMES = ['plot', 'altitude', 'explore', 'assistant'];
+
+function oflSwitchTab(name) {
+  OFL_TAB_NAMES.forEach((n) => {
+    document.getElementById('ofl-tab-' + n).classList.toggle('active', n === name);
+    document.getElementById('ofl-tab-btn-' + n).classList.toggle('active', n === name);
+  });
+}
+
 function oflClearPlotPanel() {
-  document.getElementById('merged-plot-panel').style.display = 'none';
-  document.getElementById('altitude-profile-panel').style.display = 'none';
-  document.getElementById('explore-panel').style.display = 'none';
-  document.getElementById('assistant-panel').style.display = 'none';
+  document.getElementById('ofl-tabs-wrap').style.display = 'none';
+  oflSwitchTab('plot');
   oflClearAssistantChat();
   oflState.session = null;
   oflState.date = null;
@@ -1291,29 +1352,43 @@ let altProfileActiveColumns = []; // [column, ...], in add order - merged-source
 let altProfileSeriesColors = {}; // column -> color, same palette as the plot above
 
 async function altProfileLoadFlights() {
-  const panel = document.getElementById('altitude-profile-panel');
+  const content = document.getElementById('alt-profile-content');
+  const statusEl = document.getElementById('alt-profile-status');
   altProfileFlights = [];
   altProfileCharts = [];
   altProfileActiveColumns = [];
   altProfileSeriesColors = {};
   document.getElementById('alt-profile-grid').innerHTML = '';
   document.getElementById('alt-profile-legend').innerHTML = '';
-  panel.style.display = 'none';
+  content.style.display = 'none';
+  statusEl.textContent = 'Looking for flights...';
+  statusEl.style.color = 'var(--text-dim)';
 
   try {
     const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/flights`;
     const res = await fetch(url);
     const data = await res.json();
-    if (!data.ok || !data.flights.length) return; // no merged drone data yet, or nothing detected - stays hidden
+    if (!data.ok) {
+      // Most commonly "this date's drone flights haven't been merged yet" -
+      // the error message from the server already says so plainly.
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--text-dim)';
+      return;
+    }
+    if (!data.flights.length) {
+      statusEl.textContent = "No flights detected in this date's drone telemetry (altitude_agl_m never climbed above 2m).";
+      statusEl.style.color = 'var(--text-dim)';
+      return;
+    }
 
     altProfileFlights = data.flights;
     altProfileBuildGrid();
     altProfilePopulateVariableSelect();
-    document.getElementById('alt-profile-status').textContent = '';
-    panel.style.display = 'block';
+    statusEl.textContent = '';
+    content.style.display = 'block';
   } catch (e) {
-    // Leave the panel hidden - same "nothing to show" treatment as other
-    // fetch failures on this page when there's simply nothing there yet.
+    statusEl.textContent = 'Could not reach the local app server.';
+    statusEl.style.color = 'var(--err)';
   }
 }
 
