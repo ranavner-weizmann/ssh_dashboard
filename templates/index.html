@@ -1137,11 +1137,7 @@
       <label for="host">ip address</label>
       <div style="display: flex; gap: 8px;">
         <input type="text" id="host" placeholder="192.168.1.42" value="172.168.253.1" autocomplete="off" style="flex: 1;">
-        <select class="select-input" id="host-quick-select" onchange="hostQuickSelectChange()" style="flex: none; width: 125px;">
-          <option value="">Presets</option>
-          <option value="172.168.253.1">172.168.253.1 (Ethernet Cable)</option>
-          <option value="100.102.241.19">100.102.241.19 (Tailscale)</option>
-        </select>
+        <select class="select-input" id="host-quick-select" onchange="hostQuickSelectChange()" style="flex: none; width: 125px;"></select>
       </div>
     </div>
     <div class="row">
@@ -1621,6 +1617,31 @@
     </div>
   </div>
 
+  <!-- IP PRESETS MODAL -->
+  <div id="host-presets-modal-overlay" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-title">Manage IP presets</div>
+      <div class="modal-body">
+        <div class="dv-legend" id="host-presets-list"></div>
+        <div class="row" style="margin-top: 4px;">
+          <div class="field">
+            <label for="host-preset-label-input">label</label>
+            <input type="text" id="host-preset-label-input" placeholder="e.g. Wi-Fi hotspot" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="host-preset-ip-input">ip address</label>
+            <input type="text" id="host-preset-ip-input" placeholder="192.168.1.42" autocomplete="off">
+          </div>
+        </div>
+        <div class="error-msg" id="host-preset-error"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-ghost" onclick="closeHostPresetsModal()">Close</button>
+        <button class="btn-primary-sm" onclick="addHostPreset()">Add</button>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script src="{{ url_for('static', filename='xterm/xterm.js') }}"></script>
@@ -1726,15 +1747,127 @@ function showConnectView() {
   dvClearPlot();
 }
 
+// ---------- IP presets: the login page's quick-select dropdown ----------
+// Stored in localStorage rather than on the backend - this is a
+// single-user desktop app (the auto-launched Chrome window always opens
+// the same profile, see _open_in_chrome in app.py) with no server-side
+// per-user concept, so there's nothing a browser-local list would miss.
+// Seeded with this project's two known Pi addresses on first run, then
+// fully user-editable (add/remove, including the seeded ones) - see
+// openHostPresetsModal.
+
+const DEFAULT_HOST_PRESETS = [
+  { label: 'Ethernet Cable', ip: '172.168.253.1' },
+  { label: 'Tailscale', ip: '100.102.241.19' },
+];
+const HOST_PRESETS_MANAGE_VALUE = '__manage__';
+
+function loadHostPresets() {
+  try {
+    const raw = localStorage.getItem('hostPresets');
+    if (raw) return JSON.parse(raw);
+  } catch (e) { /* corrupt or blocked storage - fall back to defaults */ }
+  return DEFAULT_HOST_PRESETS.slice();
+}
+
+function saveHostPresets() {
+  try {
+    localStorage.setItem('hostPresets', JSON.stringify(hostPresets));
+  } catch (e) { /* private window / storage disabled - preset just won't persist */ }
+}
+
+let hostPresets = loadHostPresets();
+
+function renderHostPresetSelect() {
+  const select = document.getElementById('host-quick-select');
+  const optionsHtml = hostPresets.map((p) =>
+    `<option value="${escapeHtml(p.ip)}">${escapeHtml(p.label)} (${escapeHtml(p.ip)})</option>`).join('');
+  select.innerHTML = `<option value="">Presets</option>${optionsHtml}` +
+    `<option value="${HOST_PRESETS_MANAGE_VALUE}">Manage presets...</option>`;
+}
+renderHostPresetSelect();
+
 // Fills the host field from the quick-select dropdown, then resets the
 // dropdown back to its placeholder - it's just a shortcut for typing,
 // not a persistent choice, so it shouldn't keep showing a selection that
 // could go stale the moment someone edits the host field by hand.
 function hostQuickSelectChange() {
   const select = document.getElementById('host-quick-select');
-  if (!select.value) return;
-  document.getElementById('host').value = select.value;
+  const value = select.value;
   select.value = '';
+  if (!value) return;
+  if (value === HOST_PRESETS_MANAGE_VALUE) {
+    openHostPresetsModal();
+    return;
+  }
+  document.getElementById('host').value = value;
+}
+
+function renderHostPresetsList() {
+  const list = document.getElementById('host-presets-list');
+  list.innerHTML = '';
+  if (!hostPresets.length) {
+    list.innerHTML = '<span class="hint">No presets yet - add one below.</span>';
+    return;
+  }
+  hostPresets.forEach((p, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'dv-legend-chip';
+
+    const nameEl = document.createElement('span');
+    nameEl.textContent = `${p.label} (${p.ip})`;
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'dv-legend-remove';
+    removeBtn.textContent = '×';
+    removeBtn.title = `Remove ${p.label}`;
+    removeBtn.onclick = () => removeHostPreset(i);
+
+    chip.appendChild(nameEl);
+    chip.appendChild(removeBtn);
+    list.appendChild(chip);
+  });
+}
+
+function openHostPresetsModal() {
+  document.getElementById('host-preset-label-input').value = '';
+  document.getElementById('host-preset-ip-input').value = '';
+  document.getElementById('host-preset-error').textContent = '';
+  renderHostPresetsList();
+  document.getElementById('host-presets-modal-overlay').classList.add('active');
+}
+
+function closeHostPresetsModal() {
+  document.getElementById('host-presets-modal-overlay').classList.remove('active');
+}
+
+function addHostPreset() {
+  const labelInput = document.getElementById('host-preset-label-input');
+  const ipInput = document.getElementById('host-preset-ip-input');
+  const errBox = document.getElementById('host-preset-error');
+  const label = labelInput.value.trim();
+  const ip = ipInput.value.trim();
+
+  if (!label || !ip) {
+    errBox.textContent = 'Both a label and an IP address are required.';
+    return;
+  }
+
+  hostPresets.push({ label, ip });
+  saveHostPresets();
+  renderHostPresetSelect();
+  renderHostPresetsList();
+  labelInput.value = '';
+  ipInput.value = '';
+  errBox.textContent = '';
+  labelInput.focus();
+}
+
+function removeHostPreset(index) {
+  hostPresets.splice(index, 1);
+  saveHostPresets();
+  renderHostPresetSelect();
+  renderHostPresetsList();
 }
 
 async function connect() {
