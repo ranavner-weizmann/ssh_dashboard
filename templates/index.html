@@ -1135,7 +1135,14 @@
   <div id="connect-view" class="panel narrow-panel">
     <div class="field">
       <label for="host">ip address</label>
-      <input type="text" id="host" placeholder="192.168.1.42" value="172.168.253.1" autocomplete="off">
+      <div style="display: flex; gap: 8px;">
+        <input type="text" id="host" placeholder="192.168.1.42" value="172.168.253.1" autocomplete="off" style="flex: 1;">
+        <select class="select-input" id="host-quick-select" onchange="hostQuickSelectChange()" style="flex: none;">
+          <option value="">Quick select...</option>
+          <option value="172.168.253.1">172.168.253.1 (Ethernet Cable)</option>
+          <option value="100.102.241.19">100.102.241.19 (Tailscale)</option>
+        </select>
+      </div>
     </div>
     <div class="row">
       <div class="field">
@@ -1717,6 +1724,17 @@ function showConnectView() {
   document.getElementById('dv-status').style.color = 'var(--text-dim)';
   dvClearTable();
   dvClearPlot();
+}
+
+// Fills the host field from the quick-select dropdown, then resets the
+// dropdown back to its placeholder - it's just a shortcut for typing,
+// not a persistent choice, so it shouldn't keep showing a selection that
+// could go stale the moment someone edits the host field by hand.
+function hostQuickSelectChange() {
+  const select = document.getElementById('host-quick-select');
+  if (!select.value) return;
+  document.getElementById('host').value = select.value;
+  select.value = '';
 }
 
 async function connect() {
