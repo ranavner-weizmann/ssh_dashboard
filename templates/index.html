@@ -1271,6 +1271,7 @@
             <select id="plot-sensor-select-1" class="select-input">
               <option value="pom" selected>Ozone (POM)</option>
               <option value="imet">Temperature (iMet)</option>
+              <option value="imet_rh">Relative Humidity (iMet)</option>
               <option value="cavity">Inline Pressure (Cavity)</option>
               <option value="teca">Tec Current</option>
               <option value="tect">Tec Temperature</option>
@@ -1278,6 +1279,7 @@
               <option value="intensity">Max Intensity</option>
               <option value="trisonica">Wind Speed (Trisonica)</option>
               <option value="pops">PM2.5 (POPS)</option>
+              <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
               <option value="miniaeth">Ångström exp. (MiniAeth)</option>
@@ -1304,6 +1306,7 @@
             <select id="plot-sensor-select-2" class="select-input">
               <option value="pom">Ozone (POM)</option>
               <option value="imet" selected>Temperature (iMet)</option>
+              <option value="imet_rh">Relative Humidity (iMet)</option>
               <option value="cavity">Inline Pressure (Cavity)</option>
               <option value="teca">Tec Current</option>
               <option value="tect">Tec Temperature</option>
@@ -1311,6 +1314,7 @@
               <option value="intensity">Max Intensity</option>
               <option value="trisonica">Wind Speed (Trisonica)</option>
               <option value="pops">PM2.5 (POPS)</option>
+              <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
               <option value="miniaeth">Ångström exp. (MiniAeth)</option>
@@ -1337,6 +1341,7 @@
             <select id="plot-sensor-select-3" class="select-input">
               <option value="pom">Ozone (POM)</option>
               <option value="imet">Temperature (iMet)</option>
+              <option value="imet_rh">Relative Humidity (iMet)</option>
               <option value="cavity">Inline Pressure (Cavity)</option>
               <option value="teca">Tec Current</option>
               <option value="tect">Tec Temperature</option>
@@ -1344,6 +1349,7 @@
               <option value="intensity">Max Intensity</option>
               <option value="trisonica">Wind Speed (Trisonica)</option>
               <option value="pops" selected>PM2.5 (POPS)</option>
+              <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
               <option value="miniaeth">Ångström exp. (MiniAeth)</option>
@@ -1370,6 +1376,7 @@
             <select id="plot-sensor-select-4" class="select-input">
               <option value="pom">Ozone (POM)</option>
               <option value="imet">Temperature (iMet)</option>
+              <option value="imet_rh">Relative Humidity (iMet)</option>
               <option value="cavity">Inline Pressure (Cavity)</option>
               <option value="teca">Tec Current</option>
               <option value="tect">Tec Temperature</option>
@@ -1377,6 +1384,7 @@
               <option value="intensity">Max Intensity</option>
               <option value="trisonica">Wind Speed (Trisonica)</option>
               <option value="pops">PM2.5 (POPS)</option>
+              <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
               <option value="miniaeth" selected>Ångström exp. (MiniAeth)</option>
@@ -1403,6 +1411,7 @@
             <select id="plot-sensor-select-5" class="select-input">
               <option value="pom">Ozone (POM)</option>
               <option value="imet">Temperature (iMet)</option>
+              <option value="imet_rh">Relative Humidity (iMet)</option>
               <option value="cavity">Inline Pressure (Cavity)</option>
               <option value="teca">Tec Current</option>
               <option value="tect">Tec Temperature</option>
@@ -1410,6 +1419,7 @@
               <option value="intensity">Max Intensity</option>
               <option value="trisonica">Wind Speed (Trisonica)</option>
               <option value="pops">PM2.5 (POPS)</option>
+              <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro" selected>Particle Conc. (Partector2Pro)</option>
               <option value="miniaeth">Ångström exp. (MiniAeth)</option>
@@ -1436,6 +1446,7 @@
             <select id="plot-sensor-select-6" class="select-input">
               <option value="pom">Ozone (POM)</option>
               <option value="imet">Temperature (iMet)</option>
+              <option value="imet_rh">Relative Humidity (iMet)</option>
               <option value="cavity">Inline Pressure (Cavity)</option>
               <option value="teca">Tec Current</option>
               <option value="tect">Tec Temperature</option>
@@ -1443,6 +1454,7 @@
               <option value="intensity">Max Intensity</option>
               <option value="trisonica" selected>Wind Speed (Trisonica)</option>
               <option value="pops">PM2.5 (POPS)</option>
+              <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
               <option value="miniaeth">Ångström exp. (MiniAeth)</option>
@@ -3256,8 +3268,8 @@ function playTimerBeep() {
 // their old precision under pops_conc / miniaeth_bc.
 const PLOT_DECIMALS = {
   pom: 1, imet: 2, cavity: 1, teca: 3, tect: 2, rhi: 1, intensity: 0,
-  trisonica: 2, pops: 2, pops_conc: 1, partector2pro: 0, miniaeth: 2, miniaeth_bc: 1,
-  altitude_agl: 2,
+  trisonica: 2, pops: 2, pops_pm1: 2, pops_conc: 1, partector2pro: 0, miniaeth: 2, miniaeth_bc: 1,
+  altitude_agl: 2, imet_rh: 1,
 };
 
 function plotXY(points, width, height, minV, maxV) {

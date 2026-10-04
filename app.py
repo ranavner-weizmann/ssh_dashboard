@@ -3347,6 +3347,15 @@ PLOT_SENSORS = {
         # unscaled, so it has to be divided back down here.
         "scale": 0.01,
     },
+    # The logger already scales rel_hum to percent (device sends %RH x 10),
+    # so unlike temp above it needs no scale factor here.
+    "imet_rh": {
+        "label": "Relative Humidity (iMet)",
+        "csv_prefix": "imet_data_",
+        "value_column": "rel_hum",
+        "unit": "%",
+        "scale": 1.0,
+    },
     "cavity": {
         "label": "Inline Pressure (Cavity)",
         "csv_prefix": "cavity_data_",
@@ -3408,6 +3417,13 @@ PLOT_SENSORS = {
         "label": "PM2.5 (POPS)",
         "csv_prefix": "pops_data_",
         "value_column": "PM2.5_ug_m3",
+        "unit": "µg/m³",
+        "scale": 1.0,
+    },
+    "pops_pm1": {
+        "label": "PM1 (POPS)",
+        "csv_prefix": "pops_data_",
+        "value_column": "PM1_ug_m3",
         "unit": "µg/m³",
         "scale": 1.0,
     },
