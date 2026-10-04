@@ -2245,6 +2245,9 @@ def connect():
             # same one with its data folders reset - don't let /plot_data
             # keep serving whatever paths were cached from before.
             _plot_path_cache.clear()
+            _plot_points_cache.clear()
+            _remote_csv_cache.clear()
+            _column_numeric_cache.clear()
 
             return jsonify({
                 "ok": True,
@@ -2734,6 +2737,7 @@ def run_all_sensors():
         # cached CSV paths from the previous run so /plot_data doesn't keep
         # serving frozen data from a run that's no longer being written to.
         _plot_path_cache.clear()
+        _plot_points_cache.clear()
 
         if not out_text and not err_text:
             try:
@@ -3405,6 +3409,142 @@ def _run_span_s(run_dir_name, points):
 # stops working (self-healing against rotation, not just an optimization).
 _plot_path_cache = {}
 
+
+# ---------- Remote CSV cache: fetch only what was appended ----------
+#
+# Every live-plot poll and every Data Viewer click used to download the whole
+# CSV over SFTP again. On the field link (Tailscale, often relayed) a plain
+# paramiko read runs at ~0.1 MB/s because each 32 KB block is its own round
+# trip: the current run's 7 MB merged file took 80 s per read, the 3 MB POPS
+# file ~35 s - and six plots did that every 6 s, serialised on one lock. The
+# logger's CSVs are append-only, so each file is mirrored here once (with
+# prefetch, ~6x faster than a plain read) and afterwards only `stat` + the
+# newly appended bytes are fetched: well under a second whatever the size.
+
+class _RemoteCsv:
+    """
+    A remote CSV mirrored locally: `text` holds everything up to the last
+    complete line; `pending` the raw bytes of a trailing line the sensor
+    process may still be in the middle of writing.
+    """
+    __slots__ = ("path", "size", "mtime", "text", "pending", "last_used")
+
+    def __init__(self, path):
+        self.path = path
+        self.size = 0
+        self.mtime = None
+        self.text = ""
+        self.pending = b""
+        self.last_used = 0.0
+
+
+_remote_csv_cache = {}          # remote path -> _RemoteCsv
+_REMOTE_CSV_CACHE_MAX = 12      # a run has ~7 files; keep a little history too
+
+
+def _evict_remote_csv_cache():
+    while len(_remote_csv_cache) > _REMOTE_CSV_CACHE_MAX:
+        oldest = min(_remote_csv_cache.values(), key=lambda e: e.last_used)
+        _remote_csv_cache.pop(oldest.path, None)
+
+
+def _get_remote_csv(sftp, path):
+    """
+    Return the cached mirror of `path`, brought up to date with the file on
+    the Pi. Caller must hold state["lock"] (paramiko's SFTP client is not
+    thread-safe). Raises IOError if the file does not exist; any other
+    exception means the transport is dead and the caller should
+    _mark_disconnected() as it would for a plain read.
+
+    Unchanged size and mtime -> nothing is transferred. Grown -> only the
+    new tail is read. Shrunk, or same size but rewritten -> full reload.
+    """
+    st = sftp.stat(path)
+    entry = _remote_csv_cache.get(path)
+    if entry is not None and entry.size == st.st_size and entry.mtime == st.st_mtime:
+        entry.last_used = time.time()
+        return entry
+    if entry is None or st.st_size <= entry.size:
+        entry = _RemoteCsv(path)
+        _remote_csv_cache[path] = entry
+        _evict_remote_csv_cache()
+
+    to_read = st.st_size - entry.size
+    data = b""
+    if to_read > 0:
+        with sftp.open(path, "rb") as f:
+            if entry.size == 0:
+                # Pipelines the block requests instead of one round trip
+                # per 32 KB; the single biggest win for a first load.
+                f.prefetch(st.st_size)
+            else:
+                f.seek(entry.size)
+            data = f.read(to_read)
+    entry.size += len(data)
+    entry.mtime = st.st_mtime if entry.size == st.st_size else None
+
+    chunk = entry.pending + data
+    cut = chunk.rfind(b"\n")
+    if cut == -1:
+        entry.pending = chunk
+    else:
+        entry.text += chunk[:cut + 1].decode("utf-8", errors="replace")
+        entry.pending = chunk[cut + 1:]
+    entry.last_used = time.time()
+    return entry
+
+
+# /plot_data parses each sensor's mirror incrementally too: the points list
+# is kept per sensor and only lines appended since the last poll are parsed.
+_plot_points_cache = {}         # sensor -> {path, consumed, time_idx, value_idx, points}
+_plot_points_lock = threading.Lock()
+
+
+def _plot_points(sensor, csv_path, text, spec):
+    """
+    (points, error) for `sensor` from the mirrored CSV text. points is the
+    full series oldest-first (windowing happens afterwards); error is a
+    message when the configured column is not in this file.
+    """
+    time_col = spec.get("time_column", "Timestamp")
+    value_col = spec["value_column"]
+    scale = spec["scale"]
+    with _plot_points_lock:
+        pc = _plot_points_cache.get(sensor)
+        if pc is None or pc["path"] != csv_path or pc["consumed"] > len(text):
+            pc = {"path": csv_path, "consumed": 0, "time_idx": None, "value_idx": None, "points": []}
+            _plot_points_cache[sensor] = pc
+        if pc["consumed"] < len(text):
+            rows = csv.reader(io.StringIO(text[pc["consumed"]:]))
+            pc["consumed"] = len(text)
+            if pc["time_idx"] is None:
+                header = next(rows, None)
+                if header is None:
+                    return pc["points"], None
+                if time_col not in header or value_col not in header:
+                    pc["time_idx"] = pc["value_idx"] = -1
+                else:
+                    pc["time_idx"] = header.index(time_col)
+                    pc["value_idx"] = header.index(value_col)
+            ti, vi = pc["time_idx"], pc["value_idx"]
+            if ti >= 0:
+                need = max(ti, vi)
+                pts = pc["points"]
+                for row in rows:
+                    if len(row) <= need:
+                        continue
+                    ts = row[ti]
+                    raw_val = row[vi]
+                    if not ts or not raw_val:
+                        continue
+                    try:
+                        pts.append({"t": ts, "v": float(raw_val) * scale})
+                    except ValueError:
+                        continue
+        if pc["time_idx"] == -1:
+            return [], f'Column "{value_col}" is not in {os.path.basename(csv_path)} (older run?).'
+        return pc["points"], None
+
 PLOT_SENSORS = {
     "pom": {
         "label": "Ozone (POM)",
@@ -3639,12 +3779,11 @@ def plot_data():
         cached = _plot_path_cache.get(sensor)
         run_dir_name = cached["run_dir_name"] if cached else None
         csv_path = cached["csv_path"] if cached else None
-        raw = None
+        entry = None
 
         if csv_path:
             try:
-                with sftp.open(csv_path, "r") as f:
-                    raw = f.read().decode("utf-8", errors="replace")
+                entry = _get_remote_csv(sftp, csv_path)
             except IOError:
                 # Cached path went stale (run rotated, file moved/renamed) -
                 # drop it and fall through to a fresh lookup below rather
@@ -3653,15 +3792,11 @@ def plot_data():
                 csv_path = None
             except Exception as e:
                 # Anything other than IOError here (SSHException, EOFError,
-                # a dropped socket, ...) means the transport itself is dead,
-                # not just a stale cached path - falling through to a fresh
-                # lookup on a channel that's no longer usable would just
-                # raise again, uncaught, and leave state["connected"] stuck
-                # True. Handle it the same way every other route here does.
+                # a dropped socket, ...) means the transport itself is dead.
                 _mark_disconnected()
                 return jsonify({"ok": False, "error": f"Could not read {csv_path}: {e}"}), 500
 
-        if raw is None:
+        if entry is None:
             if spec.get("source") == "drone_telemetry":
                 csv_path = _find_latest_drone_telemetry_csv(sftp)
                 if not csv_path:
@@ -3680,29 +3815,20 @@ def plot_data():
                     return jsonify({"ok": False, "error": f"No {spec['label']} CSV found yet in this run."}), 404
 
             try:
-                with sftp.open(csv_path, "r") as f:
-                    raw = f.read().decode("utf-8", errors="replace")
+                entry = _get_remote_csv(sftp, csv_path)
             except Exception as e:
                 _mark_disconnected()
                 return jsonify({"ok": False, "error": f"Could not read {csv_path}: {e}"}), 500
 
             _plot_path_cache[sensor] = {"run_dir_name": run_dir_name, "csv_path": csv_path}
 
-    reader = csv.DictReader(io.StringIO(raw))
-    value_column = spec["value_column"]
-    time_column = spec.get("time_column", "Timestamp")
-    scale = spec["scale"]
-    points = []
-    for row in reader:
-        ts = row.get(time_column)
-        raw_val = row.get(value_column)
-        if not ts or raw_val is None:
-            continue
-        try:
-            value = float(raw_val) * scale
-        except ValueError:
-            continue
-        points.append({"t": ts, "v": value})
+        # str is immutable: grab the current snapshot and parse outside the
+        # SFTP lock so other requests are not held up by CPU work.
+        text = entry.text
+
+    points, col_err = _plot_points(sensor, csv_path, text, spec)
+    if col_err:
+        return jsonify({"ok": False, "error": col_err}), 404
 
     run_span_s = _run_span_s(run_dir_name, points)
     points, total_in_window = _window_points(points, window_s)
@@ -3724,6 +3850,7 @@ def plot_data():
 # ---------- Data Viewer (browse every run folder on the Pi) ----------
 
 DATA_VIEWER_PAGE_SIZE = 50
+_column_numeric_cache = {}      # one entry: the file currently being paged through
 
 # Run folders are plain timestamps (e.g. "20260706_185920") written by
 # runall.py - this is deliberately strict (not just "no dotdot") since
@@ -3889,8 +4016,9 @@ def _read_remote_csv(run_name, relpath, source="run"):
         if not state["connected"] or not state["sftp"]:
             return None, (jsonify({"ok": False, "error": "Not connected to remote host."}), 400)
         try:
-            with state["sftp"].open(csv_path, "r") as f:
-                raw = f.read().decode("utf-8", errors="replace")
+            raw = _get_remote_csv(state["sftp"], csv_path).text
+        except IOError as e:
+            return None, (jsonify({"ok": False, "error": f"Could not read {relpath}: {e}"}), 404)
         except Exception as e:
             _mark_disconnected()
             return None, (jsonify({"ok": False, "error": f"Could not read {relpath}: {e}"}), 500)
@@ -3993,7 +4121,14 @@ def data_viewer_table():
     page = min(page, total_pages)
     start = (page - 1) * DATA_VIEWER_PAGE_SIZE
     page_rows = data_rows[start:start + DATA_VIEWER_PAGE_SIZE]
-    column_numeric = _compute_column_numeric(columns, data_rows)
+    # Paging through a 50k-row file re-ran this full scan per click;
+    # remember it per (file, length) so only new rows ever cost anything.
+    numeric_key = (source, run_name, relpath, len(raw))
+    column_numeric = _column_numeric_cache.get(numeric_key)
+    if column_numeric is None:
+        column_numeric = _compute_column_numeric(columns, data_rows)
+        _column_numeric_cache.clear()
+        _column_numeric_cache[numeric_key] = column_numeric
 
     return jsonify({
         "ok": True,
