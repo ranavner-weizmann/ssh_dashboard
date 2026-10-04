@@ -3778,9 +3778,11 @@ async function refreshDvRuns(preserveSelection = false) {
     dvClearPlot();
   }
 
+  const myGeneration = ++dvLoadGeneration;
   try {
     const res = await fetch('/data_viewer/runs');
     const data = await res.json();
+    if (myGeneration !== dvLoadGeneration) return;   // superseded while waiting
     if (!data.ok) {
       statusEl.textContent = data.error;
       statusEl.style.color = 'var(--err)';
@@ -3829,7 +3831,16 @@ function dvParsePlotFileValue(value) {
   return { source: value.slice(0, idx), file: value.slice(idx + 1) };
 }
 
+// Each call to onDvRunChange/refreshDvRuns takes the next generation; an
+// older call still waiting on the Pi gives up as soon as it sees it has
+// been superseded. Without this, picking a run while the previous pick's
+// (slow) file listing was still in flight let both calls append their
+// own "This run" group to the plot-file picker - two "This run" sections
+// and doubled file lists.
+let dvLoadGeneration = 0;
+
 async function onDvRunChange(keepFile = null, keepPage = 1, keepSeries = null, keepColors = null) {
+  const myGeneration = ++dvLoadGeneration;
   const run = document.getElementById('dv-run-select').value;
   dvState.run = run || null;
   dvState.file = null;
@@ -3853,6 +3864,7 @@ async function onDvRunChange(keepFile = null, keepPage = 1, keepSeries = null, k
     ]);
     const data = await filesRes.json();
     const droneData = await droneRes.json();
+    if (myGeneration !== dvLoadGeneration) return;   // superseded while waiting
 
     if (!data.ok) {
       statusEl.textContent = data.error;
@@ -3901,8 +3913,10 @@ async function onDvRunChange(keepFile = null, keepPage = 1, keepSeries = null, k
       fileSelect.value = keepFile;
       dvState.file = keepFile;
       await dvGoToPage(keepPage || 1);
+      if (myGeneration !== dvLoadGeneration) return;
       plotFileSelect.value = dvPlotFileValue('run', keepFile);
       await onDvPlotFileChange();
+      if (myGeneration !== dvLoadGeneration) return;
       restored = true;
     }
 
@@ -3918,6 +3932,7 @@ async function onDvRunChange(keepFile = null, keepPage = 1, keepSeries = null, k
         dvState.seriesColors[key] = (keepColors && keepColors[key]) || DV_SERIES_COLORS[i % DV_SERIES_COLORS.length];
       });
       await dvFetchAndRenderPlot();
+      if (myGeneration !== dvLoadGeneration) return;
       restored = true;
     }
 
