@@ -3364,6 +3364,34 @@ def _window_points(points, window_s):
         kept = thinned
     return kept, total
 
+
+def _run_span_s(run_dir_name, points):
+    """
+    Seconds from the start of the run to the newest sample - the upper end
+    of the Operation tab's time-frame slider. runall.py names each run
+    folder with its own start time (YYYYMMDD_HHMMSS, possibly suffixed), so
+    that is the run start for every sensor alike; files outside a run
+    folder (drone telemetry) fall back to their own first row.
+    """
+    if not points:
+        return None
+    try:
+        newest = datetime.strptime(points[-1]["t"][:19], PLOT_TS_FORMAT)
+    except ValueError:
+        return None
+    start = None
+    if run_dir_name:
+        try:
+            start = datetime.strptime(run_dir_name[:15], "%Y%m%d_%H%M%S")
+        except ValueError:
+            start = None
+    if start is None:
+        try:
+            start = datetime.strptime(points[0]["t"][:19], PLOT_TS_FORMAT)
+        except ValueError:
+            return None
+    return max(0, int((newest - start).total_seconds()))
+
 # Cache of each sensor's most-recently-resolved (run_dir_name, csv_path).
 # /plot_data polls every few seconds per sensor, and on a slow/high-latency
 # link each of the two directory listings it used to do on every single
@@ -3676,6 +3704,7 @@ def plot_data():
             continue
         points.append({"t": ts, "v": value})
 
+    run_span_s = _run_span_s(run_dir_name, points)
     points, total_in_window = _window_points(points, window_s)
 
     return jsonify({
@@ -3687,6 +3716,7 @@ def plot_data():
         "csv_file": os.path.basename(csv_path),
         "window_s": window_s,
         "total_in_window": total_in_window,
+        "run_span_s": run_span_s,
         "points": points,
     })
 
