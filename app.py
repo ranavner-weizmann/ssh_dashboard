@@ -3315,6 +3315,55 @@ def sensor_config_toggle():
 
 PLOT_MAX_POINTS = 300
 
+# When the client asks for a time window (the Operation tab's shared
+# "time frame" selector), the last `window` seconds of the CSV are returned
+# instead of a fixed sample count - 300 samples is 5 min of a 1 Hz sensor
+# but only 30 s of the 10 Hz TriSonica, so a sample count never meant the
+# same span across the six plots. A long window of fast data is thinned
+# evenly to this many points; the canvas cannot show more anyway.
+PLOT_WINDOW_MAX_POINTS = 1500
+PLOT_TS_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _window_points(points, window_s):
+    """
+    Trim `points` (oldest first, each {"t": "YYYY-MM-DD HH:MM:SS", "v": x})
+    to the requested time frame and thin the result.
+
+    window_s None  -> legacy behaviour, the last PLOT_MAX_POINTS samples
+    window_s 0     -> the whole run, thinned
+    window_s > 0   -> the last window_s seconds before the newest sample
+
+    Every CSV these plots read (uri_aplogger sensors, vitals_summary, the
+    PSDK's telemetry) writes fixed-width timestamps, so string order is
+    time order and the cut is a plain comparison per row - no parsing.
+    Returns (points, total_in_window) where total_in_window is the count
+    before thinning so the UI can say when it is showing a subset.
+    """
+    if window_s is None:
+        return points[-PLOT_MAX_POINTS:], min(len(points), PLOT_MAX_POINTS)
+    if not points:
+        return points, 0
+    kept = points
+    if window_s > 0:
+        try:
+            newest = datetime.strptime(points[-1]["t"][:19], PLOT_TS_FORMAT)
+        except ValueError:
+            return points[-PLOT_MAX_POINTS:], min(len(points), PLOT_MAX_POINTS)
+        cutoff = (newest - timedelta(seconds=window_s)).strftime(PLOT_TS_FORMAT)
+        i = len(points)
+        while i > 0 and points[i - 1]["t"][:19] >= cutoff:
+            i -= 1
+        kept = points[i:]
+    total = len(kept)
+    if total > PLOT_WINDOW_MAX_POINTS:
+        stride = -(-total // PLOT_WINDOW_MAX_POINTS)  # ceil
+        thinned = kept[::stride]
+        if thinned[-1] is not kept[-1]:
+            thinned.append(kept[-1])  # always end on the newest sample
+        kept = thinned
+    return kept, total
+
 # Cache of each sensor's most-recently-resolved (run_dir_name, csv_path).
 # /plot_data polls every few seconds per sensor, and on a slow/high-latency
 # link each of the two directory listings it used to do on every single
@@ -3544,6 +3593,16 @@ def plot_data():
     if not spec:
         return jsonify({"ok": False, "error": f"Unknown sensor: {sensor}"}), 400
 
+    # Optional time frame in seconds (0 = whole run). Absent -> legacy
+    # fixed sample count, so older clients keep working unchanged.
+    window_raw = request.args.get("window")
+    window_s = None
+    if window_raw is not None:
+        try:
+            window_s = max(0, int(float(window_raw)))
+        except ValueError:
+            return jsonify({"ok": False, "error": f"Bad window: {window_raw!r}"}), 400
+
     with state["lock"]:
         if not state["connected"] or not state["sftp"]:
             return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
@@ -3617,7 +3676,7 @@ def plot_data():
             continue
         points.append({"t": ts, "v": value})
 
-    points = points[-PLOT_MAX_POINTS:]
+    points, total_in_window = _window_points(points, window_s)
 
     return jsonify({
         "ok": True,
@@ -3626,6 +3685,8 @@ def plot_data():
         "unit": spec["unit"],
         "run_dir": run_dir_name,
         "csv_file": os.path.basename(csv_path),
+        "window_s": window_s,
+        "total_in_window": total_in_window,
         "points": points,
     })
 

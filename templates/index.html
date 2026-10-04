@@ -1264,6 +1264,24 @@
         <div id="capp-output" class="output-panel"></div>
       </div>
 
+      <!-- One time frame for all six live plots below. The server cuts each
+           CSV by timestamp, so every panel shows the same span of time
+           whatever the sensor's own sample rate. -->
+      <div class="panel" style="margin-bottom: 12px;">
+        <div class="plot-toolbar" style="margin-bottom: 0;">
+          <label style="margin-bottom: 0;">time frame (all live plots)</label>
+          <select id="plot-window-select" class="select-input">
+            <option value="60">last 1 min</option>
+            <option value="300" selected>last 5 min</option>
+            <option value="900">last 15 min</option>
+            <option value="1800">last 30 min</option>
+            <option value="3600">last 1 h</option>
+            <option value="10800">last 3 h</option>
+            <option value="0">whole run</option>
+          </select>
+        </div>
+      </div>
+
       <div class="plot-row">
         <div class="panel">
           <div class="plot-toolbar">
@@ -3432,6 +3450,25 @@ function attachPlotHover(canvas, tooltip, getPoints, formatTooltipValue, onHover
   });
 }
 
+// One time frame shared by every live plot. Persisted in localStorage so
+// it survives a reload, like the host presets.
+const PLOT_WINDOW_KEY = 'livePlotWindowS';
+const plotWindowSelect = document.getElementById('plot-window-select');
+try {
+  const saved = localStorage.getItem(PLOT_WINDOW_KEY);
+  if (saved !== null && Array.from(plotWindowSelect.options).some(o => o.value === saved)) {
+    plotWindowSelect.value = saved;
+  }
+} catch (e) { /* private mode / storage blocked: keep the default */ }
+
+function currentPlotWindowS() {
+  return plotWindowSelect.value;
+}
+
+function currentPlotWindowLabel() {
+  return plotWindowSelect.options[plotWindowSelect.selectedIndex].textContent;
+}
+
 function createPlotController(suffix, defaultSensor) {
   const selectEl = document.getElementById('plot-sensor-select' + suffix);
   const statValueEl = document.getElementById('plot-stat-value' + suffix);
@@ -3464,15 +3501,19 @@ function createPlotController(suffix, defaultSensor) {
 
   async function fetchData() {
     try {
-      const res = await fetch('/plot_data?sensor=' + encodeURIComponent(currentSensor));
+      const res = await fetch('/plot_data?sensor=' + encodeURIComponent(currentSensor)
+        + '&window=' + encodeURIComponent(currentPlotWindowS()));
       const data = await res.json();
 
       if (data.ok) {
         points = data.points || [];
         statUnitEl.textContent = data.unit || '';
+        const thinned = data.total_in_window > points.length
+          ? ` (${points.length} shown of ${data.total_in_window})`
+          : '';
         statusEl.textContent = points.length
-          ? `${data.csv_file} · ${points.length} samples`
-          : 'Connected, but no samples written yet...';
+          ? `${data.csv_file} · ${data.total_in_window ?? points.length} samples · ${currentPlotWindowLabel()}${thinned}`
+          : `Connected, but no samples in ${currentPlotWindowLabel()} yet...`;
         statusEl.style.color = 'var(--text-dim)';
       } else {
         points = [];
@@ -3519,7 +3560,13 @@ function createPlotController(suffix, defaultSensor) {
 
   selectEl.addEventListener('change', onSensorChange);
 
-  return { startPolling, stopPolling, draw };
+  function refetch() {
+    points = [];
+    hoverIndex = null;
+    fetchData();
+  }
+
+  return { startPolling, stopPolling, draw, refetch };
 }
 
 const plotControllers = [
@@ -3530,6 +3577,11 @@ const plotControllers = [
   createPlotController('-5', 'partector2pro'),
   createPlotController('-6', 'trisonica'),
 ];
+
+plotWindowSelect.addEventListener('change', () => {
+  try { localStorage.setItem(PLOT_WINDOW_KEY, plotWindowSelect.value); } catch (e) { /* ignore */ }
+  plotControllers.forEach(p => p.refetch());
+});
 
 // Starting all 6 controllers in the same tick used to mean all 6 landed
 // on the connection lock at the same instant, every 6s, forever - a
