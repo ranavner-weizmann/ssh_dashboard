@@ -3400,7 +3400,18 @@ PLOT_SENSORS = {
         "unit": "m/s",
         "scale": 1.0,
     },
+    # PM2.5 is the logger-derived mass column (uri_aplogger/derived.py:
+    # histogram bins x assumed density / sampled volume), written on every
+    # POPS row right after the raw b0..b15 bins. PM1_ug_m3 sits next to it
+    # if the 1 um cut is ever preferred here.
     "pops": {
+        "label": "PM2.5 (POPS)",
+        "csv_prefix": "pops_data_",
+        "value_column": "PM2.5_ug_m3",
+        "unit": "µg/m³",
+        "scale": 1.0,
+    },
+    "pops_conc": {
         "label": "Particle Conc. (POPS)",
         "csv_prefix": "pops_data_",
         "value_column": "PartCon",
@@ -3414,7 +3425,17 @@ PLOT_SENSORS = {
         "unit": "#/cm³",
         "scale": 1.0,
     },
+    # AAE_fit is the logger's own 5-wavelength absorption Angstrom exponent
+    # (uri_aplogger/derived.py), appended to every MA200 row; dimensionless.
+    # The instrument's own smoothed "AAE" column is also in the CSV.
     "miniaeth": {
+        "label": "Ångström exp. (MiniAeth)",
+        "csv_prefix": "miniaeth_data_",
+        "value_column": "AAE_fit",
+        "unit": "",
+        "scale": 1.0,
+    },
+    "miniaeth_bc": {
         "label": "Black Carbon (MiniAeth)",
         "csv_prefix": "miniaeth_data_",
         "value_column": "IR_BCc",

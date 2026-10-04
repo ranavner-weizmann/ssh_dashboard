@@ -1277,9 +1277,11 @@
               <option value="rhi">RH inline</option>
               <option value="intensity">Max Intensity</option>
               <option value="trisonica">Wind Speed (Trisonica)</option>
-              <option value="pops">Particle Conc. (POPS)</option>
+              <option value="pops">PM2.5 (POPS)</option>
+              <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
-              <option value="miniaeth">Black Carbon (MiniAeth)</option>
+              <option value="miniaeth">Ångström exp. (MiniAeth)</option>
+              <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
           </div>
@@ -1308,9 +1310,11 @@
               <option value="rhi">RH inline</option>
               <option value="intensity">Max Intensity</option>
               <option value="trisonica">Wind Speed (Trisonica)</option>
-              <option value="pops">Particle Conc. (POPS)</option>
+              <option value="pops">PM2.5 (POPS)</option>
+              <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
-              <option value="miniaeth">Black Carbon (MiniAeth)</option>
+              <option value="miniaeth">Ångström exp. (MiniAeth)</option>
+              <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
           </div>
@@ -1339,9 +1343,11 @@
               <option value="rhi">RH inline</option>
               <option value="intensity">Max Intensity</option>
               <option value="trisonica">Wind Speed (Trisonica)</option>
-              <option value="pops" selected>Particle Conc. (POPS)</option>
+              <option value="pops" selected>PM2.5 (POPS)</option>
+              <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
-              <option value="miniaeth">Black Carbon (MiniAeth)</option>
+              <option value="miniaeth">Ångström exp. (MiniAeth)</option>
+              <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
           </div>
@@ -1370,9 +1376,11 @@
               <option value="rhi">RH inline</option>
               <option value="intensity">Max Intensity</option>
               <option value="trisonica">Wind Speed (Trisonica)</option>
-              <option value="pops">Particle Conc. (POPS)</option>
+              <option value="pops">PM2.5 (POPS)</option>
+              <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
-              <option value="miniaeth" selected>Black Carbon (MiniAeth)</option>
+              <option value="miniaeth" selected>Ångström exp. (MiniAeth)</option>
+              <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
           </div>
@@ -1401,9 +1409,11 @@
               <option value="rhi">RH inline</option>
               <option value="intensity">Max Intensity</option>
               <option value="trisonica">Wind Speed (Trisonica)</option>
-              <option value="pops">Particle Conc. (POPS)</option>
+              <option value="pops">PM2.5 (POPS)</option>
+              <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro" selected>Particle Conc. (Partector2Pro)</option>
-              <option value="miniaeth">Black Carbon (MiniAeth)</option>
+              <option value="miniaeth">Ångström exp. (MiniAeth)</option>
+              <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
           </div>
@@ -1432,9 +1442,11 @@
               <option value="rhi">RH inline</option>
               <option value="intensity">Max Intensity</option>
               <option value="trisonica" selected>Wind Speed (Trisonica)</option>
-              <option value="pops">Particle Conc. (POPS)</option>
+              <option value="pops">PM2.5 (POPS)</option>
+              <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
-              <option value="miniaeth">Black Carbon (MiniAeth)</option>
+              <option value="miniaeth">Ångström exp. (MiniAeth)</option>
+              <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
           </div>
@@ -3238,9 +3250,14 @@ function playTimerBeep() {
 // The vitals-summary columns: TECA carries ~6 decimals of current but 3
 // is plenty to read a trend; TECT has 3; RHi is written with 1; the
 // spectrometer's max intensity is an integer count.
+// pops is now PM2.5 in ug/m3 (logger-derived, 5 significant digits) and
+// miniaeth the fitted Angstrom exponent (~1-2, 4 significant digits), so
+// both read best with 2 decimals; the raw concentration/BC options keep
+// their old precision under pops_conc / miniaeth_bc.
 const PLOT_DECIMALS = {
   pom: 1, imet: 2, cavity: 1, teca: 3, tect: 2, rhi: 1, intensity: 0,
-  trisonica: 2, pops: 1, partector2pro: 0, miniaeth: 1, altitude_agl: 2,
+  trisonica: 2, pops: 2, pops_conc: 1, partector2pro: 0, miniaeth: 2, miniaeth_bc: 1,
+  altitude_agl: 2,
 };
 
 function plotXY(points, width, height, minV, maxV) {
