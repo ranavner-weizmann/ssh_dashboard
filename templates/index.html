@@ -308,7 +308,9 @@
   }
   .select-input:focus { border-color: var(--accent); }
 
-  input[type=range] { accent-color: var(--accent); cursor: pointer; }
+  .plot-window-custom { display: none; align-items: center; gap: 8px; }
+  .plot-window-custom.active { display: inline-flex; }
+  .plot-window-custom input[type=number] { width: 84px; }
 
   .plot-toolbar {
     display: flex;
@@ -1266,16 +1268,36 @@
         <div id="capp-output" class="output-panel"></div>
       </div>
 
-      <!-- One time frame for all six live plots below: a slider from the
-           last 5 minutes up to the whole current run (its right end follows
-           the run as it grows). The server cuts each CSV by timestamp, so
-           every panel shows the same span whatever the sensor's rate. -->
+      <!-- One time frame for all six live plots below: fixed presets from
+           the last 5 minutes up to the whole current run, plus a custom
+           entry (any number of minutes / hours / days). The server cuts
+           each CSV by timestamp, so every panel shows the same span
+           whatever the sensor's rate. -->
       <div class="panel" style="margin-bottom: 12px;">
-        <div class="plot-toolbar" style="margin-bottom: 0; flex-wrap: nowrap;">
+        <div class="plot-toolbar" style="margin-bottom: 0;">
           <label style="margin-bottom: 0; white-space: nowrap;">time frame (all live plots)</label>
-          <input type="range" id="plot-window-slider" min="300" max="300" step="60" value="300"
-                 style="flex: 1; min-width: 160px;" aria-label="live plot time frame">
-          <span class="hint" id="plot-window-label" style="min-width: 170px; text-align: right; white-space: nowrap;">last 5 min</span>
+          <select id="plot-window-select" class="select-input" style="width: auto;">
+            <option value="300" selected>last 5 min</option>
+            <option value="600">last 10 min</option>
+            <option value="1800">last 30 min</option>
+            <option value="3600">last 1 h</option>
+            <option value="7200">last 2 h</option>
+            <option value="21600">last 6 h</option>
+            <option value="43200">last 12 h</option>
+            <option value="86400">last 24 h</option>
+            <option value="0">since start</option>
+            <option value="custom">custom...</option>
+          </select>
+          <span class="plot-window-custom" id="plot-window-custom">
+            <input type="number" id="plot-window-custom-value" class="select-input" min="1" step="1" value="5" aria-label="custom time frame amount">
+            <select id="plot-window-custom-unit" class="select-input" style="width: auto;" aria-label="custom time frame unit">
+              <option value="60">minutes</option>
+              <option value="3600" selected>hours</option>
+              <option value="86400">days</option>
+            </select>
+            <button class="btn-ghost" id="plot-window-custom-apply" style="width: auto; white-space: nowrap;">Apply</button>
+          </span>
+          <span class="hint" id="plot-window-label" style="margin-left: auto; white-space: nowrap;">last 5 min</span>
         </div>
       </div>
 
@@ -3447,64 +3469,82 @@ function attachPlotHover(canvas, tooltip, getPoints, formatTooltipValue, onHover
   });
 }
 
-// One time frame shared by every live plot: a slider from the last 5 min
-// up to the whole current run. Its maximum is the run's length, learned
-// from each /plot_data response (run_span_s) and growing as the run goes
-// on. Dragging to the right end means "whole run" and stays pinned there
-// as the maximum moves; anywhere else is a fixed trailing window. The
-// choice is persisted in localStorage like the host presets.
-const PLOT_WINDOW_KEY = 'livePlotWindowS';
-const PLOT_WINDOW_MIN_S = 300;
-const plotWindowSlider = document.getElementById('plot-window-slider');
+// One time frame shared by every live plot: nine presets (5 min .. 24 h
+// and "since start" = the whole current run, window 0) plus a custom
+// entry of any number of minutes / hours / days. The choice is persisted
+// in localStorage like the host presets.
+const PLOT_WINDOW_KEY = 'livePlotWindow';
+const PLOT_WINDOW_MIN_S = 60;                 // custom entries: at least 1 minute
+const plotWindowSelect = document.getElementById('plot-window-select');
+const plotWindowCustom = document.getElementById('plot-window-custom');
+const plotWindowCustomValue = document.getElementById('plot-window-custom-value');
+const plotWindowCustomUnit = document.getElementById('plot-window-custom-unit');
+const plotWindowCustomApply = document.getElementById('plot-window-custom-apply');
 const plotWindowLabel = document.getElementById('plot-window-label');
-let plotWindowDesiredS = PLOT_WINDOW_MIN_S;   // what the user picked, in seconds
-let plotWindowPinnedToMax = false;           // right end = whole run
-try {
-  const saved = localStorage.getItem(PLOT_WINDOW_KEY);
-  if (saved === 'max') {
-    plotWindowPinnedToMax = true;
-  } else if (saved !== null && Number.isFinite(+saved)) {
-    plotWindowDesiredS = Math.max(PLOT_WINDOW_MIN_S, Math.round(+saved / 60) * 60);
-  }
-} catch (e) { /* private mode / storage blocked: keep the default */ }
+let plotWindowS = 300;                        // seconds; 0 = since the run started
 
 function formatSpan(seconds) {
   const s = Math.max(0, Math.round(seconds));
+  if (s % 86400 === 0 && s >= 86400) { const d = s / 86400; return `${d} day${d === 1 ? '' : 's'}`; }
+  if (s % 3600 === 0) return `${s / 3600} h`;
   const h = Math.floor(s / 3600);
   const m = Math.round((s % 3600) / 60);
-  if (h && m) return `${h} h ${m} min`;
-  if (h) return `${h} h`;
-  return `${m} min`;
+  return h ? `${h} h ${m} min` : `${m} min`;
 }
 
 function currentPlotWindowS() {
-  return plotWindowPinnedToMax ? 0 : plotWindowDesiredS;
+  return plotWindowS;
 }
 
 function currentPlotWindowLabel() {
-  return plotWindowPinnedToMax
-    ? `whole run (${formatSpan(+plotWindowSlider.max)})`
-    : `last ${formatSpan(plotWindowDesiredS)}`;
+  return plotWindowS === 0 ? 'since start' : `last ${formatSpan(plotWindowS)}`;
 }
 
-function syncPlotWindowSlider() {
-  const max = +plotWindowSlider.max;
-  plotWindowSlider.value = plotWindowPinnedToMax ? max : Math.min(plotWindowDesiredS, max);
+function plotWindowIsCustom() {
+  return plotWindowSelect.value === 'custom';
+}
+
+// Reads the custom amount + unit; null when the entry is not usable.
+function customPlotWindowS() {
+  const amount = Math.floor(+plotWindowCustomValue.value);
+  if (!Number.isFinite(amount) || amount < 1) return null;
+  return Math.max(PLOT_WINDOW_MIN_S, amount * +plotWindowCustomUnit.value);
+}
+
+function savePlotWindow() {
+  try {
+    localStorage.setItem(PLOT_WINDOW_KEY, JSON.stringify({
+      mode: plotWindowIsCustom() ? 'custom' : 'preset',
+      seconds: plotWindowS,
+      amount: plotWindowCustomValue.value,
+      unit: plotWindowCustomUnit.value,
+    }));
+  } catch (e) { /* private mode / storage blocked */ }
+}
+
+function restorePlotWindow() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PLOT_WINDOW_KEY) || 'null');
+    if (!saved) return;
+    if (saved.amount) plotWindowCustomValue.value = saved.amount;
+    if (saved.unit) plotWindowCustomUnit.value = saved.unit;
+    if (saved.mode === 'custom') {
+      plotWindowSelect.value = 'custom';
+      plotWindowS = customPlotWindowS() ?? 300;
+    } else if (Array.from(plotWindowSelect.options).some(o => o.value === String(saved.seconds))) {
+      plotWindowSelect.value = String(saved.seconds);
+      plotWindowS = +saved.seconds;
+    }
+  } catch (e) { /* ignore a bad/old entry and keep the default */ }
+}
+
+function syncPlotWindowControls() {
+  plotWindowCustom.classList.toggle('active', plotWindowIsCustom());
   plotWindowLabel.textContent = currentPlotWindowLabel();
 }
 
-// Called with every /plot_data response so the slider's right end tracks
-// the run's length (rounded up to the minute, never below the 5 min floor).
-function noteRunSpan(runSpanS) {
-  if (!Number.isFinite(runSpanS)) return;
-  const newMax = Math.max(PLOT_WINDOW_MIN_S, Math.ceil(runSpanS / 60) * 60);
-  if (newMax !== +plotWindowSlider.max) {
-    plotWindowSlider.max = newMax;
-    syncPlotWindowSlider();
-  }
-}
-
-syncPlotWindowSlider();
+restorePlotWindow();
+syncPlotWindowControls();
 
 function createPlotController(suffix, defaultSensor) {
   const selectEl = document.getElementById('plot-sensor-select' + suffix);
@@ -3545,7 +3585,6 @@ function createPlotController(suffix, defaultSensor) {
       if (data.ok) {
         points = data.points || [];
         statUnitEl.textContent = data.unit || '';
-        noteRunSpan(data.run_span_s);
         const thinned = data.total_in_window > points.length
           ? ` (${points.length} shown of ${data.total_in_window})`
           : '';
@@ -3616,20 +3655,40 @@ const plotControllers = [
   createPlotController('-6', 'trisonica'),
 ];
 
-// 'input' fires continuously while dragging: only the label updates then.
-// 'change' fires on release: persist and refetch all six plots once.
-plotWindowSlider.addEventListener('input', () => {
-  const v = +plotWindowSlider.value;
-  plotWindowPinnedToMax = v >= +plotWindowSlider.max;
-  plotWindowDesiredS = v;
-  plotWindowLabel.textContent = currentPlotWindowLabel();
+function applyPlotWindow(seconds) {
+  plotWindowS = seconds;
+  savePlotWindow();
+  syncPlotWindowControls();
+  plotControllers.forEach(p => p.refetch());
+}
+
+plotWindowSelect.addEventListener('change', () => {
+  if (plotWindowIsCustom()) {
+    // Show the entry; apply whatever it already holds (defaults to 5 h)
+    // so the plots respond right away, and again on Apply / Enter.
+    syncPlotWindowControls();
+    const custom = customPlotWindowS();
+    if (custom !== null) applyPlotWindow(custom);
+    plotWindowCustomValue.focus();
+    plotWindowCustomValue.select();
+    return;
+  }
+  applyPlotWindow(+plotWindowSelect.value);
 });
 
-plotWindowSlider.addEventListener('change', () => {
-  try {
-    localStorage.setItem(PLOT_WINDOW_KEY, plotWindowPinnedToMax ? 'max' : String(plotWindowDesiredS));
-  } catch (e) { /* ignore */ }
-  plotControllers.forEach(p => p.refetch());
+function applyCustomPlotWindow() {
+  const custom = customPlotWindowS();
+  if (custom === null) {
+    plotWindowLabel.textContent = 'enter a number of 1 or more';
+    return;
+  }
+  applyPlotWindow(custom);
+}
+
+plotWindowCustomApply.addEventListener('click', applyCustomPlotWindow);
+plotWindowCustomUnit.addEventListener('change', applyCustomPlotWindow);
+plotWindowCustomValue.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); applyCustomPlotWindow(); }
 });
 
 // Starting all 6 controllers in the same tick used to mean all 6 landed
