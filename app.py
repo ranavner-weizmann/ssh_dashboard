@@ -39,6 +39,8 @@ import stat
 import statistics
 import subprocess
 import sys
+import logging
+from logging.handlers import RotatingFileHandler
 import threading
 import time
 import webbrowser
@@ -47,6 +49,7 @@ from datetime import datetime, timedelta
 import anthropic
 import paramiko
 from flask import Flask, render_template, request, jsonify
+from werkzeug.exceptions import HTTPException
 from flask_sock import Sock
 
 # --- Path resolution: works both as a plain script and as a frozen
@@ -212,6 +215,40 @@ def build_remote_path():
     ts = datetime.now().strftime("%Y%m%d")
     filename = f"remote_pc_notes_{ts}.csv"
     return f"{REMOTE_DIR}/{NOTES_SUBFOLDER}/{filename}", filename
+
+
+# ---------- Crash visibility ----------
+# Every fetch() in the page expects JSON. An uncaught exception used to come
+# back as Werkzeug's HTML "500 Internal Server Error" page, which the UI
+# could only render as a generic failure, and the traceback existed nowhere
+# but the exe's console window. Log it to a file and say what it was.
+LOG_PATH = os.path.join(USER_DATA_DIR, "ssh_dashboard.log")
+
+
+def _setup_file_logging():
+    try:
+        os.makedirs(USER_DATA_DIR, exist_ok=True)
+        handler = RotatingFileHandler(LOG_PATH, maxBytes=2_000_000, backupCount=2, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        app.logger.addHandler(handler)
+        app.logger.setLevel(logging.INFO)
+        app.logger.info("dashboard started, pid %s", os.getpid())
+    except OSError:
+        pass  # unwritable location: console output only, as before
+
+
+_setup_file_logging()
+
+
+@app.errorhandler(Exception)
+def _unhandled_error(e):
+    if isinstance(e, HTTPException):
+        return e  # real 404s etc. keep their normal response
+    app.logger.exception("Unhandled error in %s %s", request.method, request.path)
+    return jsonify({
+        "ok": False,
+        "error": f"Internal error: {type(e).__name__}: {e} (traceback in {LOG_PATH})",
+    }), 500
 
 
 @app.route("/")
@@ -1863,7 +1900,7 @@ ASSISTANT_ONLINE_TOOLS = [
             "Checks whether the given CSV files are still being written to, "
             "and whether their most recent readings look like statistical "
             "outliers or are stuck at a constant value, each compared against "
-            "that file's own history so far this run. Get file names from "
+            "that file's own readings over the last 30 minutes. Get file names from "
             "list_instruments first."
         ),
         "input_schema": {
@@ -1933,18 +1970,36 @@ def _tool_list_instruments(run_name):
     return f"Files for run {run_name}:\n" + "\n".join(lines), None
 
 
+# Both tools below used to read every row of every file they looked at and
+# crunch it in pure Python - on a 30-hour run that is ~110k rows x 206
+# columns for merged_data alone: minutes per question, gigabytes of row
+# dicts, and a bare 500 when it fell over. They now look at the recent past
+# only, which is also what "is this instrument healthy right now" means.
+ASSISTANT_HEALTH_WINDOW_S = 30 * 60
+ASSISTANT_CORR_WINDOW_S = 2 * 3600
+ASSISTANT_CORR_MAX_ROWS = 2000
+
+# Columns that are bookkeeping rather than measurements: never worth a
+# z-score or a correlation, and they are many (every instrument's own
+# timestamp/date/time/status/checksum lands in merged_data).
+_NON_MEASUREMENT_COL = re.compile(
+    r"(?i)(timestamp|date|time|datum|session|serial|checksum|firmware|version|status|config|optical|_id$|^id$)"
+)
+
+
 def _tool_check_instrument_health(run_name, files):
     """
     Tool executor for check_instrument_health - see
     ASSISTANT_ONLINE_TOOLS for the schema. Reports facts (age since last
-    write, any flagged columns) rather than a healthy/unhealthy verdict;
-    Claude does the judgment call, since this app has no reliable signal
-    for whether the logger is even still supposed to be running (see
-    state["runall_pid"]'s own caveats elsewhere in this file).
+    write, any flagged columns over the last ASSISTANT_HEALTH_WINDOW_S)
+    rather than a healthy/unhealthy verdict; Claude does the judgment
+    call, since this app has no reliable signal for whether the logger
+    is even still supposed to be running.
     """
     if not files:
         return None, "No files given - call list_instruments first and pass some of its results here."
 
+    window_min = ASSISTANT_HEALTH_WINDOW_S // 60
     report = []
     for f in files:
         relpath = (f or {}).get("file")
@@ -1959,7 +2014,7 @@ def _tool_check_instrument_health(run_name, files):
         age_s = time.time() - mtime
         age_txt = f"{age_s / 60:.1f} min ago" if age_s < 3600 else f"{age_s / 3600:.1f} hr ago"
 
-        raw, err = _read_remote_csv(run_name, relpath, source)
+        raw, err = _read_remote_csv_tail(run_name, relpath, source, ASSISTANT_HEALTH_WINDOW_S)
         if err:
             report.append(f"{relpath}: last written {age_txt}; could not read its content ({err[0].get_json()['error']})")
             continue
@@ -1967,35 +2022,61 @@ def _tool_check_instrument_health(run_name, files):
         reader = csv.DictReader(io.StringIO(raw))
         fieldnames = reader.fieldnames or []
         rows = list(reader)
-        numeric_cols = [
-            c for c in fieldnames
-            if sum(1 for row in rows if _parse_numeric(row.get(c)) is not None) >= 2
-        ]
+        candidates = [c for c in fieldnames if not _NON_MEASUREMENT_COL.search(c)]
+        values = {c: [] for c in candidates}
+        for row in rows:
+            for c in candidates:
+                v = _parse_numeric(row.get(c))
+                if v is not None:
+                    values[c].append(v)
+        numeric_cols = [c for c in candidates if len(values[c]) >= 2]
 
         flags = []
-        if numeric_cols:
-            values, _ = _values_by_column(raw, numeric_cols)
-            for s in _stats_from_values(values, numeric_cols):
-                data = values[s["column"]]
-                if s["count"] < 2:
-                    continue
-                last_val = data[-1]
-                if s["std"]:
-                    z = (last_val - s["mean"]) / s["std"]
-                    if abs(z) >= 3:
-                        flags.append(
-                            f"{s['column']}: latest value {last_val:.4g} is {z:.1f} std devs "
-                            f"from this file's own mean ({s['mean']:.4g})"
-                        )
-                tail = data[-5:]
-                if len(tail) >= 5 and len(set(tail)) == 1:
-                    flags.append(f"{s['column']}: stuck at a constant value ({tail[0]:.4g}) for its last 5 readings")
+        for st in _stats_from_values(values, numeric_cols):
+            data = values[st["column"]]
+            last_val = data[-1]
+            if st["std"]:
+                z = (last_val - st["mean"]) / st["std"]
+                if abs(z) >= 3:
+                    flags.append(
+                        f"{st['column']}: latest value {last_val:.4g} is {z:.1f} std devs from its "
+                        f"mean over the last {window_min} min ({st['mean']:.4g})"
+                    )
+            tail = data[-5:]
+            if len(tail) >= 5 and len(set(tail)) == 1:
+                flags.append(f"{st['column']}: stuck at a constant value ({tail[0]:.4g}) for its last 5 readings")
 
-        line = f"{relpath} (source={source}): last written {age_txt}, {len(rows)} rows so far"
+        line = (f"{relpath} (source={source}): last written {age_txt}, "
+                f"{len(rows)} rows in the last {window_min} min")
         line += "\n  - " + "\n  - ".join(flags) if flags else "\n  - no anomalies flagged"
         report.append(line)
 
     return "\n\n".join(report), None
+
+
+def _sparse_correlations(series, cols):
+    """
+    Pairwise-deleted Pearson r for every pair of columns, where each
+    column is {row_index: value} holding only the rows it has a value on.
+    Iterating the sparser column of each pair and looking the other up
+    keeps the cost near sum(min(n_a, n_b)) instead of pairs x rows - the
+    30 s MA200 columns pair with the 1 Hz ones in a few hundred steps.
+    """
+    out = []
+    for i, a in enumerate(cols):
+        sa = series[a]
+        for b in cols[i + 1:]:
+            sb = series[b]
+            small, big = (sa, sb) if len(sa) <= len(sb) else (sb, sa)
+            xs, ys = [], []
+            for idx, v in small.items():
+                w = big.get(idx)
+                if w is not None:
+                    xs.append(v)
+                    ys.append(w)
+            r, n = _pearson(xs, ys)
+            out.append({"a": a, "b": b, "r": r, "n": n})
+    return out
 
 
 def _tool_scan_correlations(run_name, min_r):
@@ -2014,30 +2095,41 @@ def _tool_scan_correlations(run_name, min_r):
         return "This run has no merged_data CSV yet, so there's nothing to cross-correlate across instruments.", None
     relpath = merged[0]
 
-    raw, err = _read_remote_csv(run_name, relpath, source="run")
+    raw, err = _read_remote_csv_tail(run_name, relpath, "run", ASSISTANT_CORR_WINDOW_S)
     if err:
         return None, err[0].get_json()["error"]
 
     reader = csv.DictReader(io.StringIO(raw))
     fieldnames = reader.fieldnames or []
-    rows = list(reader)
-    numeric_cols = [
-        c for c in fieldnames
-        if sum(1 for row in rows if _parse_numeric(row.get(c)) is not None) >= 2
-    ]
-    if len(numeric_cols) < 2:
-        return f"{relpath} doesn't have enough numeric columns to correlate.", None
+    rows = list(reader)[-ASSISTANT_CORR_MAX_ROWS:]
+    if not rows:
+        return f"{relpath} has no rows in the last {ASSISTANT_CORR_WINDOW_S // 3600} h.", None
 
-    matrix, err = _correlation_matrix_from_raw(raw, numeric_cols)
-    if err:
-        return None, err[0].get_json()["error"]
+    series = {}
+    for c in fieldnames:
+        if _NON_MEASUREMENT_COL.search(c):
+            continue
+        d = {}
+        for i, row in enumerate(rows):
+            v = _parse_numeric(row.get(c))
+            if v is not None:
+                d[i] = v
+        if len(d) >= 10 and len(set(d.values())) > 1:   # enough points, not constant
+            series[c] = d
+    cols = list(series)
+    if len(cols) < 2:
+        return f"{relpath} doesn't have enough varying numeric columns to correlate.", None
 
-    strong = [m for m in matrix if m["a"] != m["b"] and m["r"] is not None and abs(m["r"]) >= min_r]
+    matrix = _sparse_correlations(series, cols)
+    strong = [m for m in matrix if m["r"] is not None and m["n"] >= 10 and abs(m["r"]) >= min_r]
     strong.sort(key=lambda m: -abs(m["r"]))
+    span_txt = f"{rows[0].get(fieldnames[0], '?')} .. {rows[-1].get(fieldnames[0], '?')}"
     if not strong:
-        return f"No column pairs in {relpath} have |r| >= {min_r}.", None
+        return (f"No column pairs in {relpath} have |r| >= {min_r} over the last {len(rows)} merged rows "
+                f"({span_txt}; {len(cols)} columns scanned)."), None
 
-    lines = [f"Strong correlations in {relpath} (|r| >= {min_r}):"]
+    lines = [f"Strong correlations in {relpath} over the last {len(rows)} merged rows "
+             f"({span_txt}; {len(cols)} columns scanned, |r| >= {min_r}):"]
     for m in strong[:15]:
         lines.append(f"  - {m['a']} vs {m['b']}: r={m['r']:.3f} (n={m['n']})")
     return "\n".join(lines), None
@@ -2052,16 +2144,20 @@ def _dispatch_assistant_tool(run_name, name, tool_input):
     to the operator rather than an HTTP error.
     """
     tool_input = tool_input or {}
-    if name == "list_instruments":
-        return _tool_list_instruments(run_name)
-    if name == "check_instrument_health":
-        return _tool_check_instrument_health(run_name, tool_input.get("files") or [])
-    if name == "scan_correlations":
-        min_r = tool_input.get("min_r")
-        if not isinstance(min_r, (int, float)):
-            min_r = 0.6
-        return _tool_scan_correlations(run_name, min_r)
-    return None, f"Unknown tool: {name}"
+    started = time.time()
+    try:
+        if name == "list_instruments":
+            return _tool_list_instruments(run_name)
+        if name == "check_instrument_health":
+            return _tool_check_instrument_health(run_name, tool_input.get("files") or [])
+        if name == "scan_correlations":
+            min_r = tool_input.get("min_r")
+            if not isinstance(min_r, (int, float)):
+                min_r = 0.6
+            return _tool_scan_correlations(run_name, min_r)
+        return None, f"Unknown tool: {name}"
+    finally:
+        app.logger.info("assistant tool %s took %.1fs", name, time.time() - started)
 
 
 ASSISTANT_MAX_TOOL_ITERATIONS = 6
@@ -4126,6 +4222,31 @@ def _read_remote_csv(run_name, relpath, source="run"):
             return None, (jsonify({"ok": False, "error": f"Could not read {relpath}: {e}"}), 500)
 
     return raw, None
+
+
+def _read_remote_csv_tail(run_name, relpath, source, seconds):
+    """
+    Like _read_remote_csv but only the last `seconds` of the file (header
+    included). The assistant's live tools look at *recent* readings, so
+    they must not drag a multi-day file over the link and then parse all
+    of it: this reads just the mirror's tail (see _get_remote_csv).
+    Returns (raw_text, None) or (None, error_response).
+    """
+    csv_path, err = _remote_csv_path(run_name, relpath, source)
+    if err:
+        return None, err
+
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return None, (jsonify({"ok": False, "error": "Not connected to remote host."}), 400)
+        try:
+            entry = _get_remote_csv(state["sftp"], csv_path, need_from_s=seconds)
+            return (entry.header or "") + entry.text, None
+        except IOError as e:
+            return None, (jsonify({"ok": False, "error": f"Could not read {relpath}: {e}"}), 404)
+        except Exception as e:
+            _mark_disconnected()
+            return None, (jsonify({"ok": False, "error": f"Could not read {relpath}: {e}"}), 500)
 
 
 def _remote_csv_mtime(run_name, relpath, source="run"):
