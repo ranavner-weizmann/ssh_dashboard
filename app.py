@@ -1587,7 +1587,12 @@ def offline_merged_altitude_profile(name, date):
 # the frontend keeps the conversation history in memory and resends it
 # with every question.
 
-ASSISTANT_MODEL = "claude-opus-5"
+ASSISTANT_MODEL = "claude-opus-5-5"
+# Opus 5.5 can decline a request on safety grounds (stop_reason "refusal");
+# "default" server-side fallbacks re-run such a request on a substitute
+# model inside the same call instead of returning nothing. Needs the beta
+# messages endpoint plus this beta flag.
+ASSISTANT_BETAS = ["server-side-fallback-2026-07-01"]
 
 ASSISTANT_SYSTEM_PREAMBLE = (
     "You are a data-analysis assistant built into a local dashboard for a drone-based "
@@ -1662,10 +1667,12 @@ def _ask_claude_with_context(context, question, history):
     messages.append({"role": "user", "content": question})
 
     try:
-        response = client.messages.create(
+        response = client.beta.messages.create(
             model=ASSISTANT_MODEL,
             max_tokens=1024,
             output_config={"effort": "medium"},
+            betas=ASSISTANT_BETAS,
+            fallbacks="default",
             system=f"{ASSISTANT_SYSTEM_PREAMBLE}\n\n{context}",
             messages=messages,
         )
@@ -2189,10 +2196,12 @@ def _ask_claude_with_tools(context, question, history, run_name):
 
     for _ in range(ASSISTANT_MAX_TOOL_ITERATIONS):
         try:
-            response = client.messages.create(
+            response = client.beta.messages.create(
                 model=ASSISTANT_MODEL,
                 max_tokens=1024,
                 output_config={"effort": "medium"},
+                betas=ASSISTANT_BETAS,
+                fallbacks="default",
                 system=f"{ASSISTANT_SYSTEM_PREAMBLE}{ASSISTANT_TOOLS_ADDENDUM}\n\n{context}",
                 messages=messages,
                 tools=ASSISTANT_ONLINE_TOOLS,
