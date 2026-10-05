@@ -3410,32 +3410,53 @@ def _run_span_s(run_dir_name, points):
 _plot_path_cache = {}
 
 
-# ---------- Remote CSV cache: fetch only what was appended ----------
+# ---------- Remote CSV cache: tail first, fetch only what is needed ----------
 #
 # Every live-plot poll and every Data Viewer click used to download the whole
 # CSV over SFTP again. On the field link (Tailscale, often relayed) a plain
 # paramiko read runs at ~0.1 MB/s because each 32 KB block is its own round
-# trip: the current run's 7 MB merged file took 80 s per read, the 3 MB POPS
-# file ~35 s - and six plots did that every 6 s, serialised on one lock. The
-# logger's CSVs are append-only, so each file is mirrored here once (with
-# prefetch, ~6x faster than a plain read) and afterwards only `stat` + the
-# newly appended bytes are fetched: well under a second whatever the size.
+# trip, and prefetching only lifts that to ~0.5 MB/s - so even mirroring a
+# file once is minutes of dead time on a multi-day run (a 1 Hz POPS log is
+# ~1 MB per hour; merged_data several times that), with six plots queueing
+# for it on one lock.
+#
+# So each file is mirrored *from the end*: the header line plus the newest
+# chunk, which already covers hours of 1 Hz data. A longer time frame backs
+# the mirror up only as far as its cutoff needs, "since start" and the Data
+# Viewer (which need every row) back it up to the first data line, and once
+# mirrored a region is never fetched again. The logger's CSVs are
+# append-only, so later polls cost one `stat` plus the bytes added since.
+
+_CSV_TAIL_CHUNK = 1 << 20          # first backward step: 1 MB (~1 h of 1 Hz data)
+_CSV_BACKFILL_MAX_STEP = 16 << 20  # steps double up to this, to cut round trips
+_CSV_HEADER_PROBE = 16 << 10       # the header line is always within the first 16 KB
+
 
 class _RemoteCsv:
     """
-    A remote CSV mirrored locally: `text` holds everything up to the last
-    complete line; `pending` the raw bytes of a trailing line the sensor
-    process may still be in the middle of writing.
+    A remote CSV mirrored locally from the tail backwards.
+
+    `header` is the header line; `text` holds complete data lines from byte
+    offset `start` up to the last complete line in the file; `pending` is
+    the raw bytes of a trailing line the sensor may still be writing.
     """
-    __slots__ = ("path", "size", "mtime", "text", "pending", "last_used")
+    __slots__ = ("path", "size", "mtime", "header", "data_start", "start",
+                 "text", "pending", "last_used")
 
     def __init__(self, path):
         self.path = path
-        self.size = 0
+        self.size = 0            # bytes of the remote file accounted for
         self.mtime = None
+        self.header = None       # header line including its newline
+        self.data_start = 0      # offset of the first data line
+        self.start = None        # offset where `text` begins (None: not mirrored yet)
         self.text = ""
         self.pending = b""
         self.last_used = 0.0
+
+    @property
+    def complete(self):
+        return self.start is not None and self.start <= self.data_start
 
 
 _remote_csv_cache = {}          # remote path -> _RemoteCsv
@@ -3448,41 +3469,38 @@ def _evict_remote_csv_cache():
         _remote_csv_cache.pop(oldest.path, None)
 
 
-def _get_remote_csv(sftp, path):
-    """
-    Return the cached mirror of `path`, brought up to date with the file on
-    the Pi. Caller must hold state["lock"] (paramiko's SFTP client is not
-    thread-safe). Raises IOError if the file does not exist; any other
-    exception means the transport is dead and the caller should
-    _mark_disconnected() as it would for a plain read.
+def _sftp_read_range(sftp, path, offset, length):
+    """Bytes [offset, offset+length) of the remote file; pipelined when large."""
+    if length <= 0:
+        return b""
+    with sftp.open(path, "rb") as f:
+        f.seek(offset)
+        if length > 65536:
+            # Queue the block requests up front instead of one round trip
+            # per 32 KB. file_size caps the prefetch at the end of our range.
+            f.prefetch(offset + length)
+        return f.read(length)
 
-    Unchanged size and mtime -> nothing is transferred. Grown -> only the
-    new tail is read. Shrunk, or same size but rewritten -> full reload.
-    """
-    st = sftp.stat(path)
-    entry = _remote_csv_cache.get(path)
-    if entry is not None and entry.size == st.st_size and entry.mtime == st.st_mtime:
-        entry.last_used = time.time()
-        return entry
-    if entry is None or st.st_size <= entry.size:
-        entry = _RemoteCsv(path)
-        _remote_csv_cache[path] = entry
-        _evict_remote_csv_cache()
 
-    to_read = st.st_size - entry.size
-    data = b""
-    if to_read > 0:
-        with sftp.open(path, "rb") as f:
-            if entry.size == 0:
-                # Pipelines the block requests instead of one round trip
-                # per 32 KB; the single biggest win for a first load.
-                f.prefetch(st.st_size)
-            else:
-                f.seek(entry.size)
-            data = f.read(to_read)
-    entry.size += len(data)
-    entry.mtime = st.st_mtime if entry.size == st.st_size else None
+def _csv_first_field(line):
+    comma = line.find(",")
+    return (line[:comma] if comma != -1 else line).strip()
 
+
+def _csv_first_ts(text):
+    nl = text.find("\n")
+    return _csv_first_field(text[:nl] if nl != -1 else text) or None
+
+
+def _csv_last_ts(text):
+    if not text:
+        return None
+    nl = text.rfind("\n", 0, len(text) - 1)
+    return _csv_first_field(text[nl + 1:]) or None
+
+
+def _mirror_append(entry, data):
+    """Append raw bytes read from the file's end; keeps a partial last line aside."""
     chunk = entry.pending + data
     cut = chunk.rfind(b"\n")
     if cut == -1:
@@ -3490,20 +3508,100 @@ def _get_remote_csv(sftp, path):
     else:
         entry.text += chunk[:cut + 1].decode("utf-8", errors="replace")
         entry.pending = chunk[cut + 1:]
+
+
+def _mirror_backfill(entry, sftp, new_start):
+    """Extend the mirror backwards so that it begins at `new_start` (line-aligned)."""
+    new_start = max(new_start, entry.data_start)
+    if entry.start is None or new_start >= entry.start:
+        return
+    block = _sftp_read_range(sftp, entry.path, new_start, entry.start - new_start)
+    if new_start > entry.data_start:
+        # The block starts mid-line: drop up to and including the first newline.
+        cut = block.find(b"\n")
+        if cut == -1:
+            return
+        new_start += cut + 1
+        block = block[cut + 1:]
+    entry.text = block.decode("utf-8", errors="replace") + entry.text
+    entry.start = new_start
+
+
+def _get_remote_csv(sftp, path, need_from_s=None, need_all=False):
+    """
+    Return the mirror of `path`, brought up to date with the file on the Pi
+    and covering at least: the header and the newest lines (always); every
+    line within `need_from_s` seconds before the newest one (if given); the
+    whole file (if need_all). Caller must hold state["lock"] (paramiko's
+    SFTP client is not thread-safe). Raises IOError if the file does not
+    exist; any other exception means the transport is dead and the caller
+    should _mark_disconnected() as it would for a plain read.
+    """
+    st = sftp.stat(path)
+    entry = _remote_csv_cache.get(path)
+    if entry is None or st.st_size < entry.size or (st.st_size == entry.size and entry.mtime != st.st_mtime):
+        entry = _RemoteCsv(path)           # new, truncated, or rewritten: start over
+        _remote_csv_cache[path] = entry
+        _evict_remote_csv_cache()
     entry.last_used = time.time()
+
+    if entry.header is None:
+        probe = _sftp_read_range(sftp, path, 0, min(st.st_size, _CSV_HEADER_PROBE))
+        nl = probe.find(b"\n")
+        if nl == -1:
+            return entry                   # no complete header yet; try again next poll
+        entry.header = probe[:nl + 1].decode("utf-8", errors="replace")
+        entry.data_start = nl + 1
+        tail_start = max(entry.data_start, st.st_size - _CSV_TAIL_CHUNK)
+        tail = _sftp_read_range(sftp, path, tail_start, st.st_size - tail_start)
+        if tail_start > entry.data_start:
+            cut = tail.find(b"\n")
+            if cut == -1:                  # one giant partial line: hold it all
+                tail_start = st.st_size
+                entry.pending, tail = tail, b""
+            else:
+                tail_start += cut + 1
+                tail = tail[cut + 1:]
+        entry.start = tail_start
+        _mirror_append(entry, tail)
+        entry.size, entry.mtime = st.st_size, st.st_mtime
+    elif st.st_size > entry.size:
+        _mirror_append(entry, _sftp_read_range(sftp, path, entry.size, st.st_size - entry.size))
+        entry.size, entry.mtime = st.st_size, st.st_mtime
+
+    if need_all:
+        _mirror_backfill(entry, sftp, entry.data_start)
+    elif need_from_s is not None and not entry.complete:
+        newest = _csv_last_ts(entry.text)
+        cutoff = None
+        if newest:
+            try:
+                cutoff = (datetime.strptime(newest[:19], PLOT_TS_FORMAT)
+                          - timedelta(seconds=need_from_s)).strftime(PLOT_TS_FORMAT)
+            except ValueError:
+                cutoff = None
+        if cutoff is not None:
+            step = _CSV_TAIL_CHUNK
+            while not entry.complete:
+                first = _csv_first_ts(entry.text)
+                if first is not None and first[:19] < cutoff:
+                    break                  # mirror already reaches past the cutoff
+                _mirror_backfill(entry, sftp, entry.start - step)
+                step = min(step * 2, _CSV_BACKFILL_MAX_STEP)
     return entry
 
 
 # /plot_data parses each sensor's mirror incrementally too: the points list
-# is kept per sensor and only lines appended since the last poll are parsed.
-_plot_points_cache = {}         # sensor -> {path, consumed, time_idx, value_idx, points}
+# is kept per sensor and only lines added since the last poll are parsed. A
+# backfill moves the mirror's start, which resets that sensor's list once.
+_plot_points_cache = {}         # sensor -> {path, start, consumed, time_idx, value_idx, points}
 _plot_points_lock = threading.Lock()
 
 
-def _plot_points(sensor, csv_path, text, spec):
+def _plot_points(sensor, csv_path, header, start, text, spec):
     """
-    (points, error) for `sensor` from the mirrored CSV text. points is the
-    full series oldest-first (windowing happens afterwards); error is a
+    (points, error) for `sensor` from a mirror snapshot. points is the whole
+    mirrored series oldest-first (windowing happens afterwards); error is a
     message when the configured column is not in this file.
     """
     time_col = spec.get("time_column", "Timestamp")
@@ -3511,38 +3609,35 @@ def _plot_points(sensor, csv_path, text, spec):
     scale = spec["scale"]
     with _plot_points_lock:
         pc = _plot_points_cache.get(sensor)
-        if pc is None or pc["path"] != csv_path or pc["consumed"] > len(text):
-            pc = {"path": csv_path, "consumed": 0, "time_idx": None, "value_idx": None, "points": []}
+        if pc is None or pc["path"] != csv_path or pc["start"] != start or pc["consumed"] > len(text):
+            pc = {"path": csv_path, "start": start, "consumed": 0,
+                  "time_idx": None, "value_idx": None, "points": []}
             _plot_points_cache[sensor] = pc
-        if pc["consumed"] < len(text):
-            rows = csv.reader(io.StringIO(text[pc["consumed"]:]))
-            pc["consumed"] = len(text)
-            if pc["time_idx"] is None:
-                header = next(rows, None)
-                if header is None:
-                    return pc["points"], None
-                if time_col not in header or value_col not in header:
-                    pc["time_idx"] = pc["value_idx"] = -1
-                else:
-                    pc["time_idx"] = header.index(time_col)
-                    pc["value_idx"] = header.index(value_col)
-            ti, vi = pc["time_idx"], pc["value_idx"]
-            if ti >= 0:
-                need = max(ti, vi)
-                pts = pc["points"]
-                for row in rows:
-                    if len(row) <= need:
-                        continue
-                    ts = row[ti]
-                    raw_val = row[vi]
-                    if not ts or not raw_val:
-                        continue
-                    try:
-                        pts.append({"t": ts, "v": float(raw_val) * scale})
-                    except ValueError:
-                        continue
+        if pc["time_idx"] is None and header:
+            cols = next(csv.reader(io.StringIO(header)), [])
+            if time_col in cols and value_col in cols:
+                pc["time_idx"] = cols.index(time_col)
+                pc["value_idx"] = cols.index(value_col)
+            else:
+                pc["time_idx"] = pc["value_idx"] = -1
         if pc["time_idx"] == -1:
             return [], f'Column "{value_col}" is not in {os.path.basename(csv_path)} (older run?).'
+        if pc["time_idx"] is not None and pc["consumed"] < len(text):
+            ti, vi = pc["time_idx"], pc["value_idx"]
+            need = max(ti, vi)
+            pts = pc["points"]
+            for row in csv.reader(io.StringIO(text[pc["consumed"]:])):
+                if len(row) <= need:
+                    continue
+                ts = row[ti]
+                raw_val = row[vi]
+                if not ts or not raw_val:
+                    continue
+                try:
+                    pts.append({"t": ts, "v": float(raw_val) * scale})
+                except ValueError:
+                    continue
+            pc["consumed"] = len(text)
         return pc["points"], None
 
 PLOT_SENSORS = {
@@ -3781,9 +3876,15 @@ def plot_data():
         csv_path = cached["csv_path"] if cached else None
         entry = None
 
+        # What the mirror must cover for this request: a bit more than the
+        # window so its first point sits before the cutoff; "since start"
+        # (0) needs every row; a legacy call without a window gets an hour.
+        need_all = window_s == 0
+        need_from_s = None if need_all else (3600 if window_s is None else window_s + 60)
+
         if csv_path:
             try:
-                entry = _get_remote_csv(sftp, csv_path)
+                entry = _get_remote_csv(sftp, csv_path, need_from_s, need_all)
             except IOError:
                 # Cached path went stale (run rotated, file moved/renamed) -
                 # drop it and fall through to a fresh lookup below rather
@@ -3815,18 +3916,18 @@ def plot_data():
                     return jsonify({"ok": False, "error": f"No {spec['label']} CSV found yet in this run."}), 404
 
             try:
-                entry = _get_remote_csv(sftp, csv_path)
+                entry = _get_remote_csv(sftp, csv_path, need_from_s, need_all)
             except Exception as e:
                 _mark_disconnected()
                 return jsonify({"ok": False, "error": f"Could not read {csv_path}: {e}"}), 500
 
             _plot_path_cache[sensor] = {"run_dir_name": run_dir_name, "csv_path": csv_path}
 
-        # str is immutable: grab the current snapshot and parse outside the
-        # SFTP lock so other requests are not held up by CPU work.
-        text = entry.text
+        # str is immutable: grab a snapshot and parse outside the SFTP lock
+        # so other requests are not held up by CPU work.
+        header, start, text = entry.header, entry.start, entry.text
 
-    points, col_err = _plot_points(sensor, csv_path, text, spec)
+    points, col_err = _plot_points(sensor, csv_path, header, start, text, spec)
     if col_err:
         return jsonify({"ok": False, "error": col_err}), 404
 
@@ -4016,7 +4117,8 @@ def _read_remote_csv(run_name, relpath, source="run"):
         if not state["connected"] or not state["sftp"]:
             return None, (jsonify({"ok": False, "error": "Not connected to remote host."}), 400)
         try:
-            raw = _get_remote_csv(state["sftp"], csv_path).text
+            entry = _get_remote_csv(state["sftp"], csv_path, need_all=True)
+            raw = (entry.header or "") + entry.text
         except IOError as e:
             return None, (jsonify({"ok": False, "error": f"Could not read {relpath}: {e}"}), 404)
         except Exception as e:
