@@ -664,10 +664,10 @@
       <label>ask about this data</label>
       <button class="btn-ghost" onclick="oflClearAssistantChat()">Clear</button>
     </div>
-    <div class="hint" style="margin-bottom: 10px;">Answers are grounded in the statistics and correlation for whichever variables are added on the Plot tab - not the raw data, so ask about trends and relationships rather than specific rows. Needs an Anthropic API key configured on this machine.</div>
+    <div class="hint" style="margin-bottom: 10px;">The assistant can reach this whole day's merged data, not only what is plotted: any column's statistics, a time window, correlations between any variables (sensor or drone), the flights, each flight's vertical profile and linear route, and the actual rows around a moment. It fetches what a question needs and answers from those numbers; it says which it used. Plotted variables are summarised up front as before. Needs an Anthropic API key configured on this machine.</div>
     <div class="assistant-log" id="assistant-log"></div>
     <div class="assistant-input-row">
-      <input type="text" id="assistant-input" placeholder="e.g. is ozone correlated with temperature today?" autocomplete="off">
+      <input type="text" id="assistant-input" placeholder="e.g. how did PM2.5 change with altitude in flight 6? what was ozone doing between 13:10 and 13:20?" autocomplete="off">
       <button class="btn-primary-sm" id="assistant-ask-btn" onclick="oflAskAssistant()">Ask</button>
     </div>
     <div class="hint" id="assistant-status"></div>

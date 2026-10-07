@@ -1992,6 +1992,8 @@ ASSISTANT_MODEL = "claude-opus-5-5"
 # model inside the same call instead of returning nothing. Needs the beta
 # messages endpoint plus this beta flag.
 ASSISTANT_BETAS = ["server-side-fallback-2026-07-01"]
+ASSISTANT_MAX_TOKENS = 2000
+ASSISTANT_TOOL_RESULT_MAX_CHARS = 8000   # a tool result longer than this is cut, with a note
 
 ASSISTANT_SYSTEM_PREAMBLE = (
     "You are a data-analysis assistant built into a local dashboard for a drone-based "
@@ -2068,7 +2070,7 @@ def _ask_claude_with_context(context, question, history):
     try:
         response = client.beta.messages.create(
             model=ASSISTANT_MODEL,
-            max_tokens=1024,
+            max_tokens=ASSISTANT_MAX_TOKENS,
             output_config={"effort": "medium"},
             betas=ASSISTANT_BETAS,
             fallbacks="default",
@@ -2169,6 +2171,471 @@ def _build_offline_data_context(name, date, columns):
     return "\n".join(lines), None
 
 
+
+# ---------- Offline assistant tools: the whole merged day, on demand ----------
+# The offline assistant used to see only a summary of the plotted variables.
+# A merged day (~10k rows x ~200 columns) is far too big to put in a prompt,
+# so instead the model gets tools: it asks for a column, a time window, a
+# flight's profile or route, and the app computes the answer locally from the
+# day's merged CSVs and returns a few lines of text. Every tool reads the
+# same files the page's own endpoints read.
+
+ASSISTANT_OFFLINE_ADDENDUM = (
+    "\n\nYou also have tools that reach the WHOLE of this day's data, not just the plotted "
+    "variables: list_variables (every column, with coverage), describe (statistics for any "
+    "columns, optionally in a time window), time_series (a column summarised per interval "
+    "over a window), correlate (Pearson r between any columns, sensor and/or drone), "
+    "list_flights, vertical_profile (an instrument against altitude for one flight, the hover "
+    "levels) and horizontal_profile (an instrument along the inbound linear route of one "
+    "flight, the hover points), and raw_rows (a few rows around a moment). Use them whenever "
+    "a question goes beyond the summary below; prefer one well-chosen call over many. Times "
+    "are local Pi time on this date; say which tool results an answer rests on, and report "
+    "numbers as returned. Column names must be exact - call list_variables if unsure."
+)
+
+ASSISTANT_OFFLINE_MAX_ITERATIONS = 10
+
+_TIME_WINDOW_PROPS = {
+    "start": {"type": "string", "description": "Window start, 'HH:MM' or 'HH:MM:SS' (this date), or 'YYYY-MM-DD HH:MM:SS'. Omit for the start of the day."},
+    "end": {"type": "string", "description": "Window end, same formats. Omit for the end of the day."},
+}
+_SOURCE_PROP = {"type": "string", "enum": ["merged", "drone"],
+                "description": "'merged' = the day's merged sensor CSV (default); 'drone' = the day's merged drone telemetry."}
+
+ASSISTANT_OFFLINE_TOOLS = [
+    {
+        "name": "list_variables",
+        "description": ("Every column available for this day, grouped by instrument, with how much of the "
+                        "day each column has values (coverage) and the time span of the data. Call this "
+                        "to learn exact column names before describe/correlate/time_series."),
+        "input_schema": {"type": "object", "properties": {
+            "source": {"type": "string", "enum": ["merged", "drone", "both"], "description": "Default 'both'."},
+        }},
+    },
+    {
+        "name": "describe",
+        "description": ("Statistics for one or more columns: count, coverage, mean, std, min, quartiles, "
+                        "max, and the first/last time a value exists - over the whole day or a time window."),
+        "input_schema": {"type": "object", "properties": {
+            "columns": {"type": "array", "items": {"type": "string"}, "description": "Exact column names."},
+            "source": _SOURCE_PROP, **_TIME_WINDOW_PROPS,
+        }, "required": ["columns"]},
+    },
+    {
+        "name": "time_series",
+        "description": ("One column summarised per interval (mean, min, max, n) across a time window - "
+                        "for 'what was X doing between 13:10 and 13:20'. At most 120 intervals; the "
+                        "interval is widened automatically if the window needs more."),
+        "input_schema": {"type": "object", "properties": {
+            "column": {"type": "string"},
+            "source": _SOURCE_PROP, **_TIME_WINDOW_PROPS,
+            "interval_s": {"type": "integer", "description": "Interval length in seconds (default 60)."},
+        }, "required": ["column"]},
+    },
+    {
+        "name": "correlate",
+        "description": ("Pearson correlation between columns, pairwise on rows where both have values, "
+                        "optionally within a time window. Sensor columns correlate within the merged "
+                        "file; drone_columns (e.g. altitude_agl_m) are matched to sensor rows by timestamp."),
+        "input_schema": {"type": "object", "properties": {
+            "columns": {"type": "array", "items": {"type": "string"}, "description": "Sensor (merged) columns."},
+            "drone_columns": {"type": "array", "items": {"type": "string"}, "description": "Drone telemetry columns to include (optional)."},
+            **_TIME_WINDOW_PROPS,
+        }, "required": ["columns"]},
+    },
+    {
+        "name": "list_flights",
+        "description": ("The flights detected in this day's drone telemetry: index, start/end, duration, "
+                        "top altitude, how far the drone went from the launch point and whether that "
+                        "flight includes a linear route. Flight indexes are used by the profile tools."),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "vertical_profile",
+        "description": ("One flight's vertical profile: instrument readings binned by altitude around the "
+                        "hover levels (default 20 m bins, hovering samples only). Returns per level: mean, "
+                        "std, median, quartiles and number of readings."),
+        "input_schema": {"type": "object", "properties": {
+            "flight_index": {"type": "integer"},
+            "columns": {"type": "array", "items": {"type": "string"}, "description": "Sensor (merged) columns."},
+            "bin_size": {"type": "number", "enum": [5, 10, 20, 25, 50], "description": "Default 20."},
+            "hover_only": {"type": "boolean", "description": "Default true."},
+            "leg": {"type": "string", "enum": ["both", "up", "down"], "description": "Default 'both'."},
+        }, "required": ["flight_index", "columns"]},
+    },
+    {
+        "name": "horizontal_profile",
+        "description": ("One flight's linear route (the inbound run from the far point back to the launch "
+                        "area): instrument readings binned by horizontal distance from launch around the "
+                        "hover points (default 100 m bins, hovering samples only). Also reports the "
+                        "route's altitude and the hover points found."),
+        "input_schema": {"type": "object", "properties": {
+            "flight_index": {"type": "integer"},
+            "columns": {"type": "array", "items": {"type": "string"}, "description": "Sensor (merged) columns."},
+            "bin_size": {"type": "number", "enum": [25, 50, 100], "description": "Default 100."},
+            "hover_only": {"type": "boolean", "description": "Default true."},
+        }, "required": ["flight_index", "columns"]},
+    },
+    {
+        "name": "raw_rows",
+        "description": ("The actual rows for a few columns around one moment (at most 60 rows), for "
+                        "'what exactly happened at 16:25'."),
+        "input_schema": {"type": "object", "properties": {
+            "columns": {"type": "array", "items": {"type": "string"}},
+            "source": _SOURCE_PROP,
+            "time": {"type": "string", "description": "Centre of the window, 'HH:MM[:SS]' or 'YYYY-MM-DD HH:MM:SS'."},
+            "seconds": {"type": "integer", "description": "Half-width of the window in seconds (default 30)."},
+        }, "required": ["columns", "time"]},
+    },
+]
+
+_offline_table_cache = {}   # path -> (mtime, size, header, rows, coverage)
+_OFFLINE_TABLE_CACHE_MAX = 6
+
+
+def _offline_day_path(name, date, source):
+    if source == "drone":
+        merged_dir = _drone_day_merged_dir_if_present(name, date)
+        if not merged_dir:
+            return None, "This date's drone flights haven't been merged yet - use \"Merge drone\" first."
+        return os.path.join(merged_dir, f"telemetry_{date}_merged.csv"), None
+    path = os.path.join(_session_merged_dir(name, date), f"merged_data_{date}_merged.csv")
+    if not os.path.isfile(path):
+        return None, "This date's sensor runs haven't been merged yet - use \"Merge\" first."
+    return path, None
+
+
+def _offline_table(name, date, source):
+    """
+    (header, rows, coverage, None) for the day's merged sensor or drone CSV,
+    parsed once per file version and cached; or (None, None, None, error).
+    rows are lists aligned with header; coverage[col] = fraction of rows
+    with a value.
+    """
+    path, err = _offline_day_path(name, date, source)
+    if err:
+        return None, None, None, err
+    st = os.stat(path)
+    cached = _offline_table_cache.get(path)
+    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        return cached[2], cached[3], cached[4], None
+    with open(path, "r", newline="", encoding="utf-8", errors="replace") as f:
+        reader = csv.reader(f)
+        header = next(reader, [])
+        width = len(header)
+        rows = [row for row in reader if len(row) == width]
+    counts = [0] * width
+    for row in rows:
+        for i, v in enumerate(row):
+            if v:
+                counts[i] += 1
+    coverage = {header[i]: (counts[i] / len(rows) if rows else 0.0) for i in range(width)}
+    while len(_offline_table_cache) >= _OFFLINE_TABLE_CACHE_MAX:
+        _offline_table_cache.pop(next(iter(_offline_table_cache)))
+    _offline_table_cache[path] = (st.st_mtime, st.st_size, header, rows, coverage)
+    return header, rows, coverage, None
+
+
+def _tool_time(value, date):
+    """Normalise a tool-supplied time to 'YYYY-MM-DD HH:MM:SS' (None if blank)."""
+    v = (value or "").strip()
+    if not v:
+        return None
+    if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", v):
+        return v
+    if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$", v):
+        return v + ":00"
+    if re.match(r"^\d{1,2}:\d{2}:\d{2}$", v):
+        h, m, sec = v.split(":")
+        return f"{date[:4]}-{date[4:6]}-{date[6:]} {int(h):02d}:{m}:{sec}"
+    if re.match(r"^\d{1,2}:\d{2}$", v):
+        h, m = v.split(":")
+        return f"{date[:4]}-{date[4:6]}-{date[6:]} {int(h):02d}:{m}:00"
+    raise ValueError(f"Unrecognised time {value!r}; use HH:MM, HH:MM:SS or YYYY-MM-DD HH:MM:SS.")
+
+
+def _rows_between(rows, start, end):
+    """Rows whose first field (fixed-width timestamp) lies in [start, end]."""
+    if start is None and end is None:
+        return rows
+    return [r for r in rows if (start is None or r[0][:19] >= start) and (end is None or r[0][:19] <= end)]
+
+
+def _g(x):
+    return "n/a" if x is None else f"{x:.4g}"
+
+
+def _offline_tool_list_variables(name, date, inp):
+    which = (inp.get("source") or "both")
+    out = []
+    for source in (("merged", "drone") if which == "both" else (which,)):
+        header, rows, coverage, err = _offline_table(name, date, source)
+        if err:
+            out.append(f"[{source}] {err}")
+            continue
+        span = f"{rows[0][0]} .. {rows[-1][0]}" if rows else "no rows"
+        out.append(f"[{source}] {len(rows)} rows, {len(header)} columns, {span}")
+        groups = {}
+        for col in header[1:]:
+            if col == "_source_run":
+                continue
+            if source == "drone":
+                key = "drone"
+            else:
+                key = col.split("_", 1)[0] if "_" in col else "other"
+            groups.setdefault(key, []).append(f"{col} ({coverage[col] * 100:.0f}%)")
+        for key, cols in groups.items():
+            out.append(f"  {key}: " + ", ".join(cols))
+    return "\n".join(out), None
+
+
+def _offline_tool_describe(name, date, inp):
+    source = inp.get("source") or "merged"
+    header, rows, coverage, err = _offline_table(name, date, source)
+    if err:
+        return None, err
+    start, end = _tool_time(inp.get("start"), date), _tool_time(inp.get("end"), date)
+    sel = _rows_between(rows, start, end)
+    cols = [c for c in (inp.get("columns") or []) if c]
+    missing = [c for c in cols if c not in header]
+    if missing:
+        return None, f"Unknown column(s) {missing} in {source}. Call list_variables for exact names."
+    window = f"{start or rows[0][0] if rows else '?'} .. {end or rows[-1][0] if rows else '?'}"
+    out = [f"[{source}] {len(sel)} rows in {window}"]
+    for col in cols:
+        idx = header.index(col)
+        vals, first, last = [], None, None
+        for r in sel:
+            v = _parse_numeric(r[idx])
+            if v is not None:
+                vals.append(v)
+                if first is None:
+                    first = r[0]
+                last = r[0]
+        if not vals:
+            out.append(f"  {col}: no numeric values in the window")
+            continue
+        st = _stats_from_values({col: vals}, [col])[0]
+        out.append(f"  {col}: n={st['count']} ({len(vals) / max(1, len(sel)) * 100:.0f}% of rows), mean {_g(st['mean'])}, "
+                   f"std {_g(st['std'])}, min {_g(st['min'])}, p25 {_g(st['p25'])}, median {_g(st['median'])}, "
+                   f"p75 {_g(st['p75'])}, max {_g(st['max'])}; values from {first} to {last}")
+    return "\n".join(out), None
+
+
+def _offline_tool_time_series(name, date, inp):
+    source = inp.get("source") or "merged"
+    header, rows, _cov, err = _offline_table(name, date, source)
+    if err:
+        return None, err
+    col = (inp.get("column") or "").strip()
+    if col not in header:
+        return None, f"Unknown column {col!r} in {source}. Call list_variables for exact names."
+    start, end = _tool_time(inp.get("start"), date), _tool_time(inp.get("end"), date)
+    sel = _rows_between(rows, start, end)
+    if not sel:
+        return f"No rows between {start} and {end}.", None
+    idx = header.index(col)
+    t0 = datetime.strptime(sel[0][0][:19], PLOT_TS_FORMAT)
+    t1 = datetime.strptime(sel[-1][0][:19], PLOT_TS_FORMAT)
+    span = max(1.0, (t1 - t0).total_seconds())
+    interval = int(inp.get("interval_s") or 60)
+    interval = max(1, interval)
+    if span / interval > 120:
+        interval = int(math.ceil(span / 120 / 60.0)) * 60
+    buckets = {}
+    for r in sel:
+        v = _parse_numeric(r[idx])
+        if v is None:
+            continue
+        ts = datetime.strptime(r[0][:19], PLOT_TS_FORMAT)
+        k = int((ts - t0).total_seconds() // interval)
+        buckets.setdefault(k, []).append(v)
+    out = [f"[{source}] {col} from {sel[0][0]} to {sel[-1][0]}, {interval}s intervals (start, mean, min, max, n):"]
+    for k in sorted(buckets):
+        vals = buckets[k]
+        t = (t0 + timedelta(seconds=k * interval)).strftime("%H:%M:%S")
+        out.append(f"  {t}  {_g(sum(vals) / len(vals))}  {_g(min(vals))}  {_g(max(vals))}  {len(vals)}")
+    return "\n".join(out), None
+
+
+def _offline_tool_correlate(name, date, inp):
+    header, rows, _cov, err = _offline_table(name, date, "merged")
+    if err:
+        return None, err
+    start, end = _tool_time(inp.get("start"), date), _tool_time(inp.get("end"), date)
+    sel = _rows_between(rows, start, end)
+    cols = [c for c in (inp.get("columns") or []) if c]
+    dcols = [c for c in (inp.get("drone_columns") or []) if c]
+    missing = [c for c in cols if c not in header]
+    if missing:
+        return None, f"Unknown sensor column(s) {missing}. Call list_variables for exact names."
+    series = {}
+    for c in cols:
+        idx = header.index(c)
+        d = {}
+        for i, r in enumerate(sel):
+            v = _parse_numeric(r[idx])
+            if v is not None:
+                d[i] = v
+        series[c] = d
+    if dcols:
+        dheader, drows, _dc, derr = _offline_table(name, date, "drone")
+        if derr:
+            return None, derr
+        dmissing = [c for c in dcols if c not in dheader]
+        if dmissing:
+            return None, f"Unknown drone column(s) {dmissing}."
+        by_second = {r[0][:19]: r for r in drows}
+        for c in dcols:
+            didx = dheader.index(c)
+            d = {}
+            for i, r in enumerate(sel):
+                dr = by_second.get(r[0][:19])
+                if dr is None:
+                    continue
+                v = _parse_numeric(dr[didx])
+                if v is not None:
+                    d[i] = v
+            series["drone:" + c] = d
+    names = [c for c in series if len(series[c]) >= 3 and len(set(series[c].values())) > 1]
+    if len(names) < 2:
+        return "Fewer than two of those columns have enough varying values in the window to correlate.", None
+    matrix = _sparse_correlations(series, names)
+    out = [f"Pearson r over {len(sel)} rows ({start or 'day start'} .. {end or 'day end'}), pairwise on shared rows:"]
+    for m in sorted(matrix, key=lambda m: -abs(m["r"]) if m["r"] is not None else 0):
+        r_txt = "n/a" if m["r"] is None else f"{m['r']:.3f}"
+        out.append(f"  {m['a']} vs {m['b']}: r={r_txt} (n={m['n']})")
+    return "\n".join(out), None
+
+
+def _offline_tool_list_flights(name, date, inp):
+    track, err = _read_drone_track(name, date)
+    if err:
+        return None, err[0].get_json()["error"]
+    flights = _detect_flights([(r[0], r[1]) for r in track])
+    if not flights:
+        return "No flights detected in this date's drone telemetry.", None
+    out = [f"{len(flights)} flight(s) on {date} (index: start-end, duration, top altitude, farthest from launch):"]
+    for i, fl in enumerate(flights):
+        rows = [r for r in track if fl["start"] <= r[0] <= fl["end"]]
+        top = max(r[1] for r in rows) if rows else 0.0
+        tr = _detect_transect(rows) if rows else None
+        far = tr["far_m"] if tr else 0.0
+        has_route = bool(tr and tr["rows"])
+        out.append(f"  {i}: {fl['start'].strftime('%H:%M:%S')}-{fl['end'].strftime('%H:%M:%S')}, "
+                   f"{(fl['end'] - fl['start']).total_seconds() / 60:.0f} min, top {top:.0f} m, far {far:.0f} m"
+                   + (f", linear route at ~{tr['altitude_m']:.0f} m AGL" if has_route else ", no linear route"))
+    return "\n".join(out), None
+
+
+def _offline_internal_get(url):
+    """Call one of this app's own GET endpoints in-process and return its JSON."""
+    with app.test_client() as tc:
+        return tc.get(url).get_json() or {}
+
+
+def _offline_tool_vertical_profile(name, date, inp):
+    cols = ",".join(c for c in (inp.get("columns") or []) if c)
+    if not cols:
+        return None, "columns is required."
+    q = (f"/offline/session/{name}/merged/{date}/altitude_profile?columns={cols}"
+         f"&flight_index={int(inp.get('flight_index', 0))}&bin_size={inp.get('bin_size') or 20}"
+         f"&hover_only={'0' if inp.get('hover_only') is False else '1'}&leg={inp.get('leg') or 'both'}")
+    d = _offline_internal_get(q)
+    if not d.get("ok"):
+        return None, d.get("error", "profile failed")
+    out = [f"Flight {d['flight']['index']} ({d['flight']['start'][11:]}-{d['flight']['end'][11:]}), "
+           f"{d['bin_size']:.0f} m bins centred on the levels, hover_only={d['hover_only']}, leg={d['leg']}, "
+           f"{d['kept_seconds']} s of hovering used" + (", profile ends at departure for the route" if d.get("profile_truncated_at_departure") else "")]
+    for s in d["series"]:
+        out.append(f"  {s['column']}: {s['n']} readings used, {s['dropped']} in transit dropped")
+        for b in s["bins"]:
+            out.append(f"    {b['altitude']:.0f} m: mean {_g(b['mean'])} ± {_g(b['std'])}, median {_g(b['median'])} "
+                       f"[{_g(b['p25'])}–{_g(b['p75'])}], n={b['n']}")
+    return "\n".join(out), None
+
+
+def _offline_tool_horizontal_profile(name, date, inp):
+    cols = ",".join(c for c in (inp.get("columns") or []) if c)
+    if not cols:
+        return None, "columns is required."
+    q = (f"/offline/session/{name}/merged/{date}/transect?columns={cols}"
+         f"&flight_index={int(inp.get('flight_index', 0))}&bin_size={inp.get('bin_size') or 100}"
+         f"&hover_only={'0' if inp.get('hover_only') is False else '1'}")
+    d = _offline_internal_get(q)
+    if not d.get("ok"):
+        return None, d.get("error", "route failed")
+    if not d.get("transect"):
+        return d.get("reason", "No linear route in this flight."), None
+    t = d["transect"]
+    out = [f"Flight {d['flight']['index']} route {t['start'][11:]}-{t['end'][11:]}: {t['far_m']:.0f} -> {t['end_m']:.0f} m from launch "
+           f"at {t['altitude_mean_m']:.0f} m AGL ({t['altitude_min_m']:.0f}-{t['altitude_max_m']:.0f}), {t['duration_s'] / 60:.1f} min, "
+           f"{d['bin_size']:.0f} m bins centred on hover points, hover_only={d['hover_only']}"]
+    hp = t.get("hover_points") or []
+    out.append("  hover points: " + (", ".join(f"{h['distance_m']:.0f} m ({h['seconds']:.0f} s)" for h in hp) if hp else "none (continuous run)"))
+    for s in d["series"]:
+        out.append(f"  {s['column']}: {s['n']} readings used, {s['dropped']} dropped")
+        for b in s["bins"]:
+            out.append(f"    {b['distance']:.0f} m [{b['from']:.0f}-{b['to']:.0f}]: mean {_g(b['mean'])} ± {_g(b['std'])}, "
+                       f"median {_g(b['median'])} [{_g(b['p25'])}–{_g(b['p75'])}], n={b['n']}")
+    return "\n".join(out), None
+
+
+def _offline_tool_raw_rows(name, date, inp):
+    source = inp.get("source") or "merged"
+    header, rows, _cov, err = _offline_table(name, date, source)
+    if err:
+        return None, err
+    cols = [c for c in (inp.get("columns") or []) if c]
+    missing = [c for c in cols if c not in header]
+    if missing:
+        return None, f"Unknown column(s) {missing} in {source}."
+    centre = _tool_time(inp.get("time"), date)
+    if not centre:
+        return None, "time is required."
+    half = max(1, min(int(inp.get("seconds") or 30), 600))
+    c = datetime.strptime(centre, PLOT_TS_FORMAT)
+    start = (c - timedelta(seconds=half)).strftime(PLOT_TS_FORMAT)
+    end = (c + timedelta(seconds=half)).strftime(PLOT_TS_FORMAT)
+    sel = _rows_between(rows, start, end)[:60]
+    if not sel:
+        return f"No rows between {start} and {end}.", None
+    idxs = [header.index(c) for c in cols]
+    out = [f"[{source}] rows {start} .. {end} (time, " + ", ".join(cols) + "):"]
+    for r in sel:
+        out.append("  " + r[0][11:19] + "  " + "  ".join(r[i] or "-" for i in idxs))
+    return "\n".join(out), None
+
+
+_OFFLINE_TOOL_IMPL = {
+    "list_variables": _offline_tool_list_variables,
+    "describe": _offline_tool_describe,
+    "time_series": _offline_tool_time_series,
+    "correlate": _offline_tool_correlate,
+    "list_flights": _offline_tool_list_flights,
+    "vertical_profile": _offline_tool_vertical_profile,
+    "horizontal_profile": _offline_tool_horizontal_profile,
+    "raw_rows": _offline_tool_raw_rows,
+}
+
+
+def _dispatch_offline_tool(name, date, tool, tool_input):
+    """Run one offline tool; any failure becomes text the model can explain."""
+    impl = _OFFLINE_TOOL_IMPL.get(tool)
+    if impl is None:
+        return None, f"Unknown tool: {tool}"
+    started = time.time()
+    try:
+        return impl(name, date, tool_input or {})
+    except ValueError as e:
+        return None, str(e)
+    except Exception as e:
+        app.logger.exception("offline assistant tool %s failed", tool)
+        return None, f"{tool} failed: {type(e).__name__}: {e}"
+    finally:
+        app.logger.info("offline assistant tool %s took %.1fs", tool, time.time() - started)
+
+
 @app.route("/assistant/ask", methods=["POST"])
 def assistant_ask():
     data = request.get_json() or {}
@@ -2202,7 +2669,10 @@ def assistant_ask():
     if err:
         return err
 
-    result, err = _ask_claude_with_context(context, question, history)
+    result, err = _ask_claude_with_tools(
+        context, question, history, ASSISTANT_OFFLINE_TOOLS,
+        lambda tool, tool_input: _dispatch_offline_tool(name, date, tool, tool_input),
+        ASSISTANT_OFFLINE_ADDENDUM, ASSISTANT_OFFLINE_MAX_ITERATIONS)
     if err:
         return err
     return jsonify(result)
@@ -2569,7 +3039,8 @@ def _dispatch_assistant_tool(run_name, name, tool_input):
 ASSISTANT_MAX_TOOL_ITERATIONS = 6
 
 
-def _ask_claude_with_tools(context, question, history, run_name):
+def _ask_claude_with_tools(context, question, history, tools, dispatch, addendum,
+                           max_iterations=ASSISTANT_MAX_TOOL_ITERATIONS):
     """
     Online counterpart to _ask_claude_with_context - same model, system
     preamble, and error handling, but also offers ASSISTANT_ONLINE_TOOLS
@@ -2593,17 +3064,17 @@ def _ask_claude_with_tools(context, question, history, run_name):
     total_input_tokens = 0
     total_output_tokens = 0
 
-    for _ in range(ASSISTANT_MAX_TOOL_ITERATIONS):
+    for _ in range(max_iterations):
         try:
             response = client.beta.messages.create(
                 model=ASSISTANT_MODEL,
-                max_tokens=1024,
+                max_tokens=ASSISTANT_MAX_TOKENS,
                 output_config={"effort": "medium"},
                 betas=ASSISTANT_BETAS,
                 fallbacks="default",
-                system=f"{ASSISTANT_SYSTEM_PREAMBLE}{ASSISTANT_TOOLS_ADDENDUM}\n\n{context}",
+                system=f"{ASSISTANT_SYSTEM_PREAMBLE}{addendum}\n\n{context}",
                 messages=messages,
-                tools=ASSISTANT_ONLINE_TOOLS,
+                tools=tools,
             )
         except anthropic.APIStatusError as e:
             return None, (jsonify({"ok": False, "error": f"Claude API error: {e.message}"}), 502)
@@ -2631,7 +3102,10 @@ def _ask_claude_with_tools(context, question, history, run_name):
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            result_text, tool_err = _dispatch_assistant_tool(run_name, block.name, block.input)
+            result_text, tool_err = dispatch(block.name, block.input)
+            if result_text and len(result_text) > ASSISTANT_TOOL_RESULT_MAX_CHARS:
+                result_text = (result_text[:ASSISTANT_TOOL_RESULT_MAX_CHARS]
+                               + f"\n... [cut at {ASSISTANT_TOOL_RESULT_MAX_CHARS} characters - narrow the request]")
             tool_result_blocks.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
@@ -2676,7 +3150,10 @@ def assistant_ask_online():
     if err:
         return err
 
-    result, err = _ask_claude_with_tools(context, question, history, run_name)
+    result, err = _ask_claude_with_tools(
+        context, question, history, ASSISTANT_ONLINE_TOOLS,
+        lambda tool, tool_input: _dispatch_assistant_tool(run_name, tool, tool_input),
+        ASSISTANT_TOOLS_ADDENDUM)
     if err:
         return err
     return jsonify(result)
