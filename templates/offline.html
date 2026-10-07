@@ -403,6 +403,10 @@
   .alt-profile-canvas-wrap { position: relative; width: 100%; height: 480px; }
   .alt-profile-canvas-wrap canvas { width: 100%; height: 100%; display: block; }
   .alt-profile-chart-status { font-size: 11px; color: var(--text-dim); margin-top: 6px; text-align: center; }
+  /* linear route: one wide, short chart per flight */
+  .route-chart { flex: 0 0 540px; max-width: 100%; }
+  .route-canvas-wrap { position: relative; width: 100%; height: 260px; }
+  .route-canvas-wrap canvas { width: 100%; height: 100%; display: block; }
 
   /* ---- assistant chat panel ---- */
 
@@ -568,6 +572,20 @@
       </div>
       <div class="dv-legend" id="alt-profile-legend"></div>
       <div class="alt-profile-grid" id="alt-profile-grid"></div>
+
+      <div class="panel-header" style="margin-top: 22px;">
+        <label>linear route (inbound run, far point → launch)</label>
+      </div>
+      <div class="hint" style="margin-bottom: 10px;">After the profile the drone transits out (that leg is ignored) and then flies straight back in at constant altitude. The run is found from the telemetry alone: it starts at the flight's farthest point from the launch position (needs at least 150 m) and ends when the drone is back within 25 m of launch or on the ground. The same variables as above are plotted against horizontal distance from launch, binned every 25 m by default - the drone flies right-to-left on this chart. The chart title gives the run's altitude and ground speed.</div>
+      <div class="plot-toolbar">
+        <select id="route-bin-select" class="select-input" style="width: auto;" onchange="altProfileRenderAll()" title="distance bin size along the route">
+          <option value="10">10 m bins</option>
+          <option value="25" selected>25 m bins</option>
+          <option value="50">50 m bins</option>
+          <option value="100">100 m bins</option>
+        </select>
+      </div>
+      <div class="alt-profile-grid" id="route-grid"></div>
     </div>
     <div class="hint" id="alt-profile-status"></div>
   </div>
@@ -1344,6 +1362,8 @@ function oflClearPlotPanel() {
   altProfileSeriesColors = {};
   document.getElementById('alt-profile-grid').innerHTML = '';
   document.getElementById('alt-profile-legend').innerHTML = '';
+  altProfileRouteCharts = [];
+  document.getElementById('route-grid').innerHTML = '';
 }
 
 // ---------- Altitude profile: one chart per flight, instrument vs. altitude ----------
@@ -1363,6 +1383,7 @@ function oflClearPlotPanel() {
 
 let altProfileFlights = [];
 let altProfileCharts = []; // [{flight, controller, statusEl}], one per flight, built once per date
+let altProfileRouteCharts = []; // same shape, the linear-route chart per flight
 let altProfileActiveColumns = []; // [column, ...], in add order - merged-source columns only
 let altProfileSeriesColors = {}; // column -> color, same palette as the plot above
 
@@ -1375,6 +1396,8 @@ async function altProfileLoadFlights() {
   altProfileSeriesColors = {};
   document.getElementById('alt-profile-grid').innerHTML = '';
   document.getElementById('alt-profile-legend').innerHTML = '';
+  altProfileRouteCharts = [];
+  document.getElementById('route-grid').innerHTML = '';
   content.style.display = 'none';
   statusEl.textContent = 'Looking for flights...';
   statusEl.style.color = 'var(--text-dim)';
@@ -1440,6 +1463,35 @@ function altProfileBuildGrid() {
     const controller = createProfileController(canvasId, tooltipId);
     controller.setEmptyMessage('Add a variable');
     return { flight: f, controller, statusEl: status };
+  });
+
+  const routeGrid = document.getElementById('route-grid');
+  routeGrid.innerHTML = '';
+  altProfileRouteCharts = altProfileFlights.map((f) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'alt-profile-chart route-chart';
+
+    const title = document.createElement('div');
+    title.className = 'alt-profile-chart-title';
+    title.textContent = `Flight ${f.index + 1} (${f.start.slice(11)}–${f.end.slice(11)})`;
+
+    const canvasId = `route-canvas-${f.index}`;
+    const tooltipId = `route-tooltip-${f.index}`;
+    const canvasWrap = document.createElement('div');
+    canvasWrap.className = 'route-canvas-wrap';
+    canvasWrap.innerHTML = `<canvas id="${canvasId}"></canvas><div class="plot-tooltip" id="${tooltipId}"></div>`;
+
+    const status = document.createElement('div');
+    status.className = 'alt-profile-chart-status';
+
+    wrap.appendChild(title);
+    wrap.appendChild(canvasWrap);
+    wrap.appendChild(status);
+    routeGrid.appendChild(wrap);
+
+    const controller = createTransectController(canvasId, tooltipId);
+    controller.setEmptyMessage('Add a variable');
+    return { flight: f, controller, statusEl: status, titleEl: title };
   });
 }
 
@@ -1577,7 +1629,7 @@ async function altProfileRenderAll() {
   const statusEl = document.getElementById('alt-profile-status');
 
   if (!altProfileActiveColumns.length) {
-    altProfileCharts.forEach((c) => {
+    altProfileCharts.concat(altProfileRouteCharts).forEach((c) => {
       c.controller.setEmptyMessage('Add a variable');
       c.statusEl.textContent = '';
     });
@@ -1620,6 +1672,43 @@ async function altProfileRenderAll() {
         const legTxt = data.leg === 'both' ? '' : (data.leg === 'up' ? ', ascent' : ', descent');
         parts.push(`${Math.round(data.kept_seconds / 60)} of ${Math.round(data.flight_seconds / 60)} min ${data.hover_only ? 'hovering' : 'used'}${legTxt}`);
       }
+      c.statusEl.textContent = parts.join(' · ');
+      c.statusEl.style.color = 'var(--text-dim)';
+    }));
+    await Promise.all(altProfileRouteCharts.map(async (c) => {
+      const binSize = document.getElementById('route-bin-select').value;
+      const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/transect` +
+        `?flight_index=${encodeURIComponent(c.flight.index)}&columns=${encodeURIComponent(altProfileActiveColumns.join(','))}` +
+        `&bin_size=${encodeURIComponent(binSize)}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!data.ok) {
+        c.controller.setEmptyMessage('Could not load this selection.');
+        c.statusEl.textContent = data.error;
+        c.statusEl.style.color = 'var(--err)';
+        return;
+      }
+      if (!data.transect) {
+        c.controller.setEmptyMessage('No linear route in this flight');
+        c.statusEl.textContent = data.reason || '';
+        c.statusEl.style.color = 'var(--text-dim)';
+        return;
+      }
+      const t = data.transect;
+      c.titleEl.textContent = `Flight ${c.flight.index + 1} route ${t.start.slice(11)}–${t.end.slice(11)} · ` +
+        `${t.far_m.toFixed(0)} → ${t.end_m.toFixed(0)} m at ${t.altitude_mean_m.toFixed(0)} m AGL, ${t.speed_mean_ms.toFixed(1)} m/s`;
+      c.controller.setData({
+        series: data.series.map((s) => ({ ...s, color: altProfileSeriesColors[s.column] })),
+        xLabel: 'distance from launch (m)',
+        decimals: 2,
+        xMax: t.far_m,
+      });
+      const parts = data.series.map((s) => {
+        let part = `${s.column}: ${s.n} reading${s.n === 1 ? '' : 's'}`;
+        if (s.dropped) part += ` (${s.dropped} unmatched)`;
+        return part;
+      });
+      parts.push(`${Math.round(t.duration_s / 60)} min, altitude ${t.altitude_min_m.toFixed(0)}–${t.altitude_max_m.toFixed(0)} m`);
       c.statusEl.textContent = parts.join(' · ');
       c.statusEl.style.color = 'var(--text-dim)';
     }));

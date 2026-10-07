@@ -561,41 +561,56 @@ def _merge_day(session_name, date, dest_dir=None):
     os.makedirs(merged_dir, exist_ok=True)
     out_path = os.path.join(merged_dir, f"merged_data_{date}_merged.csv")
 
-    header = None
+    # Runs on one day do not always share a header: a run started with a
+    # different set of sensors enabled (or after a logger update that added
+    # columns) has more or fewer columns than the others. The merge used to
+    # keep only runs whose header matched the day's first run exactly and
+    # silently drop the rest - a day whose 01:44 test run lacked the
+    # TriSonica lost every real flight after it. Now the output header is
+    # the union of every run's columns (first run's order, new columns
+    # appended as they appear) and each row is written by column name,
+    # blank where that run never had the column.
+    headers = []
+    for run, path in entries:
+        with open(path, "r", newline="", encoding="utf-8", errors="replace") as in_f:
+            try:
+                headers.append((run, path, next(csv.reader(in_f))))
+            except StopIteration:
+                continue
+    if not headers:
+        return None, "This date's merged_data CSVs are empty."
+    union = []
+    seen = set()
+    for _run, _path, h in headers:
+        for col in h:
+            if col not in seen:
+                seen.add(col)
+                union.append(col)
+    time_col = headers[0][2][0]
+    out_fields = [time_col, "_source_run"] + [c for c in union if c != time_col]
+
     total_rows = 0
     skipped_rows = 0
     with open(out_path, "w", newline="", encoding="utf-8") as out_f:
-        writer = csv.writer(out_f)
-        for run, path in entries:
+        writer = csv.DictWriter(out_f, fieldnames=out_fields, extrasaction="ignore")
+        writer.writeheader()
+        for run, path, this_header in headers:
             with open(path, "r", newline="", encoding="utf-8", errors="replace") as in_f:
                 reader = csv.reader(in_f)
-                try:
-                    this_header = next(reader)
-                except StopIteration:
-                    continue
-                if header is None:
-                    header = this_header
-                    writer.writerow([this_header[0], "_source_run"] + this_header[1:])
-                elif this_header != header:
-                    # Schema drift between runs (e.g. sensor config
-                    # changed mid-day) - skip rather than silently
-                    # misaligning columns; that run's own file is
-                    # still there to view individually.
-                    continue
+                next(reader, None)  # header, already known
+                width = len(this_header)
                 for row in reader:
-                    # Guards against a truncated/torn write (seen in
-                    # practice: a file downloaded while runall.py was
-                    # still flushing to it can end in a garbage partial
-                    # row) - a real data row always has as many fields
-                    # as the header it was written under.
-                    if len(row) != len(this_header):
+                    if len(row) != width:
                         skipped_rows += 1
                         continue
-                    writer.writerow([row[0], run] + row[1:])
+                    record = dict(zip(this_header, row))
+                    record["_source_run"] = run
+                    if time_col not in record:
+                        record[time_col] = row[0]
+                    writer.writerow(record)
                     total_rows += 1
-
-    result = {"rows": total_rows, "skipped_rows": skipped_rows, "dest_path": None, "dest_error": None}
-
+    result = {"rows": total_rows, "skipped_rows": skipped_rows, "dest_path": None, "dest_error": None,
+              "runs": len(headers), "columns": len(out_fields)}
     if dest_dir:
         try:
             os.makedirs(dest_dir, exist_ok=True)
@@ -1430,6 +1445,7 @@ ALTITUDE_BIN_SIZES_ALLOWED = (5.0, 10.0, 20.0, 25.0, 50.0)
 HOVER_WINDOW_SECONDS = 5          # altitude must stay flat over +- this many seconds ...
 HOVER_MAX_RANGE_M = 2.0           # ... to within this many metres to count as hovering
 SENSOR_TO_DRONE_MAX_GAP_SECONDS = 5   # telemetry is 1 Hz; a sensor reading further than this from any kept altitude sample is dropped
+PROFILE_MAX_RADIUS_M = 60.0       # the profile is over once the drone first gets this far from the launch point (the transit out)
 
 
 def _bin_altitude_profile(points, bin_size=ALTITUDE_BIN_SIZE_M):
@@ -1563,14 +1579,31 @@ def offline_merged_altitude_profile(name, date):
     if leg not in ("both", "up", "down"):
         return jsonify({"ok": False, "error": "leg must be both, up or down."}), 400
 
-    drone_rows, err = _read_drone_altitude_series(name, date)
+    track, err = _read_drone_track(name, date)
     if err:
         return err
-    flights = _detect_flights(drone_rows)
+    flights = _detect_flights([(r[0], r[1]) for r in track])
     if flight_index < 0 or flight_index >= len(flights):
         return jsonify({"ok": False, "error": "That flight was not found for this date."}), 400
     flight = flights[flight_index]
-    flight_drone_rows = [(ts, alt) for ts, alt in drone_rows if flight["start"] <= ts <= flight["end"]]
+    flight_track = [r for r in track if flight["start"] <= r[0] <= flight["end"]]
+
+    # The profile is the part of the flight flown over the launch point.
+    # Once the drone heads out for the linear route (see /transect) it is
+    # no longer profiling: that run, flown at one constant altitude, would
+    # otherwise count as a long "hover" in one of the bins. So the profile
+    # ends the first time the drone is PROFILE_MAX_RADIUS_M from launch.
+    profile_truncated = False
+    if len(flight_track) >= 10:
+        head = flight_track[:10]
+        lat0 = sum(r[2] for r in head) / len(head)
+        lon0 = sum(r[3] for r in head) / len(head)
+        for i, r in enumerate(flight_track):
+            if _horizontal_distance_m(r[2], r[3], lat0, lon0) > PROFILE_MAX_RADIUS_M:
+                flight_track = flight_track[:i]
+                profile_truncated = True
+                break
+    flight_drone_rows = [(r[0], r[1]) for r in flight_track]
 
     # Which altitude samples count: hovering ones (unless asked for all),
     # on the requested leg of the flight.
@@ -1650,6 +1683,234 @@ def offline_merged_altitude_profile(name, date):
         "leg": leg,
         "flight_seconds": len(flight_drone_rows),
         "kept_seconds": len(kept_rows),
+        "profile_end": flight_drone_rows[-1][0].strftime("%Y-%m-%d %H:%M:%S") if flight_drone_rows else None,
+        "profile_truncated_at_departure": profile_truncated,
+        "max_gap_seconds": SENSOR_TO_DRONE_MAX_GAP_SECONDS,
+    })
+
+
+# ---------- Offline: per-flight linear route (the inbound run) ----------
+# After the stepped profile the drone transits out to ~500 m from the launch
+# point and then flies a straight run back in at constant altitude; only
+# that inbound run is of interest (the outbound transit is not). It is found
+# from the telemetry alone: the farthest point from launch starts it, and it
+# ends when the drone is back within TRANSECT_END_DISTANCE_M of launch (or on
+# the ground). Readings are binned by horizontal distance from launch.
+
+TRANSECT_MIN_DISTANCE_M = 150.0    # must get at least this far out to count as having a route
+TRANSECT_END_DISTANCE_M = 25.0     # the run is over once back within this of launch
+TRANSECT_MIN_ALTITUDE_M = 3.0      # ground samples are never part of the route
+TRANSECT_BIN_SIZE_M = 25.0
+TRANSECT_BIN_SIZES_ALLOWED = (10.0, 25.0, 50.0, 100.0)
+
+
+def _read_drone_track(session_name, date):
+    """
+    (datetime, altitude_agl_m, latitude_deg, longitude_deg) for one date's
+    merged drone telemetry, sorted by time - _read_drone_altitude_series
+    plus position. Returns (None, error_response) when the drone day has
+    not been merged or lacks those columns.
+    """
+    merged_dir = _drone_day_merged_dir_if_present(session_name, date)
+    if not merged_dir:
+        return None, (jsonify({"ok": False, "error": "This date's drone flights haven't been merged yet - use \"Merge drone\" first."}), 400)
+    csv_path = os.path.join(merged_dir, f"telemetry_{date}_merged.csv")
+    try:
+        with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            for col in ("altitude_agl_m", "latitude_deg", "longitude_deg"):
+                if col not in fieldnames:
+                    return None, (jsonify({"ok": False, "error": f"No {col} column in this date's drone telemetry."}), 400)
+            time_column = fieldnames[0]
+            rows = []
+            for row in reader:
+                ts = _parse_csv_timestamp(row.get(time_column))
+                alt = _parse_numeric(row.get("altitude_agl_m"))
+                lat = _parse_numeric(row.get("latitude_deg"))
+                lon = _parse_numeric(row.get("longitude_deg"))
+                if ts is not None and alt is not None and lat is not None and lon is not None:
+                    rows.append((ts, alt, lat, lon))
+    except Exception as e:
+        return None, (jsonify({"ok": False, "error": f"Could not read this date's drone telemetry: {e}"}), 500)
+    rows.sort(key=lambda r: r[0])
+    return rows, None
+
+
+def _horizontal_distance_m(lat, lon, lat0, lon0):
+    """Flat-earth distance in metres - fine for the few hundred metres a flight covers."""
+    dx = (lon - lon0) * 111320.0 * math.cos(math.radians(lat0))
+    dy = (lat - lat0) * 110540.0
+    return math.hypot(dx, dy)
+
+
+def _detect_transect(track_rows):
+    """
+    Finds the inbound run in one flight's (ts, alt, lat, lon) rows: from the
+    farthest point from launch back to within TRANSECT_END_DISTANCE_M of it.
+    Launch = the mean position of the first few (on-the-ground) samples.
+
+    Returns None when the flight never got TRANSECT_MIN_DISTANCE_M away
+    (a profile-only flight), else {"rows": [(ts, distance_m, alt), ...],
+    "start", "end", "far_m", "home": (lat, lon)} with ground samples removed.
+    """
+    if len(track_rows) < 20:
+        return None
+    head = track_rows[:10]
+    lat0 = sum(r[2] for r in head) / len(head)
+    lon0 = sum(r[3] for r in head) / len(head)
+    dist = [_horizontal_distance_m(r[2], r[3], lat0, lon0) for r in track_rows]
+    i_far = max(range(len(dist)), key=lambda i: dist[i])
+    if dist[i_far] < TRANSECT_MIN_DISTANCE_M:
+        return {"far_m": dist[i_far], "rows": [], "start": None, "end": None, "home": (lat0, lon0)}
+    i_end = len(track_rows)
+    for i in range(i_far + 1, len(track_rows)):
+        if dist[i] <= TRANSECT_END_DISTANCE_M or track_rows[i][1] < TRANSECT_MIN_ALTITUDE_M:
+            i_end = i + 1
+            break
+    rows = [(track_rows[i][0], dist[i], track_rows[i][1])
+            for i in range(i_far, i_end) if track_rows[i][1] >= TRANSECT_MIN_ALTITUDE_M]
+    if len(rows) < 10:
+        return {"far_m": dist[i_far], "rows": [], "start": None, "end": None, "home": (lat0, lon0)}
+    return {"rows": rows, "start": rows[0][0], "end": rows[-1][0], "far_m": dist[i_far], "home": (lat0, lon0)}
+
+
+def _summarize_values(values):
+    data = sorted(values)
+    n = len(data)
+    if n >= 2:
+        p25, median, p75 = statistics.quantiles(data, n=4, method="inclusive")
+    else:
+        p25 = median = p75 = data[0]
+    return {"mean": sum(data) / n, "std": statistics.pstdev(data), "median": median,
+            "p25": p25, "p75": p75, "min": data[0], "max": data[-1], "n": n}
+
+
+def _bin_by_distance(points, bin_size):
+    """
+    Edge-aligned bins along the route (0-25, 25-50, ... for 25 m); each
+    returned as its centre plus from/to, with the same summary the altitude
+    profile bins carry. points: [{"x": distance_m, "v": value}].
+    """
+    buckets = {}
+    for p in points:
+        buckets.setdefault(int(math.floor(p["x"] / bin_size)), []).append(p["v"])
+    bins = []
+    for idx, values in sorted(buckets.items()):
+        summary = _summarize_values(values)
+        summary.update({"distance": idx * bin_size + bin_size / 2, "from": idx * bin_size, "to": (idx + 1) * bin_size})
+        bins.append(summary)
+    return bins
+
+
+@app.route("/offline/session/<name>/merged/<date>/transect")
+def offline_merged_transect(name, date):
+    """
+    One flight's inbound linear run: sensor readings against horizontal
+    distance from the launch point, binned every bin_size metres. Same
+    flight indexing as /flights and /altitude_profile, same instrument-side
+    join (each reading tagged with the drone position at its own time,
+    nearest telemetry within SENSOR_TO_DRONE_MAX_GAP_SECONDS).
+    """
+    if not _valid_session_name(name):
+        return jsonify({"ok": False, "error": "Invalid session name."}), 400
+    if not re.match(r"^\d{8}$", date):
+        return jsonify({"ok": False, "error": "Invalid date."}), 400
+    columns = [c for c in (request.args.get("columns") or "").split(",") if c]
+    if not columns:
+        return jsonify({"ok": False, "error": "At least one column is required."}), 400
+    try:
+        flight_index = int(request.args.get("flight_index", ""))
+    except ValueError:
+        return jsonify({"ok": False, "error": "Invalid flight_index."}), 400
+    try:
+        bin_size = float(request.args.get("bin_size", TRANSECT_BIN_SIZE_M))
+    except ValueError:
+        return jsonify({"ok": False, "error": "Invalid bin_size."}), 400
+    if bin_size not in TRANSECT_BIN_SIZES_ALLOWED:
+        return jsonify({"ok": False, "error": f"bin_size must be one of {sorted(TRANSECT_BIN_SIZES_ALLOWED)}."}), 400
+
+    track, err = _read_drone_track(name, date)
+    if err:
+        return err
+    flights = _detect_flights([(r[0], r[1]) for r in track])
+    if flight_index < 0 or flight_index >= len(flights):
+        return jsonify({"ok": False, "error": "That flight was not found for this date."}), 400
+    flight = flights[flight_index]
+    flight_rows = [r for r in track if flight["start"] <= r[0] <= flight["end"]]
+    flight_info = {
+        "index": flight_index,
+        "start": flight["start"].strftime("%Y-%m-%d %H:%M:%S"),
+        "end": flight["end"].strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    transect = _detect_transect(flight_rows)
+    if transect is None or not transect["rows"]:
+        far = transect["far_m"] if transect else 0.0
+        return jsonify({
+            "ok": True, "flight": flight_info, "transect": None, "bin_size": bin_size, "series": [],
+            "reason": f"No linear route in this flight: it got {far:.0f} m from the launch point at most "
+                      f"(a route needs {TRANSECT_MIN_DISTANCE_M:.0f} m).",
+        })
+
+    t_rows = transect["rows"]
+    t_times = [r[0] for r in t_rows]
+    t_dist = [r[1] for r in t_rows]
+    alts = [r[2] for r in t_rows]
+    duration_s = max(1.0, (t_rows[-1][0] - t_rows[0][0]).total_seconds())
+
+    sensor_path = os.path.join(_session_merged_dir(name, date), f"merged_data_{date}_merged.csv")
+    if not os.path.isfile(sensor_path):
+        return jsonify({"ok": False, "error": "This date's sensor runs haven't been merged yet - use \"Merge\" first."}), 400
+    try:
+        with open(sensor_path, "r", encoding="utf-8", errors="replace") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            for column in columns:
+                if column not in fieldnames:
+                    return jsonify({"ok": False, "error": f'Column "{column}" not found in this date\'s sensor data.'}), 400
+            time_column = fieldnames[0]
+            sensor_series = {column: [] for column in columns}
+            for row in reader:
+                ts = _parse_csv_timestamp(row.get(time_column))
+                if ts is None or ts < transect["start"] or ts > transect["end"]:
+                    continue
+                for column in columns:
+                    val = _parse_numeric(row.get(column))
+                    if val is not None:
+                        sensor_series[column].append((ts, val))
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not read this date's sensor data: {e}"}), 500
+
+    series = []
+    for column in columns:
+        points = []
+        dropped = 0
+        for ts, val in sorted(sensor_series[column], key=lambda r: r[0]):
+            d, _gap = _nearest_within(t_times, t_dist, ts, SENSOR_TO_DRONE_MAX_GAP_SECONDS)
+            if d is None:
+                dropped += 1
+                continue
+            points.append({"x": d, "v": val})
+        series.append({"column": column, "bins": _bin_by_distance(points, bin_size), "n": len(points), "dropped": dropped})
+
+    return jsonify({
+        "ok": True,
+        "flight": flight_info,
+        "transect": {
+            "start": t_rows[0][0].strftime("%Y-%m-%d %H:%M:%S"),
+            "end": t_rows[-1][0].strftime("%Y-%m-%d %H:%M:%S"),
+            "duration_s": duration_s,
+            "far_m": transect["far_m"],
+            "end_m": t_dist[-1],
+            "altitude_mean_m": sum(alts) / len(alts),
+            "altitude_min_m": min(alts),
+            "altitude_max_m": max(alts),
+            "speed_mean_ms": (t_dist[0] - t_dist[-1]) / duration_s,
+            "samples": len(t_rows),
+        },
+        "bin_size": bin_size,
+        "series": series,
         "max_gap_seconds": SENSOR_TO_DRONE_MAX_GAP_SECONDS,
     })
 

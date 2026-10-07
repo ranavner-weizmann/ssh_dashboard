@@ -1096,3 +1096,216 @@ function createProfileController(canvasId, tooltipId) {
     draw,
   };
 }
+
+
+// ---------- Linear route: binned instrument value against distance from launch ----------
+// The horizontal twin of drawProfileLines: distance from the launch point is
+// the shared x axis (0 at the left, the far point at the right - the drone
+// flies right-to-left on the inbound run), the instrument value is y - real
+// units for a single series, each series scaled to its own mean±std range
+// when several are overlaid. Bins carry {distance, from, to, mean, std,
+// median, p25, p75, n} (see _bin_by_distance in app.py).
+function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax) {
+  const { ctx, width, height } = getCanvasContext(canvas);
+  ctx.clearRect(0, 0, width, height);
+
+  const withBins = series.filter((s) => s.bins.length > 0);
+  if (!withBins.length) {
+    drawEmptyPlotMessage(ctx, width, height, 'No paired values found');
+    return;
+  }
+
+  const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
+  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+
+  let minX = 0;
+  let maxX = xMax || 0;
+  withBins.forEach((s) => s.bins.forEach((b) => { if (b.to > maxX) maxX = b.to; }));
+  if (maxX <= minX) maxX = minX + 1;
+  const xFor = (x) => PLOT_PADDING.left + ((x - minX) / (maxX - minX)) * plotW;
+
+  const single = withBins.length === 1;
+  withBins.forEach((s) => {
+    let minY = Math.min(...s.bins.map((b) => b.mean - b.std));
+    let maxY = Math.max(...s.bins.map((b) => b.mean + b.std));
+    if (minY === maxY) { minY -= 1; maxY += 1; } else { const pad = (maxY - minY) * 0.08; minY -= pad; maxY += pad; }
+    s._minY = minY; s._maxY = maxY;
+    s._yFor = (y) => PLOT_PADDING.top + plotH - ((y - minY) / (maxY - minY)) * plotH;
+  });
+
+  // Distance gridlines (shared axis, real metres).
+  const gridLines = 5;
+  ctx.strokeStyle = getCssVar('--panel-border');
+  ctx.lineWidth = 1;
+  ctx.fillStyle = getCssVar('--text-dim');
+  ctx.font = '11px ' + getCssVar('--mono');
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  for (let i = 0; i <= gridLines; i++) {
+    const xv = minX + ((maxX - minX) * i) / gridLines;
+    const x = Math.round(xFor(xv)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x, PLOT_PADDING.top);
+    ctx.lineTo(x, PLOT_PADDING.top + plotH);
+    ctx.stroke();
+    ctx.fillText(xv.toFixed(0), x, height - 6);
+  }
+
+  withBins.forEach((s) => {
+    const color = single ? getCssVar('--accent') : s.color;
+
+    // mean±std band
+    ctx.beginPath();
+    s.bins.forEach((b, i) => {
+      const x = xFor(b.distance), y = s._yFor(b.mean - b.std);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    for (let i = s.bins.length - 1; i >= 0; i--) {
+      ctx.lineTo(xFor(s.bins[i].distance), s._yFor(s.bins[i].mean + s.bins[i].std));
+    }
+    ctx.closePath();
+    ctx.fillStyle = hexToRgba(color, single ? 0.15 : 0.12);
+    ctx.fill();
+
+    // mean line
+    ctx.beginPath();
+    s.bins.forEach((b, i) => {
+      const x = xFor(b.distance), y = s._yFor(b.mean);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    s.bins.forEach((b) => {
+      ctx.beginPath();
+      ctx.arc(xFor(b.distance), s._yFor(b.mean), 3, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    });
+  });
+
+  if (hoverDistance !== null) {
+    const hx = xFor(hoverDistance);
+    ctx.beginPath();
+    ctx.moveTo(hx, PLOT_PADDING.top);
+    ctx.lineTo(hx, PLOT_PADDING.top + plotH);
+    ctx.strokeStyle = getCssVar('--text-dim');
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    withBins.forEach((s) => {
+      const color = single ? getCssVar('--accent') : s.color;
+      let nearest = s.bins[0], bestDist = Infinity;
+      s.bins.forEach((b) => {
+        const d = Math.abs(b.distance - hoverDistance);
+        if (d < bestDist) { bestDist = d; nearest = b; }
+      });
+      const x = xFor(nearest.distance), y = s._yFor(nearest.mean);
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fillStyle = getCssVar('--panel'); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+    });
+  }
+
+  // y labels: real range for one series, 0-100% for several
+  ctx.fillStyle = getCssVar('--text-dim');
+  ctx.font = '11px ' + getCssVar('--mono');
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const yMinLabel = single ? withBins[0]._minY.toFixed(decimals ?? 1) : '0%';
+  const yMaxLabel = single ? withBins[0]._maxY.toFixed(decimals ?? 1) : '100%';
+  ctx.fillText(yMaxLabel, PLOT_PADDING.left - 8, PLOT_PADDING.top);
+  ctx.fillText(yMinLabel, PLOT_PADDING.left - 8, PLOT_PADDING.top + plotH);
+
+  ctx.save();
+  ctx.translate(12, PLOT_PADDING.top + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(single ? `${withBins[0].column} (mean ± std)` : 'mean ± std, per variable', 0, 0);
+  ctx.restore();
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(`← ${xLabel} →`, PLOT_PADDING.left + plotW / 2, height - 18);
+}
+
+function createTransectController(canvasId, tooltipId) {
+  const canvas = document.getElementById(canvasId);
+  const tooltip = document.getElementById(tooltipId);
+
+  let series = [];
+  let xLabel = 'distance (m)', decimals = 1, xMax = 0;
+  let emptyMessage = 'Pick a variable';
+  let hoverDistance = null;
+
+  function draw() {
+    const withBins = series.filter((s) => s.bins.length > 0);
+    if (!withBins.length) {
+      const { ctx, width, height } = getCanvasContext(canvas);
+      ctx.clearRect(0, 0, width, height);
+      drawEmptyPlotMessage(ctx, width, height, emptyMessage);
+      return;
+    }
+    drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax);
+  }
+
+  canvas.addEventListener('mousemove', (e) => {
+    const withBins = series.filter((s) => s.bins.length > 0);
+    if (!withBins.length) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    let maxX = xMax || 0;
+    withBins.forEach((s) => s.bins.forEach((b) => { if (b.to > maxX) maxX = b.to; }));
+    if (maxX <= 0) maxX = 1;
+    const plotW = rect.width - PLOT_PADDING.left - PLOT_PADDING.right;
+    if (mx < PLOT_PADDING.left - 10 || mx > PLOT_PADDING.left + plotW + 10) {
+      if (hoverDistance !== null) { hoverDistance = null; tooltip.style.display = 'none'; draw(); }
+      return;
+    }
+    hoverDistance = Math.max(0, Math.min(maxX, ((mx - PLOT_PADDING.left) / plotW) * maxX));
+    draw();
+
+    const rows = withBins.map((s) => {
+      let nearest = s.bins[0], bestDist = Infinity;
+      s.bins.forEach((b) => {
+        const d = Math.abs(b.distance - hoverDistance);
+        if (d < bestDist) { bestDist = d; nearest = b; }
+      });
+      const color = withBins.length === 1 ? getCssVar('--accent') : s.color;
+      return `<div class="tt-row"><span class="tt-dot" style="background:${color}"></span>` +
+        `<span class="tt-value">${s.column}: ${nearest.mean.toFixed(decimals)} ± ${nearest.std.toFixed(decimals)}` +
+        ` · median ${nearest.median.toFixed(decimals)} [${nearest.p25.toFixed(decimals)}–${nearest.p75.toFixed(decimals)}] (n=${nearest.n})</span></div>`;
+    }).join('');
+    let b0 = withBins[0].bins[0], best = Infinity;
+    withBins[0].bins.forEach((b) => { const d = Math.abs(b.distance - hoverDistance); if (d < best) { best = d; b0 = b; } });
+    tooltip.innerHTML = `<div class="tt-row"><span class="tt-value">${b0.from.toFixed(0)}–${b0.to.toFixed(0)} m from launch</span></div>` + rows;
+    tooltip.style.left = (rect.width / 2) + 'px';
+    tooltip.style.top = '0px';
+    tooltip.style.display = 'block';
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    hoverDistance = null;
+    tooltip.style.display = 'none';
+    draw();
+  });
+
+  return {
+    // data: {series: [{column, color, bins}], xLabel, decimals, xMax}
+    setData(data) {
+      series = data.series || [];
+      xLabel = data.xLabel || 'distance (m)';
+      decimals = data.decimals ?? 1;
+      xMax = data.xMax || 0;
+      hoverDistance = null;
+      draw();
+    },
+    setEmptyMessage(message) {
+      series = [];
+      emptyMessage = message;
+      draw();
+    },
+    draw,
+  };
+}
