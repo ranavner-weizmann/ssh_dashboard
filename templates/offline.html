@@ -576,14 +576,16 @@
       <div class="panel-header" style="margin-top: 22px;">
         <label>linear route (inbound run, far point → launch)</label>
       </div>
-      <div class="hint" style="margin-bottom: 10px;">After the profile the drone transits out (that leg is ignored) and then flies straight back in at constant altitude. The run is found from the telemetry alone: it starts at the flight's farthest point from the launch position (needs at least 150 m) and ends when the drone is back within 25 m of launch or on the ground. The same variables as above are plotted against horizontal distance from launch, binned every 25 m by default - the drone flies right-to-left on this chart. The chart title gives the run's altitude and ground speed.</div>
+      <div class="hint" style="margin-bottom: 10px;">After the profile the drone transits out (that leg is ignored) and then comes back in at constant altitude, pausing at hover points every 100 m, the last one over the launch area. The run is found from the telemetry alone: it starts at the flight's farthest point from the launch position (needs at least 150 m) and runs until the drone lands, keeping only samples at the run's own altitude. The same variables as above are plotted against horizontal distance from launch, in bins centred on the hover points (with 100 m bins, the 300 m bin holds 250-350 m) - the drone flies right-to-left on this chart. "Hover only" keeps readings taken while the drone held position (within 3 m over ±5 s) and drops the legs between hover points. The chart title gives the run's altitude; the status line lists the hover points found.</div>
       <div class="plot-toolbar">
-        <select id="route-bin-select" class="select-input" style="width: auto;" onchange="altProfileRenderAll()" title="distance bin size along the route">
-          <option value="10">10 m bins</option>
-          <option value="25" selected>25 m bins</option>
+        <select id="route-bin-select" class="select-input" style="width: auto;" onchange="altProfileRenderAll()" title="distance bin size, centred on the hover points">
+          <option value="25">25 m bins</option>
           <option value="50">50 m bins</option>
-          <option value="100">100 m bins</option>
+          <option value="100" selected>100 m bins (±50 m)</option>
         </select>
+        <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="keep only readings taken while the drone held position">
+          <input type="checkbox" id="route-hover-only" checked onchange="altProfileRenderAll()"> hover only
+        </label>
       </div>
       <div class="alt-profile-grid" id="route-grid"></div>
     </div>
@@ -1677,9 +1679,10 @@ async function altProfileRenderAll() {
     }));
     await Promise.all(altProfileRouteCharts.map(async (c) => {
       const binSize = document.getElementById('route-bin-select').value;
+      const hoverOnly = document.getElementById('route-hover-only').checked ? '1' : '0';
       const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/transect` +
         `?flight_index=${encodeURIComponent(c.flight.index)}&columns=${encodeURIComponent(altProfileActiveColumns.join(','))}` +
-        `&bin_size=${encodeURIComponent(binSize)}`;
+        `&bin_size=${encodeURIComponent(binSize)}&hover_only=${hoverOnly}`;
       const res = await fetch(url);
       const data = await res.json();
       if (!data.ok) {
@@ -1696,7 +1699,7 @@ async function altProfileRenderAll() {
       }
       const t = data.transect;
       c.titleEl.textContent = `Flight ${c.flight.index + 1} route ${t.start.slice(11)}–${t.end.slice(11)} · ` +
-        `${t.far_m.toFixed(0)} → ${t.end_m.toFixed(0)} m at ${t.altitude_mean_m.toFixed(0)} m AGL, ${t.speed_mean_ms.toFixed(1)} m/s`;
+        `${t.far_m.toFixed(0)} → ${t.end_m.toFixed(0)} m at ${t.altitude_mean_m.toFixed(0)} m AGL`;
       c.controller.setData({
         series: data.series.map((s) => ({ ...s, color: altProfileSeriesColors[s.column] })),
         xLabel: 'distance from launch (m)',
@@ -1705,10 +1708,17 @@ async function altProfileRenderAll() {
       });
       const parts = data.series.map((s) => {
         let part = `${s.column}: ${s.n} reading${s.n === 1 ? '' : 's'}`;
-        if (s.dropped) part += ` (${s.dropped} unmatched)`;
+        if (s.dropped) part += ` (${s.dropped} ${data.hover_only ? 'between hovers, dropped' : 'unmatched'})`;
         return part;
       });
-      parts.push(`${Math.round(t.duration_s / 60)} min, altitude ${t.altitude_min_m.toFixed(0)}–${t.altitude_max_m.toFixed(0)} m`);
+      const hp = t.hover_points || [];
+      if (hp.length) {
+        parts.push(`${hp.length} hover point${hp.length === 1 ? '' : 's'}: ` +
+          hp.map((h) => `${h.distance_m.toFixed(0)} m (${Math.round(h.seconds)} s)`).join(', '));
+      } else {
+        parts.push('no hover points found (continuous run)');
+      }
+      parts.push(`${Math.round(t.duration_s / 60)} min at ${t.altitude_min_m.toFixed(0)}–${t.altitude_max_m.toFixed(0)} m`);
       c.statusEl.textContent = parts.join(' · ');
       c.statusEl.style.color = 'var(--text-dim)';
     }));

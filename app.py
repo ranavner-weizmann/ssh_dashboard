@@ -1697,11 +1697,19 @@ def offline_merged_altitude_profile(name, date):
 # ends when the drone is back within TRANSECT_END_DISTANCE_M of launch (or on
 # the ground). Readings are binned by horizontal distance from launch.
 
+# The route is flown as hover points - six of them, every 100 m from the far
+# point back to the launch area, the last one over the launch area itself -
+# so like the profile it is binned around those points (bins centred on the
+# multiples of the bin size: the 300 m bin spans 250-350 m) and, by default,
+# only readings taken while the drone held position count.
 TRANSECT_MIN_DISTANCE_M = 150.0    # must get at least this far out to count as having a route
-TRANSECT_END_DISTANCE_M = 25.0     # the run is over once back within this of launch
 TRANSECT_MIN_ALTITUDE_M = 3.0      # ground samples are never part of the route
-TRANSECT_BIN_SIZE_M = 25.0
-TRANSECT_BIN_SIZES_ALLOWED = (10.0, 25.0, 50.0, 100.0)
+TRANSECT_ALTITUDE_BAND_M = 8.0     # route samples stay within this of the run's median altitude (drops the descent to land)
+TRANSECT_BIN_SIZE_M = 100.0
+TRANSECT_BIN_SIZES_ALLOWED = (25.0, 50.0, 100.0)
+ROUTE_HOVER_WINDOW_SECONDS = 5     # position must stay put over +- this many seconds ...
+ROUTE_HOVER_MAX_RANGE_M = 3.0      # ... to within this many metres to count as a hover point
+ROUTE_HOVER_MIN_SECONDS = 15       # shorter pauses are not hover points
 
 
 def _read_drone_track(session_name, date):
@@ -1747,12 +1755,15 @@ def _horizontal_distance_m(lat, lon, lat0, lon0):
 def _detect_transect(track_rows):
     """
     Finds the inbound run in one flight's (ts, alt, lat, lon) rows: from the
-    farthest point from launch back to within TRANSECT_END_DISTANCE_M of it.
-    Launch = the mean position of the first few (on-the-ground) samples.
+    farthest point from launch until the drone lands, keeping only samples
+    at the run's own altitude (median, +- TRANSECT_ALTITUDE_BAND_M) so the
+    descent to land is excluded while the final hover over the launch area
+    is kept. Launch = the mean position of the first few on-ground samples.
 
-    Returns None when the flight never got TRANSECT_MIN_DISTANCE_M away
-    (a profile-only flight), else {"rows": [(ts, distance_m, alt), ...],
-    "start", "end", "far_m", "home": (lat, lon)} with ground samples removed.
+    Returns {"far_m", "rows": [], ...} with empty rows when the flight never
+    got TRANSECT_MIN_DISTANCE_M away (a profile-only flight), else
+    {"rows": [(ts, distance_m, alt), ...], "start", "end", "far_m",
+    "altitude_m" (the run's median altitude), "home": (lat, lon)}.
     """
     if len(track_rows) < 20:
         return None
@@ -1761,18 +1772,58 @@ def _detect_transect(track_rows):
     lon0 = sum(r[3] for r in head) / len(head)
     dist = [_horizontal_distance_m(r[2], r[3], lat0, lon0) for r in track_rows]
     i_far = max(range(len(dist)), key=lambda i: dist[i])
+    empty = {"far_m": dist[i_far], "rows": [], "start": None, "end": None, "home": (lat0, lon0), "altitude_m": None}
     if dist[i_far] < TRANSECT_MIN_DISTANCE_M:
-        return {"far_m": dist[i_far], "rows": [], "start": None, "end": None, "home": (lat0, lon0)}
+        return empty
+    # The drone can drift outward during the far hover, putting the single
+    # farthest sample at the END of that hover; start the run where the
+    # drone first came within hover range of the far point instead, so the
+    # whole first hover point is included.
+    i_start = i_far
+    while i_start > 0 and dist[i_start - 1] >= dist[i_far] - ROUTE_HOVER_MAX_RANGE_M * 2             and (track_rows[i_far][0] - track_rows[i_start - 1][0]).total_seconds() <= 180:
+        i_start -= 1
     i_end = len(track_rows)
     for i in range(i_far + 1, len(track_rows)):
-        if dist[i] <= TRANSECT_END_DISTANCE_M or track_rows[i][1] < TRANSECT_MIN_ALTITUDE_M:
-            i_end = i + 1
+        if track_rows[i][1] < TRANSECT_MIN_ALTITUDE_M:
+            i_end = i
             break
-    rows = [(track_rows[i][0], dist[i], track_rows[i][1])
-            for i in range(i_far, i_end) if track_rows[i][1] >= TRANSECT_MIN_ALTITUDE_M]
+    airborne = [(track_rows[i][0], dist[i], track_rows[i][1]) for i in range(i_start, i_end)
+                if track_rows[i][1] >= TRANSECT_MIN_ALTITUDE_M]
+    if len(airborne) < 10:
+        return empty
+    route_alt = statistics.median(r[2] for r in airborne)
+    rows = [r for r in airborne if abs(r[2] - route_alt) <= TRANSECT_ALTITUDE_BAND_M]
     if len(rows) < 10:
-        return {"far_m": dist[i_far], "rows": [], "start": None, "end": None, "home": (lat0, lon0)}
-    return {"rows": rows, "start": rows[0][0], "end": rows[-1][0], "far_m": dist[i_far], "home": (lat0, lon0)}
+        return empty
+    return {"rows": rows, "start": rows[0][0], "end": rows[-1][0], "far_m": dist[i_far],
+            "altitude_m": route_alt, "home": (lat0, lon0)}
+
+
+def _route_hover_points(rows, flags):
+    """
+    Groups consecutive hovering route samples into hover points: [{"distance_m",
+    "seconds", "start"}] for every pause of at least ROUTE_HOVER_MIN_SECONDS.
+    rows are (ts, distance, alt); flags the matching hover booleans.
+    """
+    points = []
+    i = 0
+    n = len(rows)
+    while i < n:
+        if not flags[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and flags[j + 1] and (rows[j + 1][0] - rows[j][0]).total_seconds() <= 3:
+            j += 1
+        seconds = (rows[j][0] - rows[i][0]).total_seconds() + 1
+        if seconds >= ROUTE_HOVER_MIN_SECONDS:
+            points.append({
+                "distance_m": sum(r[1] for r in rows[i:j + 1]) / (j - i + 1),
+                "seconds": seconds,
+                "start": rows[i][0].strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        i = j + 1
+    return points
 
 
 def _summarize_values(values):
@@ -1788,17 +1839,18 @@ def _summarize_values(values):
 
 def _bin_by_distance(points, bin_size):
     """
-    Edge-aligned bins along the route (0-25, 25-50, ... for 25 m); each
-    returned as its centre plus from/to, with the same summary the altitude
-    profile bins carry. points: [{"x": distance_m, "v": value}].
+    Bins centred on the multiples of bin_size along the route (0, 100, 200,
+    ... m for the default), each spanning centre +- bin_size/2, so a hover
+    point at 300 m collects 250-350 m; same summary as the profile bins.
+    points: [{"x": distance_m, "v": value}].
     """
     buckets = {}
     for p in points:
-        buckets.setdefault(int(math.floor(p["x"] / bin_size)), []).append(p["v"])
+        buckets.setdefault(round(p["x"] / bin_size) * bin_size, []).append(p["v"])
     bins = []
-    for idx, values in sorted(buckets.items()):
+    for centre, values in sorted(buckets.items()):
         summary = _summarize_values(values)
-        summary.update({"distance": idx * bin_size + bin_size / 2, "from": idx * bin_size, "to": (idx + 1) * bin_size})
+        summary.update({"distance": centre, "from": max(0.0, centre - bin_size / 2), "to": centre + bin_size / 2})
         bins.append(summary)
     return bins
 
@@ -1829,6 +1881,7 @@ def offline_merged_transect(name, date):
         return jsonify({"ok": False, "error": "Invalid bin_size."}), 400
     if bin_size not in TRANSECT_BIN_SIZES_ALLOWED:
         return jsonify({"ok": False, "error": f"bin_size must be one of {sorted(TRANSECT_BIN_SIZES_ALLOWED)}."}), 400
+    hover_only = (request.args.get("hover_only", "1") or "1").lower() not in ("0", "false", "no")
 
     track, err = _read_drone_track(name, date)
     if err:
@@ -1853,11 +1906,18 @@ def offline_merged_transect(name, date):
                       f"(a route needs {TRANSECT_MIN_DISTANCE_M:.0f} m).",
         })
 
-    t_rows = transect["rows"]
+    all_rows = transect["rows"]
+    # Hovering = horizontal position holding still (same test as the
+    # profile's altitude hover, applied to distance from launch).
+    hover = _hover_flags([(r[0], r[1]) for r in all_rows], ROUTE_HOVER_WINDOW_SECONDS, ROUTE_HOVER_MAX_RANGE_M)
+    hover_points = _route_hover_points(all_rows, hover)
+    t_rows = [r for r, h in zip(all_rows, hover) if h or not hover_only]
+    if len(t_rows) < 2:
+        t_rows = all_rows
     t_times = [r[0] for r in t_rows]
     t_dist = [r[1] for r in t_rows]
-    alts = [r[2] for r in t_rows]
-    duration_s = max(1.0, (t_rows[-1][0] - t_rows[0][0]).total_seconds())
+    alts = [r[2] for r in all_rows]
+    duration_s = max(1.0, (all_rows[-1][0] - all_rows[0][0]).total_seconds())
 
     sensor_path = os.path.join(_session_merged_dir(name, date), f"merged_data_{date}_merged.csv")
     if not os.path.isfile(sensor_path):
@@ -1898,18 +1958,21 @@ def offline_merged_transect(name, date):
         "ok": True,
         "flight": flight_info,
         "transect": {
-            "start": t_rows[0][0].strftime("%Y-%m-%d %H:%M:%S"),
-            "end": t_rows[-1][0].strftime("%Y-%m-%d %H:%M:%S"),
+            "start": all_rows[0][0].strftime("%Y-%m-%d %H:%M:%S"),
+            "end": all_rows[-1][0].strftime("%Y-%m-%d %H:%M:%S"),
             "duration_s": duration_s,
             "far_m": transect["far_m"],
-            "end_m": t_dist[-1],
+            "end_m": all_rows[-1][1],
             "altitude_mean_m": sum(alts) / len(alts),
             "altitude_min_m": min(alts),
             "altitude_max_m": max(alts),
-            "speed_mean_ms": (t_dist[0] - t_dist[-1]) / duration_s,
-            "samples": len(t_rows),
+            "speed_mean_ms": (all_rows[0][1] - all_rows[-1][1]) / duration_s,
+            "samples": len(all_rows),
+            "hover_seconds": sum(1 for h in hover if h),
+            "hover_points": hover_points,
         },
         "bin_size": bin_size,
+        "hover_only": hover_only,
         "series": series,
         "max_gap_seconds": SENSOR_TO_DRONE_MAX_GAP_SECONDS,
     })
