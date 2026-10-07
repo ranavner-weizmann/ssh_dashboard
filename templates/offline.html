@@ -1464,7 +1464,7 @@ function altProfileBuildGrid() {
 
     const controller = createProfileController(canvasId, tooltipId);
     controller.setEmptyMessage('Add a variable');
-    return { flight: f, controller, statusEl: status };
+    return { flight: f, controller, statusEl: status, wrapEl: wrap };
   });
 
   const routeGrid = document.getElementById('route-grid');
@@ -1493,7 +1493,7 @@ function altProfileBuildGrid() {
 
     const controller = createTransectController(canvasId, tooltipId);
     controller.setEmptyMessage('Add a variable');
-    return { flight: f, controller, statusEl: status, titleEl: title };
+    return { flight: f, controller, statusEl: status, titleEl: title, wrapEl: wrap };
   });
 }
 
@@ -1632,6 +1632,7 @@ async function altProfileRenderAll() {
 
   if (!altProfileActiveColumns.length) {
     altProfileCharts.concat(altProfileRouteCharts).forEach((c) => {
+      c.wrapEl.style.display = '';
       c.controller.setEmptyMessage('Add a variable');
       c.statusEl.textContent = '';
     });
@@ -1658,6 +1659,12 @@ async function altProfileRenderAll() {
         return;
       }
 
+      // A flight with no readings for the chosen variables (a short test
+      // hop, a flight with the logger off) just drops out of the grid
+      // rather than showing an empty chart.
+      const hasData = data.series.some((s) => s.bins.length > 0);
+      c.wrapEl.style.display = hasData ? '' : 'none';
+      if (!hasData) return;
       c.controller.setData({
         series: data.series.map((s) => ({ ...s, color: altProfileSeriesColors[s.column] })),
         yLabel: 'altitude_agl_m',
@@ -1691,12 +1698,11 @@ async function altProfileRenderAll() {
         c.statusEl.style.color = 'var(--err)';
         return;
       }
-      if (!data.transect) {
-        c.controller.setEmptyMessage('No linear route in this flight');
-        c.statusEl.textContent = data.reason || '';
-        c.statusEl.style.color = 'var(--text-dim)';
-        return;
-      }
+      // Profile-only flights (no route) and routes with no readings for
+      // the chosen variables are hidden rather than shown empty.
+      const routeHasData = data.transect && data.series.some((s) => s.bins.length > 0);
+      c.wrapEl.style.display = routeHasData ? '' : 'none';
+      if (!routeHasData) return;
       const t = data.transect;
       c.titleEl.textContent = `Flight ${c.flight.index + 1} route ${t.start.slice(11)}–${t.end.slice(11)} · ` +
         `${t.far_m.toFixed(0)} → ${t.end_m.toFixed(0)} m at ${t.altitude_mean_m.toFixed(0)} m AGL`;
