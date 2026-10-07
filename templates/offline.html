@@ -510,7 +510,8 @@
     <div class="hint" id="ofl-current-day-label" style="margin-bottom: 10px; font-weight: 600;"></div>
     <div class="tab-bar">
       <button class="tab-btn active" id="ofl-tab-btn-plot" onclick="oflSwitchTab('plot')">Plot</button>
-      <button class="tab-btn" id="ofl-tab-btn-altitude" onclick="oflSwitchTab('altitude')">Altitude Profile</button>
+      <button class="tab-btn" id="ofl-tab-btn-altitude" onclick="oflSwitchTab('altitude')">Vertical Profiles</button>
+      <button class="tab-btn" id="ofl-tab-btn-horizontal" onclick="oflSwitchTab('horizontal')">Horizontal Profiles</button>
       <button class="tab-btn" id="ofl-tab-btn-explore" onclick="oflSwitchTab('explore')">Explore</button>
       <button class="tab-btn" id="ofl-tab-btn-assistant" onclick="oflSwitchTab('assistant')">Assistant</button>
     </div>
@@ -543,15 +544,15 @@
   <div class="tab-panel" id="ofl-tab-altitude">
   <div class="panel" id="altitude-profile-panel">
     <div class="panel-header">
-      <label>altitude profile</label>
+      <label>vertical profiles (instrument vs altitude)</label>
     </div>
     <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Add one or more sensor variables to see their vertical profiles, one chart per flight. Each instrument reading is tagged with the drone's altitude at that moment (nearest telemetry sample within 5s), then grouped into bins centred on the hover levels - with 20m bins, the 60m bin holds everything from 50 to 70m - and drawn as a mean line with a shaded ±1 std band; the tooltip also shows the median, quartiles and the number of instrument readings in the bin. "Hover only" keeps readings taken while the drone held a level (altitude steady within 2m over ±5s) and drops the climb between levels. With several variables on one chart, each is scaled to its own mean±std range (real units in the tooltip), same as the Plot tab.</div>
     <div id="alt-profile-content" style="display:none;">
       <div class="plot-toolbar">
-        <select id="alt-profile-instrument-select" class="select-input" onchange="altProfileInstrumentChange()" style="display:none;">
+        <select id="alt-profile-instrument-select" class="select-input" onchange="altProfileInstrumentChange('v')" style="display:none;">
           <option value="">Instrument...</option>
         </select>
-        <select id="alt-profile-variable-select" class="select-input" onchange="altProfileAddColumn()">
+        <select id="alt-profile-variable-select" class="select-input" onchange="altProfileAddColumn('v')">
           <option value="">Add a variable...</option>
         </select>
         <select id="alt-profile-bin-select" class="select-input" style="width: auto;" onchange="altProfileRenderAll()" title="altitude bin size (centred on the hover levels)">
@@ -573,11 +574,25 @@
       <div class="dv-legend" id="alt-profile-legend"></div>
       <div class="alt-profile-grid" id="alt-profile-grid"></div>
 
-      <div class="panel-header" style="margin-top: 22px;">
-        <label>linear route (inbound run, far point → launch)</label>
+    </div>
+    <div class="hint" id="alt-profile-status"></div>
+  </div>
+  </div>
+
+  <div class="tab-panel" id="ofl-tab-horizontal">
+  <div class="panel" id="horizontal-profile-panel">
+    <div id="hp-content" style="display:none;">
+      <div class="panel-header">
+        <label>horizontal profiles (linear route: far point → launch)</label>
       </div>
       <div class="hint" style="margin-bottom: 10px;">After the profile the drone transits out (that leg is ignored) and then comes back in at constant altitude, pausing at hover points every 100 m, the last one over the launch area. The run is found from the telemetry alone: it starts at the flight's farthest point from the launch position (needs at least 150 m) and runs until the drone lands, keeping only samples at the run's own altitude. The same variables as above are plotted against horizontal distance from launch, in bins centred on the hover points (with 100 m bins, the 300 m bin holds 250-350 m) - the drone flies right-to-left on this chart. "Hover only" keeps readings taken while the drone held position (within 3 m over ±5 s) and drops the legs between hover points. The chart title gives the run's altitude; the status line lists the hover points found.</div>
       <div class="plot-toolbar">
+        <select id="hp-instrument-select" class="select-input" onchange="altProfileInstrumentChange('h')" style="display:none;">
+          <option value="">Instrument...</option>
+        </select>
+        <select id="hp-variable-select" class="select-input" onchange="altProfileAddColumn('h')">
+          <option value="">Add a variable...</option>
+        </select>
         <select id="route-bin-select" class="select-input" style="width: auto;" onchange="altProfileRenderAll()" title="distance bin size, centred on the hover points">
           <option value="25">25 m bins</option>
           <option value="50">50 m bins</option>
@@ -587,9 +602,10 @@
           <input type="checkbox" id="route-hover-only" checked onchange="altProfileRenderAll()"> hover only
         </label>
       </div>
+      <div class="dv-legend" id="hp-legend"></div>
       <div class="alt-profile-grid" id="route-grid"></div>
     </div>
-    <div class="hint" id="alt-profile-status"></div>
+    <div class="hint" id="hp-status"></div>
   </div>
   </div>
 
@@ -1340,7 +1356,7 @@ function oflClearPlot() {
 // ever drawn in response to a direct user action within that tab (picking
 // a variable, hovering, ...), which can't happen while its controls are
 // display:none, so nothing draws at a stale 0x0 size.
-const OFL_TAB_NAMES = ['plot', 'altitude', 'explore', 'assistant'];
+const OFL_TAB_NAMES = ['plot', 'altitude', 'horizontal', 'explore', 'assistant'];
 
 function oflSwitchTab(name) {
   OFL_TAB_NAMES.forEach((n) => {
@@ -1366,6 +1382,7 @@ function oflClearPlotPanel() {
   document.getElementById('alt-profile-legend').innerHTML = '';
   altProfileRouteCharts = [];
   document.getElementById('route-grid').innerHTML = '';
+  document.getElementById('hp-legend').innerHTML = '';
 }
 
 // ---------- Altitude profile: one chart per flight, instrument vs. altitude ----------
@@ -1384,14 +1401,38 @@ function oflClearPlotPanel() {
 // timebases that can go quiet for many minutes between runs.
 
 let altProfileFlights = [];
+
+// The Vertical and Horizontal tabs plot the same variables, so there is
+// one selection (altProfileActiveColumns) with a copy of the picker and
+// legend in each tab. These wrap the pairs of elements so the existing
+// functions can address both at once.
+const ALT_PROFILE_TABS = {
+  v: { instrument: 'alt-profile-instrument-select', variable: 'alt-profile-variable-select',
+       legend: 'alt-profile-legend', content: 'alt-profile-content', status: 'alt-profile-status' },
+  h: { instrument: 'hp-instrument-select', variable: 'hp-variable-select',
+       legend: 'hp-legend', content: 'hp-content', status: 'hp-status' },
+};
+
+function altProfileBothContents() {
+  const els = Object.values(ALT_PROFILE_TABS).map((t) => document.getElementById(t.content));
+  return { style: { set display(v) { els.forEach((e) => { e.style.display = v; }); } } };
+}
+
+function altProfileBothStatuses() {
+  const els = Object.values(ALT_PROFILE_TABS).map((t) => document.getElementById(t.status));
+  return {
+    set textContent(v) { els.forEach((e) => { e.textContent = v; }); },
+    style: { set color(v) { els.forEach((e) => { e.style.color = v; }); } },
+  };
+}
 let altProfileCharts = []; // [{flight, controller, statusEl}], one per flight, built once per date
 let altProfileRouteCharts = []; // same shape, the linear-route chart per flight
 let altProfileActiveColumns = []; // [column, ...], in add order - merged-source columns only
 let altProfileSeriesColors = {}; // column -> color, same palette as the plot above
 
 async function altProfileLoadFlights() {
-  const content = document.getElementById('alt-profile-content');
-  const statusEl = document.getElementById('alt-profile-status');
+  const content = altProfileBothContents();
+  const statusEl = altProfileBothStatuses();
   altProfileFlights = [];
   altProfileCharts = [];
   altProfileActiveColumns = [];
@@ -1400,6 +1441,7 @@ async function altProfileLoadFlights() {
   document.getElementById('alt-profile-legend').innerHTML = '';
   altProfileRouteCharts = [];
   document.getElementById('route-grid').innerHTML = '';
+  document.getElementById('hp-legend').innerHTML = '';
   content.style.display = 'none';
   statusEl.textContent = 'Looking for flights...';
   statusEl.style.color = 'var(--text-dim)';
@@ -1508,8 +1550,12 @@ function altProfileNextAvailableColor() {
 // "add a variable" picker does. Already-active columns are excluded,
 // same as the main plot's picker.
 function altProfilePopulateVariableSelect() {
-  const instrumentSelect = document.getElementById('alt-profile-instrument-select');
-  const select = document.getElementById('alt-profile-variable-select');
+  Object.keys(ALT_PROFILE_TABS).forEach(altProfilePopulateVariableSelectFor);
+}
+
+function altProfilePopulateVariableSelectFor(kind) {
+  const instrumentSelect = document.getElementById(ALT_PROFILE_TABS[kind].instrument);
+  const select = document.getElementById(ALT_PROFILE_TABS[kind].variable);
   const sensorVars = oflState.availableVariables.filter((v) =>
     v.source === 'merged' && !altProfileActiveColumns.includes(v.column));
   const atCap = altProfileActiveColumns.length >= OFL_SERIES_COLORS.length;
@@ -1549,9 +1595,9 @@ function altProfilePopulateVariableSelect() {
   select.disabled = true;
 }
 
-function altProfileInstrumentChange() {
-  const instrumentSelect = document.getElementById('alt-profile-instrument-select');
-  const select = document.getElementById('alt-profile-variable-select');
+function altProfileInstrumentChange(kind) {
+  const instrumentSelect = document.getElementById(ALT_PROFILE_TABS[kind].instrument);
+  const select = document.getElementById(ALT_PROFILE_TABS[kind].variable);
   const sensorVars = oflState.availableVariables.filter((v) =>
     v.source === 'merged' && !altProfileActiveColumns.includes(v.column));
   const atCap = altProfileActiveColumns.length >= OFL_SERIES_COLORS.length;
@@ -1568,16 +1614,17 @@ function altProfileInstrumentChange() {
   select.disabled = select.options.length <= 1 || atCap;
 }
 
-function altProfileAddColumn() {
-  const select = document.getElementById('alt-profile-variable-select');
+function altProfileAddColumn(kind) {
+  const select = document.getElementById(ALT_PROFILE_TABS[kind].variable);
   const column = select.value;
   select.value = '';
   if (!column || altProfileActiveColumns.includes(column)) return;
 
   const color = altProfileNextAvailableColor();
   if (!color) {
-    document.getElementById('alt-profile-status').textContent = `Up to ${OFL_SERIES_COLORS.length} variables at once.`;
-    document.getElementById('alt-profile-status').style.color = 'var(--err)';
+    const statusEl = altProfileBothStatuses();
+    statusEl.textContent = `Up to ${OFL_SERIES_COLORS.length} variables at once.`;
+    statusEl.style.color = 'var(--err)';
     return;
   }
 
@@ -1597,7 +1644,10 @@ function altProfileRemoveColumn(column) {
 }
 
 function altProfileRenderLegend() {
-  const legend = document.getElementById('alt-profile-legend');
+  Object.values(ALT_PROFILE_TABS).forEach((t) => altProfileRenderLegendInto(document.getElementById(t.legend)));
+}
+
+function altProfileRenderLegendInto(legend) {
   legend.innerHTML = '';
   altProfileActiveColumns.forEach((column) => {
     const chip = document.createElement('div');
@@ -1628,7 +1678,7 @@ function altProfileRenderLegend() {
 // see /altitude_profile), in parallel, since each flight's join+binning
 // is independent server-side.
 async function altProfileRenderAll() {
-  const statusEl = document.getElementById('alt-profile-status');
+  const statusEl = altProfileBothStatuses();
 
   if (!altProfileActiveColumns.length) {
     altProfileCharts.concat(altProfileRouteCharts).forEach((c) => {
