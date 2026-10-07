@@ -541,7 +541,7 @@
     <div class="panel-header">
       <label>altitude profile</label>
     </div>
-    <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Add one or more sensor variables to see their vertical profiles overlaid, for every flight that day, one chart each - each drone reading is paired with the nearest sensor reading within 40s (farther than that, it's dropped rather than shown as a stale match), then grouped into 5m altitude bins and plotted as a mean line with a shaded ±1 std band. With several variables on one chart, each is scaled to its own mean±std range (real units in the tooltip), same as the Plot tab.</div>
+    <div class="hint" style="margin-bottom: 10px;">Flights are detected automatically from this date's merged drone telemetry: altitude_agl_m climbing to 2m marks takeoff (minus a 2-minute lead-in), dropping to and staying below 0.5m for 2 minutes marks landing. Add one or more sensor variables to see their vertical profiles, one chart per flight. Each instrument reading is tagged with the drone's altitude at that moment (nearest telemetry sample within 5s), then grouped into bins centred on the hover levels - with 20m bins, the 60m bin holds everything from 50 to 70m - and drawn as a mean line with a shaded ±1 std band; the tooltip also shows the median, quartiles and the number of instrument readings in the bin. "Hover only" keeps readings taken while the drone held a level (altitude steady within 2m over ±5s) and drops the climb between levels. With several variables on one chart, each is scaled to its own mean±std range (real units in the tooltip), same as the Plot tab.</div>
     <div id="alt-profile-content" style="display:none;">
       <div class="plot-toolbar">
         <select id="alt-profile-instrument-select" class="select-input" onchange="altProfileInstrumentChange()" style="display:none;">
@@ -549,6 +549,21 @@
         </select>
         <select id="alt-profile-variable-select" class="select-input" onchange="altProfileAddColumn()">
           <option value="">Add a variable...</option>
+        </select>
+        <select id="alt-profile-bin-select" class="select-input" style="width: auto;" onchange="altProfileRenderAll()" title="altitude bin size (centred on the hover levels)">
+          <option value="5">5 m bins</option>
+          <option value="10">10 m bins</option>
+          <option value="20" selected>20 m bins (±10 m)</option>
+          <option value="25">25 m bins</option>
+          <option value="50">50 m bins</option>
+        </select>
+        <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="keep only readings taken while the drone held a level">
+          <input type="checkbox" id="alt-profile-hover-only" checked onchange="altProfileRenderAll()"> hover only
+        </label>
+        <select id="alt-profile-leg-select" class="select-input" style="width: auto;" onchange="altProfileRenderAll()" title="which part of the flight to use">
+          <option value="both" selected>ascent + descent</option>
+          <option value="up">ascent only</option>
+          <option value="down">descent only</option>
         </select>
       </div>
       <div class="dv-legend" id="alt-profile-legend"></div>
@@ -1574,8 +1589,12 @@ async function altProfileRenderAll() {
   statusEl.style.color = 'var(--text-dim)';
   try {
     await Promise.all(altProfileCharts.map(async (c) => {
+      const binSize = document.getElementById('alt-profile-bin-select').value;
+      const hoverOnly = document.getElementById('alt-profile-hover-only').checked ? '1' : '0';
+      const leg = document.getElementById('alt-profile-leg-select').value;
       const url = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/altitude_profile` +
-        `?flight_index=${encodeURIComponent(c.flight.index)}&columns=${encodeURIComponent(altProfileActiveColumns.join(','))}`;
+        `?flight_index=${encodeURIComponent(c.flight.index)}&columns=${encodeURIComponent(altProfileActiveColumns.join(','))}` +
+        `&bin_size=${encodeURIComponent(binSize)}&hover_only=${hoverOnly}&leg=${encodeURIComponent(leg)}`;
       const res = await fetch(url);
       const data = await res.json();
       if (!data.ok) {
@@ -1592,11 +1611,15 @@ async function altProfileRenderAll() {
       });
 
       const parts = data.series.map((s) => {
-        let part = `${s.column}: ${s.n} pt${s.n === 1 ? '' : 's'}`;
-        if (s.dropped) part += ` (${s.dropped} dropped)`;
+        let part = `${s.column}: ${s.n} reading${s.n === 1 ? '' : 's'}`;
+        if (s.dropped) part += ` (${s.dropped} ${data.hover_only ? 'in transit, dropped' : 'unmatched'})`;
         if (s.r !== null && s.r !== undefined) part += ` r=${s.r.toFixed(2)}`;
         return part;
       });
+      if (data.kept_seconds !== undefined) {
+        const legTxt = data.leg === 'both' ? '' : (data.leg === 'up' ? ', ascent' : ', descent');
+        parts.push(`${Math.round(data.kept_seconds / 60)} of ${Math.round(data.flight_seconds / 60)} min ${data.hover_only ? 'hovering' : 'used'}${legTxt}`);
+      }
       c.statusEl.textContent = parts.join(' · ');
       c.statusEl.style.color = 'var(--text-dim)';
     }));

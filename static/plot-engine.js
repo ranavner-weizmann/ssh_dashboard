@@ -1060,10 +1060,14 @@ function createProfileController(canvasId, tooltipId) {
         if (d < bestDist) { bestDist = d; nearest = b; }
       });
       const color = withBins.length === 1 ? getCssVar('--accent') : s.color;
+      const quart = (nearest.median !== undefined)
+        ? ` · median ${nearest.median.toFixed(decimals)} [${nearest.p25.toFixed(decimals)}–${nearest.p75.toFixed(decimals)}]`
+        : '';
       return `<div class="tt-row"><span class="tt-dot" style="background:${color}"></span>` +
-        `<span class="tt-value">${s.column}: ${nearest.mean.toFixed(decimals)} ± ${nearest.std.toFixed(decimals)} (n=${nearest.n})</span></div>`;
+        `<span class="tt-value">${s.column}: ${nearest.mean.toFixed(decimals)} ± ${nearest.std.toFixed(decimals)}${quart} (n=${nearest.n})</span></div>`;
     }).join('');
-    tooltip.innerHTML = `<div class="tt-row"><span class="tt-value">altitude ≈ ${hoverAltitude.toFixed(0)}m</span></div>` + rows;
+    const nearestAlt = withBins[0].bins.reduce((best, b) => Math.abs(b.altitude - hoverAltitude) < Math.abs(best - hoverAltitude) ? b.altitude : best, withBins[0].bins[0].altitude);
+    tooltip.innerHTML = `<div class="tt-row"><span class="tt-value">${nearestAlt.toFixed(0)} m level</span></div>` + rows;
     tooltip.style.left = (rect.width / 2) + 'px';
     tooltip.style.top = '0px';
     tooltip.style.display = 'block';

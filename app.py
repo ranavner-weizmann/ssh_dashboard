@@ -1420,37 +1420,80 @@ def _nearest_within(sorted_times, sorted_values, query_time, max_gap_seconds):
     return None, None
 
 
-ALTITUDE_BIN_SIZE_M = 5.0
+# The flight plan these profiles are built for: the drone climbs in steps
+# and hovers 35-60 s at each level (every 20 m from 0 to 200 m), so the
+# natural bins are centred ON the levels - a bin at 60 m collects 50-70 m -
+# rather than edges on round numbers. Samples taken while climbing between
+# levels are excluded by default (hover_only), since they belong to no level.
+ALTITUDE_BIN_SIZE_M = 20.0
+ALTITUDE_BIN_SIZES_ALLOWED = (5.0, 10.0, 20.0, 25.0, 50.0)
+HOVER_WINDOW_SECONDS = 5          # altitude must stay flat over +- this many seconds ...
+HOVER_MAX_RANGE_M = 2.0           # ... to within this many metres to count as hovering
+SENSOR_TO_DRONE_MAX_GAP_SECONDS = 5   # telemetry is 1 Hz; a sensor reading further than this from any kept altitude sample is dropped
 
 
-def _bin_altitude_profile(points):
+def _bin_altitude_profile(points, bin_size=ALTITUDE_BIN_SIZE_M):
     """
-    Groups (x=sensor value, y=altitude) points into ALTITUDE_BIN_SIZE_M-
-    wide altitude bands and summarizes each band's x values as mean ±
-    std - the vertical-profile line the altitude-profile panel actually
-    plots, rather than a raw ~1000+-point scatter per flight. A bin's std
-    is 0 when it holds a single point (statistics.pstdev handles that
-    without a special case - nothing to vary against).
+    Groups (x=sensor value, y=altitude) points into bins centred on the
+    multiples of bin_size (0, 20, 40, ... m for the default), each spanning
+    centre +- bin_size/2, and summarises each bin's x values: mean +- std
+    (what the chart draws), plus median / quartiles / min / max for the
+    tooltip, where a few spikes would otherwise hide behind the mean.
+    n is the number of instrument readings that fell in the bin.
 
-    Returns [{"altitude": bin_center, "mean", "std", "n"}, ...] sorted by
-    altitude ascending; bins with no points in range are simply absent
-    rather than interpolated.
+    Returns [{"altitude": centre, "mean", "std", "median", "p25", "p75",
+    "min", "max", "n"}, ...] sorted by altitude; empty bins are absent.
     """
     buckets = {}
     for p in points:
-        bin_index = math.floor(p["y"] / ALTITUDE_BIN_SIZE_M)
-        buckets.setdefault(bin_index, []).append(p["x"])
+        centre = round(p["y"] / bin_size) * bin_size
+        buckets.setdefault(centre, []).append(p["x"])
 
     bins = []
-    for bin_index, values in buckets.items():
+    for centre, values in sorted(buckets.items()):
+        data = sorted(values)
+        n = len(data)
+        if n >= 2:
+            p25, median, p75 = statistics.quantiles(data, n=4, method="inclusive")
+        else:
+            p25 = median = p75 = data[0]
         bins.append({
-            "altitude": bin_index * ALTITUDE_BIN_SIZE_M + ALTITUDE_BIN_SIZE_M / 2,
-            "mean": sum(values) / len(values),
-            "std": statistics.pstdev(values),
-            "n": len(values),
+            "altitude": centre,
+            "mean": sum(data) / n,
+            "std": statistics.pstdev(data),
+            "median": median, "p25": p25, "p75": p75,
+            "min": data[0], "max": data[-1],
+            "n": n,
         })
-    bins.sort(key=lambda b: b["altitude"])
     return bins
+
+
+def _hover_flags(rows, window_s=HOVER_WINDOW_SECONDS, max_range_m=HOVER_MAX_RANGE_M):
+    """
+    For time-sorted (timestamp, altitude) rows, True where the altitude
+    stays within max_range_m over +- window_s - the drone holding a level
+    rather than climbing or descending between levels.
+    """
+    n = len(rows)
+    flags = [False] * n
+    j0 = 0
+    j1 = 0
+    for i, (ts, _alt) in enumerate(rows):
+        while j0 < n and (ts - rows[j0][0]).total_seconds() > window_s:
+            j0 += 1
+        while j1 < n and (rows[j1][0] - ts).total_seconds() <= window_s:
+            j1 += 1
+        window = [a for _, a in rows[j0:j1]]
+        flags[i] = (max(window) - min(window)) <= max_range_m
+    return flags
+
+
+def _leg_flags(rows):
+    """'up' for samples up to the flight's highest point, 'down' after it."""
+    if not rows:
+        return []
+    i_max = max(range(len(rows)), key=lambda i: rows[i][1])
+    return ["up" if i <= i_max else "down" for i in range(len(rows))]
 
 
 @app.route("/offline/session/<name>/merged/<date>/flights")
@@ -1509,6 +1552,16 @@ def offline_merged_altitude_profile(name, date):
         flight_index = int(request.args.get("flight_index", ""))
     except ValueError:
         return jsonify({"ok": False, "error": "Invalid flight_index."}), 400
+    try:
+        bin_size = float(request.args.get("bin_size", ALTITUDE_BIN_SIZE_M))
+    except ValueError:
+        return jsonify({"ok": False, "error": "Invalid bin_size."}), 400
+    if bin_size not in ALTITUDE_BIN_SIZES_ALLOWED:
+        return jsonify({"ok": False, "error": f"bin_size must be one of {sorted(ALTITUDE_BIN_SIZES_ALLOWED)}."}), 400
+    hover_only = (request.args.get("hover_only", "1") or "1").lower() not in ("0", "false", "no")
+    leg = (request.args.get("leg") or "both").lower()
+    if leg not in ("both", "up", "down"):
+        return jsonify({"ok": False, "error": "leg must be both, up or down."}), 400
 
     drone_rows, err = _read_drone_altitude_series(name, date)
     if err:
@@ -1519,6 +1572,18 @@ def offline_merged_altitude_profile(name, date):
     flight = flights[flight_index]
     flight_drone_rows = [(ts, alt) for ts, alt in drone_rows if flight["start"] <= ts <= flight["end"]]
 
+    # Which altitude samples count: hovering ones (unless asked for all),
+    # on the requested leg of the flight.
+    hover = _hover_flags(flight_drone_rows)
+    legs = _leg_flags(flight_drone_rows)
+    kept_rows = [
+        row for row, is_hover, row_leg in zip(flight_drone_rows, hover, legs)
+        if (is_hover or not hover_only) and (leg == "both" or row_leg == leg)
+    ]
+    drone_times = [r[0] for r in kept_rows]
+    drone_alts = [r[1] for r in kept_rows]
+
+    # Read only this flight's window of the day's sensor data.
     sensor_path = os.path.join(_session_merged_dir(name, date), f"merged_data_{date}_merged.csv")
     if not os.path.isfile(sensor_path):
         return jsonify({"ok": False, "error": "This date's sensor runs haven't been merged yet - use \"Merge\" first."}), 400
@@ -1533,7 +1598,7 @@ def offline_merged_altitude_profile(name, date):
             sensor_series = {column: [] for column in columns}
             for row in reader:
                 ts = _parse_csv_timestamp(row.get(time_column))
-                if ts is None:
+                if ts is None or ts < flight["start"] or ts > flight["end"]:
                     continue
                 for column in columns:
                     val = _parse_numeric(row.get(column))
@@ -1542,27 +1607,32 @@ def offline_merged_altitude_profile(name, date):
     except Exception as e:
         return jsonify({"ok": False, "error": f"Could not read this date's sensor data: {e}"}), 500
 
+    # Join from the instrument side: each sensor reading gets the altitude
+    # the drone was at when it was taken (nearest kept telemetry sample
+    # within SENSOR_TO_DRONE_MAX_GAP_SECONDS). Joining from the drone side
+    # instead - every 1 Hz altitude sample grabbing its nearest sensor
+    # value - repeats a slow instrument's reading many times (an MA200 at a
+    # 30 s timebase would count 30 times per value), inflating n and
+    # flattening the spread; this way n is honest instrument samples. A
+    # reading with no kept altitude within reach was taken while climbing
+    # between levels (with hover_only) or in a telemetry gap, and is dropped.
     series = []
     for column in columns:
-        column_series = sorted(sensor_series[column], key=lambda r: r[0])
-        sensor_times = [r[0] for r in column_series]
-        sensor_values = [r[1] for r in column_series]
-
         points = []
         dropped = 0
-        for ts, alt in flight_drone_rows:
-            value, _gap_s = _nearest_within(sensor_times, sensor_values, ts, ALTITUDE_JOIN_MAX_GAP_SECONDS)
-            if value is None:
+        for ts, val in sorted(sensor_series[column], key=lambda r: r[0]):
+            alt, _gap_s = _nearest_within(drone_times, drone_alts, ts, SENSOR_TO_DRONE_MAX_GAP_SECONDS)
+            if alt is None:
                 dropped += 1
                 continue
-            points.append({"x": value, "y": alt})
+            points.append({"x": val, "y": alt})
 
         xs = [p["x"] for p in points]
         ys = [p["y"] for p in points]
         r, n = _pearson(xs, ys)
         series.append({
             "column": column,
-            "bins": _bin_altitude_profile(points),
+            "bins": _bin_altitude_profile(points, bin_size),
             "n": n, "dropped": dropped, "r": r,
             "r_squared": (r * r) if r is not None else None,
         })
@@ -1574,8 +1644,13 @@ def offline_merged_altitude_profile(name, date):
             "start": flight["start"].strftime("%Y-%m-%d %H:%M:%S"),
             "end": flight["end"].strftime("%Y-%m-%d %H:%M:%S"),
         },
-        "series": series, "bin_size": ALTITUDE_BIN_SIZE_M,
-        "max_gap_seconds": ALTITUDE_JOIN_MAX_GAP_SECONDS,
+        "series": series,
+        "bin_size": bin_size,
+        "hover_only": hover_only,
+        "leg": leg,
+        "flight_seconds": len(flight_drone_rows),
+        "kept_seconds": len(kept_rows),
+        "max_gap_seconds": SENSOR_TO_DRONE_MAX_GAP_SECONDS,
     })
 
 
