@@ -636,7 +636,7 @@
     <div class="panel-header">
       <label>correlations</label>
     </div>
-    <div class="hint" style="margin-bottom: 10px;">Pearson correlations between the ticked variables, using only readings taken during flights (from each flight's start, with its 2-minute ground lead-in, to its landing). The selection drives all three grids. <b>All variables</b> correlates the variables' mean values per time step (30 s by default, since the MA200 reports every 30 s and the POM every ~10 s) within the chosen flights. <b>Ground vs height</b> correlates a variable's readings in the 0 m bin (the drone on the ground and at the 0 m hover) with the readings at each hover level (20 m bins, hovering readings only) - either of the same variable, or of one target variable, for example how ground temperature, humidity and PM relate to ozone at each height. The full hovers are used, not their means: within each flight the ground series and the level's series are paired reading by reading in time order (a 40 s hover gives about 40 pairs), and the pairs of all flights are pooled; "one pair per flight" switches to correlating the bin means across flights instead. <b>Station vs distance</b> does the same along the linear route, between the hover point over the launch area (0 m) and the hover points every 100 m out to the far point. A cell is blank when fewer than 2 pairs exist; hover a cell for its number of pairs. Correlations across flights only mean much with several flights - pick "all downloaded days" to pool every merged day under the downloads folder.</div>
+    <div class="hint" style="margin-bottom: 10px;">Pearson correlations between the ticked variables, using only readings taken during flights (from each flight's start, with its 2-minute ground lead-in, to its landing). The selection drives all three grids. <b>All variables</b> correlates the variables' mean values per time step (30 s by default, since the MA200 reports every 30 s and the POM every ~10 s) within the chosen flights. <b>Reference level vs height</b> correlates a variable's readings at a reference level - the 20 m hover by default, since the readings on the real ground are too dirty to serve as reference - with the readings at each hover level (20 m bins, hovering readings only), either of the same variable, or of one target variable, for example how temperature, humidity and PM at the reference relate to ozone at each height. The full hovers are used, not their means: within each flight the reference series and the level's series are paired reading by reading in time order (a 40 s hover gives about 40 pairs), and the pairs of all flights are pooled; "one pair per flight" switches to correlating the bin means across flights instead. <b>Station vs distance</b> does the same along the linear route, between the station - the route's last hover point, over the launch area at the route's altitude - and the hover points every 100 m out to the far point. A cell is blank when fewer than 2 pairs exist; hover a cell for its number of pairs. Correlations across flights only mean much with several flights - pick "all downloaded days" to pool every merged day under the downloads folder.</div>
     <div id="corr-content" style="display:none;">
       <div class="plot-toolbar" style="margin-bottom: 6px;">
         <span class="hint" id="corr-checklist-count"></span>
@@ -678,8 +678,14 @@
 
       <div class="corr-section">
         <div class="explore-toolbar">
-          <label class="explore-section-title" style="margin: 0;">ground vs height (vertical profiles)</label>
-          <select id="corr-target-select" class="select-input" style="width: auto;" onchange="corrRenderAll(true)" title="what the ground values are correlated with"></select>
+          <label class="explore-section-title" style="margin: 0;">reference level vs height (vertical profiles)</label>
+          <select id="corr-ref-select" class="select-input" style="width: auto;" onchange="corrRenderAll(true)" title="the hover level whose readings are the reference">
+            <option value="20" selected>reference: 20 m</option>
+            <option value="0">reference: 0 m (ground)</option>
+            <option value="40">reference: 40 m</option>
+            <option value="60">reference: 60 m</option>
+          </select>
+          <select id="corr-target-select" class="select-input" style="width: auto;" onchange="corrRenderAll(true)" title="what the reference values are correlated with"></select>
           <span class="chart-dl">
             <button class="btn-ghost" onclick="corrDownload('vertical', 'png')" title="save this grid as an image">PNG</button>
             <button class="btn-ghost" onclick="corrDownload('vertical', 'csv')" title="save the correlation table">CSV</button>
@@ -2087,8 +2093,8 @@ function corrPopulateTarget() {
     opt.textContent = label;
     select.appendChild(opt);
   };
-  add('self', 'each variable vs its own ground value');
-  corrState.columns.forEach((c) => add(c, `${corrLabelOf(c)} aloft vs ground variables`));
+  add('self', 'each variable vs its own reference value');
+  corrState.columns.forEach((c) => add(c, `${corrLabelOf(c)} vs the reference variables`));
   select.value = [...select.options].some((o) => o.value === previous) ? previous : 'self';
 }
 
@@ -2130,6 +2136,7 @@ async function corrRenderAll(missionOnly) {
   const hover = document.getElementById('corr-hover-only').checked ? '1' : '0';
   const target = document.getElementById('corr-target-select').value || 'self';
   const pairing = document.getElementById('corr-pairing-select').value || 'series';
+  const refLevel = document.getElementById('corr-ref-select').value || '20';
   const gen = ++corrState.generation;
   status.textContent = 'Computing...';
   status.style.color = 'var(--text-dim)';
@@ -2137,7 +2144,7 @@ async function corrRenderAll(missionOnly) {
     const wanted = [
       missionOnly ? null : fetch(`${base}correlation_matrix?${q}&flight_index=${flightIndex}` +
         `&resample_s=${encodeURIComponent(document.getElementById('corr-resample-select').value || '30')}`).then((r) => r.json()),
-      fetch(`${base}correlation_vertical?${q}&hover_only=${hover}&target=${encodeURIComponent(target)}&pairing=${pairing}`).then((r) => r.json()),
+      fetch(`${base}correlation_vertical?${q}&hover_only=${hover}&target=${encodeURIComponent(target)}&pairing=${pairing}&ref_level=${encodeURIComponent(refLevel)}`).then((r) => r.json()),
       fetch(`${base}correlation_horizontal?${q}&hover_only=${hover}&target=${encodeURIComponent(target)}&pairing=${pairing}`).then((r) => r.json()),
     ];
     const [g, v, h] = await Promise.all(wanted);
@@ -2192,10 +2199,10 @@ function corrShowGeneral(data, flightIndex) {
   st.style.color = 'var(--text-dim)';
 }
 
-function corrTargetText(data, where, groundName) {
+function corrTargetText(data, where, refName) {
   return data.target === 'self'
-    ? `each variable ${where} vs its own value at the ${groundName}`
-    : `${corrLabelOf(data.target)} ${where} vs each variable at the ${groundName}`;
+    ? `each variable ${where} vs its own value at the ${refName}`
+    : `${corrLabelOf(data.target)} ${where} vs each variable at the ${refName}`;
 }
 
 function corrFlightsText(data, what) {
@@ -2222,15 +2229,16 @@ function corrShowVertical(data) {
     return;
   }
   const levels = data.levels.slice().sort((a, b) => b - a);
-  const rows = levels.map((l) => ({ key: String(l), label: `${l} m` }));
+  const rows = levels.map((l) => ({ key: String(l), label: l === data.reference_level ? `${l} m (ref.)` : `${l} m` }));
   const cols = data.columns.map((c) => ({ key: c, label: corrLabelOf(c) }));
   const cells = {};
   data.cells.forEach((c) => { cells[`${c.level}|${c.column}`] = { r: c.r, n: c.n, flights: c.flights }; });
   corrCharts.vertical.setData({
     rows, cols, cells, pairNoun: corrPairNoun(data), rowAxisLabel: 'altitude (m AGL)',
-    note: corrPairPrefix(data) + corrTargetText(data, 'at that height', '0 m bin (ground)'),
+    note: corrPairPrefix(data) + corrTargetText(data, 'at that height', `${data.reference_level} m reference level`),
   });
   st.textContent = corrFlightsText(data, 'profile data') +
+    `${data.flights_with_reference} with the ${data.reference_level} m reference · ` +
     `${data.bin_size} m bins${data.hover_only ? ', hovering readings only' : ''}${corrPairText(data)}`;
   st.style.color = 'var(--text-dim)';
 }
@@ -2240,7 +2248,7 @@ function corrShowHorizontal(data) {
   const st = document.getElementById('corr-horizontal-status');
   corrData.horizontal = data;
   document.getElementById('corr-horizontal-target-note').textContent =
-    data.target === 'self' ? '' : `${corrLabelOf(data.target)} at each distance vs the ground variables at the station`;
+    data.target === 'self' ? '' : `${corrLabelOf(data.target)} at each distance vs the variables at the station`;
   if (!data.distances.length) {
     corrCharts.horizontal.setEmptyMessage('No linear-route data in these flights');
     st.textContent = data.flights_without_route ? `${data.flights_without_route} flight(s) without a route` : '';
@@ -2252,11 +2260,15 @@ function corrShowHorizontal(data) {
   data.cells.forEach((c) => { cells[`${c.column}|${c.level}`] = { r: c.r, n: c.n, flights: c.flights }; });
   corrCharts.horizontal.setData({
     rows, cols, cells, pairNoun: corrPairNoun(data), colAxisLabel: 'distance from launch (m)',
-    note: corrPairPrefix(data) + corrTargetText(data, 'at that distance', 'launch-area hover (0 m)'),
+    note: corrPairPrefix(data) + corrTargetText(data, 'at that distance', 'station (last hover, over the launch area)'),
   });
+  const stAlt = data.flights.length ? data.flights.reduce((a, f) => a + (f.altitude_m || 0), 0) / data.flights.length : 0;
+  const stSec = data.flights.length ? data.flights.reduce((a, f) => a + (f.station_seconds || 0), 0) / data.flights.length : 0;
   let txt = corrFlightsText(data, 'a linear route') +
+    `station = last hover over the launch area (${Math.round(stSec)} s at ${stAlt.toFixed(0)} m AGL on average) · ` +
     `${data.bin_size} m bins${data.hover_only ? ', hovering readings only' : ''}${corrPairText(data)}`;
   if (data.flights_without_route) txt += ` · ${data.flights_without_route} flight(s) without a route left out`;
+  if (data.flights_without_station) txt += ` · ${data.flights_without_station} flight(s) without a final hover left out`;
   st.textContent = txt;
   st.style.color = 'var(--text-dim)';
 }
@@ -2269,8 +2281,8 @@ function corrDownload(kind, what) {
   if (what === 'png') {
     const captions = {
       general: `${where} - correlations between variables during flights`,
-      vertical: `${where} - ground vs height correlations across flights`,
-      horizontal: `${where} - station vs distance correlations across flights`,
+      vertical: `${where} - reference level vs height correlations`,
+      horizontal: `${where} - station vs distance correlations (station = last hover over the launch area)`,
     };
     exportCanvasPng(document.getElementById(`corr-${kind}-canvas`), stem + '.png', captions[kind]);
     return;
@@ -2284,7 +2296,7 @@ function corrDownload(kind, what) {
     c.r === null ? '' : c.r.toFixed(4), c.n, c.flights]);
   const levelName = kind === 'vertical' ? 'altitude_m' : 'distance_m';
   const nName = data.pairing === 'means' ? 'n_flights' : 'n_reading_pairs';
-  downloadTextFile(stem + '.csv', csvFromRows([levelName, 'ground_variable', 'aloft_variable', 'r', nName, 'flights'], rows));
+  downloadTextFile(stem + '.csv', csvFromRows([levelName, 'reference_variable', 'variable_at_level', 'r', nName, 'flights'], rows));
 }
 
 // ---------- Downloads: every chart on this page as PNG or CSV ----------
