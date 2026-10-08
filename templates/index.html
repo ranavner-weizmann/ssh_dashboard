@@ -1313,6 +1313,9 @@
             </select>
             <button class="btn-ghost" id="plot-window-custom-apply" style="width: auto; white-space: nowrap;">Apply</button>
           </span>
+          <label class="hint" style="margin: 0 0 0 14px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on every live plot, in metres on a second axis, clipped to each variable's own time span">
+            <input type="checkbox" id="plot-alt-overlay"> + altitude (m) on all plots
+          </label>
           <span class="hint" id="plot-window-label" style="margin-left: auto; white-space: nowrap;">last 5 min</span>
         </div>
       </div>
@@ -1339,9 +1342,6 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
-            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
-              <input type="checkbox" id="plot-alt-overlay-1"> + altitude (m)
-            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -1377,9 +1377,6 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
-            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
-              <input type="checkbox" id="plot-alt-overlay-2"> + altitude (m)
-            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -1415,9 +1412,6 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
-            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
-              <input type="checkbox" id="plot-alt-overlay-3"> + altitude (m)
-            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -1453,9 +1447,6 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
-            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
-              <input type="checkbox" id="plot-alt-overlay-4"> + altitude (m)
-            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -1491,9 +1482,6 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
-            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
-              <input type="checkbox" id="plot-alt-overlay-5"> + altitude (m)
-            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -1529,9 +1517,6 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
-            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
-              <input type="checkbox" id="plot-alt-overlay-6"> + altitude (m)
-            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -3794,7 +3779,8 @@ function createPlotController(suffix, defaultSensor) {
   const canvas = document.getElementById('plot-canvas' + suffix);
   const tooltip = document.getElementById('plot-tooltip' + suffix);
 
-  const altCheckEl = document.getElementById('plot-alt-overlay' + suffix);
+  // One "+ altitude" tick for all six plots (next to the shared time frame).
+  const altCheckEl = document.getElementById('plot-alt-overlay');
 
   let currentSensor = defaultSensor;
   let points = [];
@@ -3928,6 +3914,16 @@ function createPlotController(suffix, defaultSensor) {
 
   return { startPolling, stopPolling, draw, refetch };
 }
+
+// The shared altitude tick persists across restarts, like the time frame.
+(function restoreAltOverlay() {
+  const el = document.getElementById('plot-alt-overlay');
+  if (!el) return;
+  try { el.checked = localStorage.getItem('plot-alt-overlay') === '1'; } catch (e) { /* storage unavailable */ }
+  el.addEventListener('change', () => {
+    try { localStorage.setItem('plot-alt-overlay', el.checked ? '1' : '0'); } catch (e) { /* ignore */ }
+  });
+})();
 
 const plotControllers = [
   createPlotController('-1', 'pom'),
