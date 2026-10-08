@@ -3545,7 +3545,14 @@ function drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, format
   }
   const RIGHT_AXIS = 44;
   const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right - RIGHT_AXIS;
-  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+  const legendEntries = [
+    { color: getCssVar('--accent'), label: unit ? `${label || 'variable'} (${unit})` : (label || 'variable') },
+    { color: getCssVar('--series-2') || '#eb6834', label: 'drone altitude (m)' },
+  ];
+  const bandW = width - PLOT_PADDING.left - PLOT_PADDING.right;
+  const bandH = drawLegendBand(ctx, legendEntries, PLOT_PADDING.left, 6, bandW, '', true);
+  const topPad = plotTopBelowLegend(bandH);
+  const plotH = height - topPad - PLOT_PADDING.bottom;
 
   points.forEach((p) => { if (p._t === undefined) p._t = parseTsMs(p.t); });
   altPoints.forEach((p) => { if (p._t === undefined) p._t = parseTsMs(p.t); });
@@ -3562,10 +3569,10 @@ function drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, format
     return [a, b];
   };
   const [minV, maxV] = range(points.map((p) => p.v));
-  const yFor = (v) => PLOT_PADDING.top + plotH - ((v - minV) / (maxV - minV)) * plotH;
+  const yFor = (v) => topPad + plotH - ((v - minV) / (maxV - minV)) * plotH;
   const haveAlt = altPoints.length > 0;
   const [minA, maxA] = haveAlt ? range(altPoints.map((p) => p.v)) : [0, 1];
-  const yForAlt = (v) => PLOT_PADDING.top + plotH - ((v - minA) / (maxA - minA)) * plotH;
+  const yForAlt = (v) => topPad + plotH - ((v - minA) / (maxA - minA)) * plotH;
 
   const accent = getCssVar('--accent');
   const altColor = getCssVar('--series-2') || '#eb6834';
@@ -3577,7 +3584,7 @@ function drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, format
   ctx.font = '11px ' + getCssVar('--mono');
   ctx.textBaseline = 'middle';
   for (let i = 0; i <= gridLines; i++) {
-    const y = Math.round(PLOT_PADDING.top + (plotH * (gridLines - i)) / gridLines) + 0.5;
+    const y = Math.round(topPad + (plotH * (gridLines - i)) / gridLines) + 0.5;
     ctx.beginPath();
     ctx.moveTo(PLOT_PADDING.left, y);
     ctx.lineTo(PLOT_PADDING.left + plotW, y);
@@ -3628,16 +3635,13 @@ function drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, format
   ctx.fillText(plotTimeOnly(points[0].t), PLOT_PADDING.left, height - 6);
   ctx.textAlign = 'right';
   ctx.fillText(plotTimeOnly(last.t), PLOT_PADDING.left + plotW, height - 6);
-  drawLegend(ctx, [
-    { color: accent, label: unit ? `${label || 'variable'} (${unit})` : (label || 'variable') },
-    { color: altColor, label: 'drone altitude (m)' },
-  ], PLOT_PADDING.left + 8, PLOT_PADDING.top + 6, plotW * 0.7);
+  drawLegendBand(ctx, legendEntries, PLOT_PADDING.left, 6, bandW, '', false);
 
   if (hoverIndex !== null && points[hoverIndex]) {
     const hp = points[hoverIndex];
     ctx.beginPath();
-    ctx.moveTo(hp._x, PLOT_PADDING.top);
-    ctx.lineTo(hp._x, PLOT_PADDING.top + plotH);
+    ctx.moveTo(hp._x, topPad);
+    ctx.lineTo(hp._x, topPad + plotH);
     ctx.strokeStyle = getCssVar('--text-dim');
     ctx.lineWidth = 1;
     ctx.stroke();

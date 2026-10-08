@@ -113,9 +113,82 @@ function axisGroupsFor(seriesList, rangeOf, singleColor) {
   return groups;
 }
 
-// A legend box inside the plot: colour swatch + "column (unit)" per entry,
-// on a translucent panel so it stays readable over the data. Returns the
-// box height so callers can keep it clear of the first axis labels.
+// The legend lives in a band ABOVE the plot area (never over the data):
+// swatch + "column (unit)" per entry, laid out left to right and wrapped
+// into as many rows as the width needs, plus an optional muted note. Each
+// chart measures the band first (measureOnly) to know where its plot area
+// starts, then draws it. Returns the band height in CSS pixels.
+const LEGEND_LINE_H = 16;
+
+function drawLegendBand(ctx, entries, x, y, width, note, measureOnly) {
+  if (!entries.length && !note) return 0;
+  ctx.save();
+  ctx.font = '11px ' + getCssVar('--sans');
+  const sw = 10, gapX = 14;
+  const fit = (label, avail) => {
+    let t = label;
+    while (t.length > 4 && ctx.measureText(t).width > avail) t = t.slice(0, -2) + '…';
+    return t;
+  };
+  const items = entries.map((e) => {
+    const label = fit(e.label, width - sw - 5);
+    return { color: e.color, label, w: sw + 5 + ctx.measureText(label).width };
+  });
+  if (note) {
+    const label = fit(note, width);
+    items.push({ note: true, label, w: ctx.measureText(label).width });
+  }
+  const rows = [[]];
+  let used = 0;
+  items.forEach((it) => {
+    if (used > 0 && used + it.w > width) { rows.push([]); used = 0; }
+    rows[rows.length - 1].push(it);
+    used += it.w + gapX;
+  });
+  const h = rows.length * LEGEND_LINE_H;
+  if (!measureOnly) {
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    rows.forEach((row, ri) => {
+      let cx = x;
+      const cy = y + ri * LEGEND_LINE_H + LEGEND_LINE_H / 2;
+      row.forEach((it) => {
+        if (it.note) {
+          ctx.fillStyle = getCssVar('--text-dim');
+          ctx.fillText(it.label, cx, cy);
+        } else {
+          ctx.fillStyle = it.color;
+          ctx.fillRect(cx, cy - sw / 2, sw, sw);
+          ctx.fillStyle = getCssVar('--text');
+          ctx.fillText(it.label, cx + sw + 5, cy);
+        }
+        cx += it.w + gapX;
+      });
+    });
+  }
+  ctx.restore();
+  return h;
+}
+
+// Top of the plot area below a legend band of height bandH (CSS px).
+function plotTopBelowLegend(bandH) {
+  return bandH ? 6 + bandH + 6 : PLOT_PADDING.top;
+}
+
+// Word-wraps text to maxWidth with the context's current font.
+function wrapTextLines(ctx, text, maxWidth) {
+  const words = String(text).split(/\s+/);
+  const lines = [];
+  let cur = '';
+  words.forEach((w) => {
+    const trial = cur ? cur + ' ' + w : w;
+    if (ctx.measureText(trial).width <= maxWidth || !cur) cur = trial; else { lines.push(cur); cur = w; }
+  });
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+// (kept for callers that still want a boxed legend inside a plot)
 function drawLegend(ctx, entries, x, y, maxWidth) {
   if (!entries.length) return 0;
   const font = '11px ' + getCssVar('--sans');
@@ -354,9 +427,13 @@ function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
 
   const rightPad = PLOT_PADDING.right + Math.max(0, groups.length - 1) * EXTRA_AXIS_W;
   const plotW = width - PLOT_PADDING.left - rightPad;
-  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+  const legendEntries = nonEmpty.map((s) => ({ color: single ? accent : s.color, label: labelWithUnit(s.column) }));
+  const bandW = width - PLOT_PADDING.left - PLOT_PADDING.right;
+  const bandH = drawLegendBand(ctx, legendEntries, PLOT_PADDING.left, 6, bandW, '', true);
+  const topPad = plotTopBelowLegend(bandH);
+  const plotH = height - topPad - PLOT_PADDING.bottom;
   const xForMs = (ms) => PLOT_PADDING.left + ((ms - tMin) / (tMax - tMin)) * plotW;
-  groups.forEach((g) => { g.yFor = (v) => PLOT_PADDING.top + plotH - ((v - g.min) / (g.max - g.min)) * plotH; });
+  groups.forEach((g) => { g.yFor = (v) => topPad + plotH - ((v - g.min) / (g.max - g.min)) * plotH; });
   nonEmpty.forEach((s) => { s._yForValue = s._group.yFor; });
 
   // Gridlines follow the first axis; every axis gets its own tick labels.
@@ -390,8 +467,8 @@ function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
       ctx.strokeStyle = g.color;
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(ax, PLOT_PADDING.top);
-      ctx.lineTo(ax, PLOT_PADDING.top + plotH);
+      ctx.moveTo(ax, topPad);
+      ctx.lineTo(ax, topPad + plotH);
       ctx.stroke();
     }
   });
@@ -401,8 +478,8 @@ function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
     ctx.beginPath();
     ctx.moveTo(xForMs(s.visible[0].ms), s._yForValue(s.visible[0].v));
     s.visible.forEach((p) => ctx.lineTo(xForMs(p.ms), s._yForValue(p.v)));
-    ctx.lineTo(xForMs(s.visible[s.visible.length - 1].ms), PLOT_PADDING.top + plotH);
-    ctx.lineTo(xForMs(s.visible[0].ms), PLOT_PADDING.top + plotH);
+    ctx.lineTo(xForMs(s.visible[s.visible.length - 1].ms), topPad + plotH);
+    ctx.lineTo(xForMs(s.visible[0].ms), topPad + plotH);
     ctx.closePath();
     ctx.fillStyle = hexToRgba(accent, 0.1);
     ctx.fill();
@@ -437,14 +514,13 @@ function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
   ctx.textAlign = 'center';
   ctx.fillText('time →', PLOT_PADDING.left + plotW / 2, height - 6);
 
-  drawLegend(ctx, nonEmpty.map((s) => ({ color: single ? accent : s.color, label: labelWithUnit(s.column) })),
-    PLOT_PADDING.left + 8, PLOT_PADDING.top + 6, plotW * 0.6);
+  drawLegendBand(ctx, legendEntries, PLOT_PADDING.left, 6, bandW, '', false);
 
   if (hoverMs !== null) {
     const hx = xForMs(hoverMs);
     ctx.beginPath();
-    ctx.moveTo(hx, PLOT_PADDING.top);
-    ctx.lineTo(hx, PLOT_PADDING.top + plotH);
+    ctx.moveTo(hx, topPad);
+    ctx.lineTo(hx, topPad + plotH);
     ctx.strokeStyle = getCssVar('--text-dim');
     ctx.lineWidth = 1;
     ctx.stroke();
@@ -1030,6 +1106,16 @@ function profileAltitudeAxis(series) {
 // ones as extra rows above. A legend names each series with its unit.
 const PROFILE_TOP_AXIS_H = 18;
 
+// Where a vertical profile's plot area starts: below the legend band and
+// below one row per extra value axis. Shared by the drawing and the hover.
+function profileTopOffset(bandH, nUnits) {
+  return plotTopBelowLegend(bandH) + Math.max(0, nUnits - 1) * PROFILE_TOP_AXIS_H;
+}
+
+function profileLegendEntries(withBins, single, accent) {
+  return withBins.map((s) => ({ color: single ? accent : s.color, label: labelWithUnit(s.column) }));
+}
+
 function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
   const { ctx, width, height } = getCanvasContext(canvas);
   ctx.clearRect(0, 0, width, height);
@@ -1047,8 +1133,10 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
     Math.max(...s.bins.map((b) => b.mean + b.std)),
   ], accent);
 
-  const topPad = PLOT_PADDING.top + Math.max(0, groups.length - 1) * PROFILE_TOP_AXIS_H;
   const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
+  const legendEntries = profileLegendEntries(withBins, single, accent);
+  const bandH = drawLegendBand(ctx, legendEntries, PLOT_PADDING.left, 6, plotW, 'band = ±1 std', true);
+  const topPad = profileTopOffset(bandH, groups.length);
   const plotH = height - topPad - PLOT_PADDING.bottom;
 
   const { minY, maxY, step } = profileAltitudeAxis(withBins);
@@ -1080,9 +1168,10 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
     const yText = gi === 0 ? height - 6 : topPad - 6 - (gi - 1) * PROFILE_TOP_AXIS_H;
     ticks.forEach((v, ti) => {
       const x = g.xFor(v);
-      ctx.textAlign = ti === 0 ? 'left' : ti === ticks.length - 1 ? 'right' : 'center';
-      const tx = ti === 0 ? Math.max(x, PLOT_PADDING.left) : ti === ticks.length - 1 ? Math.min(x, width - PLOT_PADDING.right) : x;
-      ctx.fillText(v.toFixed(Math.min(dec, 4)), tx, yText);
+      const isLast = ti === ticks.length - 1;
+      ctx.textAlign = ti === 0 ? 'left' : isLast ? 'right' : 'center';
+      const tx = ti === 0 ? Math.max(x, PLOT_PADDING.left) : isLast ? Math.min(x, width - PLOT_PADDING.right) : x;
+      ctx.fillText(v.toFixed(Math.min(dec, 4)) + (isLast && g.unit ? ' ' + g.unit : ''), tx, yText);
       ctx.beginPath();
       const y0 = gi === 0 ? topPad + plotH : topPad;
       ctx.moveTo(Math.round(x) + 0.5, y0);
@@ -1090,13 +1179,6 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
       ctx.strokeStyle = g.color;
       ctx.stroke();
     });
-    if (g.unit) {
-      ctx.textAlign = 'center';
-      const mid = PLOT_PADDING.left + plotW / 2;
-      // the unit sits between the first and last tick labels; skip it if
-      // the chart is too narrow for three labels on one line
-      if (plotW > 200) ctx.fillText(g.unit, mid, yText);
-    }
   });
 
   withBins.forEach((s) => {
@@ -1162,8 +1244,7 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
   ctx.fillText(`${yLabel} (m) →`, 0, 0);
   ctx.restore();
 
-  drawLegend(ctx, withBins.map((s) => ({ color: single ? accent : s.color, label: labelWithUnit(s.column) + ' mean ± std' })),
-    PLOT_PADDING.left + 6, topPad + 6, plotW - 12);
+  drawLegendBand(ctx, legendEntries, PLOT_PADDING.left, 6, plotW, 'band = ±1 std', false);
 }
 
 function createProfileController(canvasId, tooltipId) {
@@ -1194,7 +1275,10 @@ function createProfileController(canvasId, tooltipId) {
 
     const { minY, maxY } = profileAltitudeAxis(withBins);
     const nUnits = new Set(withBins.map((s) => unitOfColumn(s.column) || ('col:' + s.column))).size;
-    const topPad = PLOT_PADDING.top + Math.max(0, nUnits - 1) * PROFILE_TOP_AXIS_H;
+    const mctx = canvas.getContext('2d');
+    const bandH = drawLegendBand(mctx, profileLegendEntries(withBins, withBins.length === 1, '#000'),
+      PLOT_PADDING.left, 6, rect.width - PLOT_PADDING.left - PLOT_PADDING.right, 'band = ±1 std', true);
+    const topPad = profileTopOffset(bandH, nUnits);
     const plotH = rect.height - topPad - PLOT_PADDING.bottom;
 
     if (my < topPad - 10 || my > topPad + plotH + 10) {
@@ -1278,14 +1362,18 @@ function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax
 
   const rightPad = PLOT_PADDING.right + Math.max(0, groups.length - 1) * EXTRA_AXIS_W;
   const plotW = width - PLOT_PADDING.left - rightPad;
-  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+  const legendEntries = withBins.map((s) => ({ color: single ? accent : s.color, label: labelWithUnit(s.column) }));
+  const bandW = width - PLOT_PADDING.left - PLOT_PADDING.right;
+  const bandH = drawLegendBand(ctx, legendEntries, PLOT_PADDING.left, 6, bandW, 'band = ±1 std', true);
+  const topPad = plotTopBelowLegend(bandH);
+  const plotH = height - topPad - PLOT_PADDING.bottom;
 
   let minX = 0;
   let maxX = xMax || 0;
   withBins.forEach((s) => s.bins.forEach((b) => { if (b.to > maxX) maxX = b.to; }));
   if (maxX <= minX) maxX = minX + 1;
   const xFor = (x) => PLOT_PADDING.left + ((x - minX) / (maxX - minX)) * plotW;
-  groups.forEach((g) => { g.yFor = (v) => PLOT_PADDING.top + plotH - ((v - g.min) / (g.max - g.min)) * plotH; });
+  groups.forEach((g) => { g.yFor = (v) => topPad + plotH - ((v - g.min) / (g.max - g.min)) * plotH; });
   withBins.forEach((s) => { s._yFor = s._group.yFor; s._minY = s._group.min; s._maxY = s._group.max; });
 
   // distance gridlines (shared axis, real metres)
@@ -1299,8 +1387,8 @@ function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax
   xt.ticks.forEach((xv) => {
     const x = Math.round(xFor(xv)) + 0.5;
     ctx.beginPath();
-    ctx.moveTo(x, PLOT_PADDING.top);
-    ctx.lineTo(x, PLOT_PADDING.top + plotH);
+    ctx.moveTo(x, topPad);
+    ctx.lineTo(x, topPad + plotH);
     ctx.stroke();
     ctx.fillText(xv.toFixed(0), x, height - 6);
   });
@@ -1325,8 +1413,8 @@ function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax
       const ax = Math.round(PLOT_PADDING.left + plotW + (gi - 1) * EXTRA_AXIS_W) + 0.5;
       ctx.strokeStyle = g.color;
       ctx.beginPath();
-      ctx.moveTo(ax, PLOT_PADDING.top);
-      ctx.lineTo(ax, PLOT_PADDING.top + plotH);
+      ctx.moveTo(ax, topPad);
+      ctx.lineTo(ax, topPad + plotH);
       ctx.stroke();
     }
   });
@@ -1366,8 +1454,8 @@ function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax
   if (hoverDistance !== null) {
     const hx = xFor(hoverDistance);
     ctx.beginPath();
-    ctx.moveTo(hx, PLOT_PADDING.top);
-    ctx.lineTo(hx, PLOT_PADDING.top + plotH);
+    ctx.moveTo(hx, topPad);
+    ctx.lineTo(hx, topPad + plotH);
     ctx.strokeStyle = getCssVar('--text-dim');
     ctx.lineWidth = 1;
     ctx.stroke();
@@ -1390,8 +1478,7 @@ function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax
   ctx.textAlign = 'center';
   ctx.fillText(`← ${xLabel} →`, PLOT_PADDING.left + plotW / 2, height - 18);
 
-  drawLegend(ctx, withBins.map((s) => ({ color: single ? accent : s.color, label: labelWithUnit(s.column) + ' mean ± std' })),
-    PLOT_PADDING.left + 8, PLOT_PADDING.top + 6, plotW * 0.6);
+  drawLegendBand(ctx, legendEntries, PLOT_PADDING.left, 6, bandW, 'band = ±1 std', false);
 }
 
 function createTransectController(canvasId, tooltipId) {
@@ -1483,18 +1570,22 @@ function createTransectController(canvasId, tooltipId) {
 // background, a caption line, then the chart as rendered.
 function exportCanvasPng(canvas, filename, caption) {
   const dpr = window.devicePixelRatio || 1;
-  const captionH = caption ? Math.round(22 * dpr) : 0;
   const out = document.createElement('canvas');
+  const ctx = out.getContext('2d');
+  const font = `${Math.round(12 * dpr)}px ${getCssVar('--sans') || 'sans-serif'}`;
+  ctx.font = font;
+  const lines = caption ? wrapTextLines(ctx, caption, canvas.width - 20 * dpr) : [];
+  const lineH = Math.round(17 * dpr);
+  const captionH = lines.length ? lines.length * lineH + Math.round(10 * dpr) : 0;
   out.width = canvas.width;
   out.height = canvas.height + captionH;
-  const ctx = out.getContext('2d');
   ctx.fillStyle = getCssVar('--panel') || '#ffffff';
   ctx.fillRect(0, 0, out.width, out.height);
-  if (caption) {
+  if (lines.length) {
     ctx.fillStyle = getCssVar('--text') || '#000';
-    ctx.font = `${Math.round(12 * dpr)}px ${getCssVar('--sans') || 'sans-serif'}`;
+    ctx.font = font;
     ctx.textBaseline = 'middle';
-    ctx.fillText(caption, Math.round(10 * dpr), Math.round(captionH / 2));
+    lines.forEach((line, i) => ctx.fillText(line, Math.round(10 * dpr), Math.round(5 * dpr) + lineH * i + lineH / 2));
   }
   ctx.drawImage(canvas, 0, captionH);
   out.toBlob((blob) => {
