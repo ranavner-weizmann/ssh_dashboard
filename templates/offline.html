@@ -636,7 +636,7 @@
     <div class="panel-header">
       <label>correlations</label>
     </div>
-    <div class="hint" style="margin-bottom: 10px;">Pearson correlations between the ticked variables, using only readings taken during flights (from each flight's start, with its 2-minute ground lead-in, to its landing). The selection drives all three grids. <b>All variables</b> correlates the variables' mean values per time step (30 s by default, since the MA200 reports every 30 s and the POM every ~10 s) within the chosen flights. <b>Ground vs height</b> treats each flight as one sample: a variable's mean in the 0 m bin (the drone on the ground and at the 0 m hover) is correlated across flights with the mean at each hover level (20 m bins, hovering readings only) - either of the same variable, or of one target variable, for example how ground temperature, humidity and PM relate to ozone at each height. <b>Station vs distance</b> does the same along the linear route, between the hover point over the launch area (0 m) and the hover points every 100 m out to the far point. A cell is blank when fewer than 2 pairs exist; hover a cell for its number of pairs. Correlations across flights only mean much with several flights - pick "all downloaded days" to pool every merged day under the downloads folder.</div>
+    <div class="hint" style="margin-bottom: 10px;">Pearson correlations between the ticked variables, using only readings taken during flights (from each flight's start, with its 2-minute ground lead-in, to its landing). The selection drives all three grids. <b>All variables</b> correlates the variables' mean values per time step (30 s by default, since the MA200 reports every 30 s and the POM every ~10 s) within the chosen flights. <b>Ground vs height</b> correlates a variable's readings in the 0 m bin (the drone on the ground and at the 0 m hover) with the readings at each hover level (20 m bins, hovering readings only) - either of the same variable, or of one target variable, for example how ground temperature, humidity and PM relate to ozone at each height. The full hovers are used, not their means: within each flight the ground series and the level's series are paired reading by reading in time order (a 40 s hover gives about 40 pairs), and the pairs of all flights are pooled; "one pair per flight" switches to correlating the bin means across flights instead. <b>Station vs distance</b> does the same along the linear route, between the hover point over the launch area (0 m) and the hover points every 100 m out to the far point. A cell is blank when fewer than 2 pairs exist; hover a cell for its number of pairs. Correlations across flights only mean much with several flights - pick "all downloaded days" to pool every merged day under the downloads folder.</div>
     <div id="corr-content" style="display:none;">
       <div class="plot-toolbar" style="margin-bottom: 6px;">
         <span class="hint" id="corr-checklist-count"></span>
@@ -654,6 +654,10 @@
           <option value="30" selected>30 s means</option>
           <option value="60">1 min means</option>
           <option value="300">5 min means</option>
+        </select>
+        <select id="corr-pairing-select" class="select-input" style="width: auto;" onchange="corrRenderAll(true)" title="ground vs height and station vs distance: how the ground readings are paired with the readings aloft">
+          <option value="series" selected>pair reading by reading (full hovers)</option>
+          <option value="means">one pair per flight (bin means)</option>
         </select>
         <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="profiles and routes: keep only readings taken while the drone held position">
           <input type="checkbox" id="corr-hover-only" checked onchange="corrRenderAll(true)"> hover only
@@ -2125,6 +2129,7 @@ async function corrRenderAll(missionOnly) {
   const q = `columns=${encodeURIComponent(cols.join(','))}&scope=${encodeURIComponent(scope)}`;
   const hover = document.getElementById('corr-hover-only').checked ? '1' : '0';
   const target = document.getElementById('corr-target-select').value || 'self';
+  const pairing = document.getElementById('corr-pairing-select').value || 'series';
   const gen = ++corrState.generation;
   status.textContent = 'Computing...';
   status.style.color = 'var(--text-dim)';
@@ -2132,8 +2137,8 @@ async function corrRenderAll(missionOnly) {
     const wanted = [
       missionOnly ? null : fetch(`${base}correlation_matrix?${q}&flight_index=${flightIndex}` +
         `&resample_s=${encodeURIComponent(document.getElementById('corr-resample-select').value || '30')}`).then((r) => r.json()),
-      fetch(`${base}correlation_vertical?${q}&hover_only=${hover}&target=${encodeURIComponent(target)}`).then((r) => r.json()),
-      fetch(`${base}correlation_horizontal?${q}&hover_only=${hover}&target=${encodeURIComponent(target)}`).then((r) => r.json()),
+      fetch(`${base}correlation_vertical?${q}&hover_only=${hover}&target=${encodeURIComponent(target)}&pairing=${pairing}`).then((r) => r.json()),
+      fetch(`${base}correlation_horizontal?${q}&hover_only=${hover}&target=${encodeURIComponent(target)}&pairing=${pairing}`).then((r) => r.json()),
     ];
     const [g, v, h] = await Promise.all(wanted);
     if (gen !== corrState.generation) return;
@@ -2196,9 +2201,15 @@ function corrTargetText(data, where, groundName) {
 function corrFlightsText(data, what) {
   const n = data.flights.length;
   let txt = `${n} flight${n === 1 ? '' : 's'} with ${what}${corrScopeText(data)}`;
-  if (n < 3) txt = `Only ${txt} - correlations across flights need several. `;
+  if (n < 3 && data.pairing === 'means') txt = `Only ${txt} - one pair per flight needs several flights. `;
   else txt += ' · ';
   return txt;
+}
+
+function corrPairNoun(data) { return data.pairing === 'means' ? 'flights' : 'reading pairs'; }
+function corrPairPrefix(data) { return data.pairing === 'means' ? 'r across flights (bin means): ' : 'r over reading pairs (full hovers, all flights pooled): '; }
+function corrPairText(data) {
+  return data.pairing === 'means' ? ', one pair of bin means per flight' : ', paired reading by reading within each flight';
 }
 
 function corrShowVertical(data) {
@@ -2214,13 +2225,13 @@ function corrShowVertical(data) {
   const rows = levels.map((l) => ({ key: String(l), label: `${l} m` }));
   const cols = data.columns.map((c) => ({ key: c, label: corrLabelOf(c) }));
   const cells = {};
-  data.cells.forEach((c) => { cells[`${c.level}|${c.column}`] = { r: c.r, n: c.n }; });
+  data.cells.forEach((c) => { cells[`${c.level}|${c.column}`] = { r: c.r, n: c.n, flights: c.flights }; });
   corrCharts.vertical.setData({
-    rows, cols, cells, pairNoun: 'flights', rowAxisLabel: 'altitude (m AGL)',
-    note: 'r across flights: ' + corrTargetText(data, 'at that height', '0 m bin (ground)'),
+    rows, cols, cells, pairNoun: corrPairNoun(data), rowAxisLabel: 'altitude (m AGL)',
+    note: corrPairPrefix(data) + corrTargetText(data, 'at that height', '0 m bin (ground)'),
   });
   st.textContent = corrFlightsText(data, 'profile data') +
-    `${data.bin_size} m bins${data.hover_only ? ', hovering readings only' : ''}`;
+    `${data.bin_size} m bins${data.hover_only ? ', hovering readings only' : ''}${corrPairText(data)}`;
   st.style.color = 'var(--text-dim)';
 }
 
@@ -2238,13 +2249,13 @@ function corrShowHorizontal(data) {
   const cols = data.distances.map((d) => ({ key: String(d), label: `${d} m` }));
   const rows = data.columns.map((c) => ({ key: c, label: corrLabelOf(c) }));
   const cells = {};
-  data.cells.forEach((c) => { cells[`${c.column}|${c.level}`] = { r: c.r, n: c.n }; });
+  data.cells.forEach((c) => { cells[`${c.column}|${c.level}`] = { r: c.r, n: c.n, flights: c.flights }; });
   corrCharts.horizontal.setData({
-    rows, cols, cells, pairNoun: 'flights', colAxisLabel: 'distance from launch (m)',
-    note: 'r across flights: ' + corrTargetText(data, 'at that distance', 'launch-area hover (0 m)'),
+    rows, cols, cells, pairNoun: corrPairNoun(data), colAxisLabel: 'distance from launch (m)',
+    note: corrPairPrefix(data) + corrTargetText(data, 'at that distance', 'launch-area hover (0 m)'),
   });
   let txt = corrFlightsText(data, 'a linear route') +
-    `${data.bin_size} m bins${data.hover_only ? ', hovering readings only' : ''}`;
+    `${data.bin_size} m bins${data.hover_only ? ', hovering readings only' : ''}${corrPairText(data)}`;
   if (data.flights_without_route) txt += ` · ${data.flights_without_route} flight(s) without a route left out`;
   st.textContent = txt;
   st.style.color = 'var(--text-dim)';
@@ -2270,9 +2281,10 @@ function corrDownload(kind, what) {
     return;
   }
   const rows = data.cells.map((c) => [c.level, c.column, data.target === 'self' ? c.column : data.target,
-    c.r === null ? '' : c.r.toFixed(4), c.n]);
+    c.r === null ? '' : c.r.toFixed(4), c.n, c.flights]);
   const levelName = kind === 'vertical' ? 'altitude_m' : 'distance_m';
-  downloadTextFile(stem + '.csv', csvFromRows([levelName, 'ground_variable', 'aloft_variable', 'r', 'n_flights'], rows));
+  const nName = data.pairing === 'means' ? 'n_flights' : 'n_reading_pairs';
+  downloadTextFile(stem + '.csv', csvFromRows([levelName, 'ground_variable', 'aloft_variable', 'r', nName, 'flights'], rows));
 }
 
 // ---------- Downloads: every chart on this page as PNG or CSV ----------

@@ -1776,7 +1776,8 @@ function createHeatmapController(canvasId, tooltipId) {
       ? 'no r (fewer than 2 pairs, or a constant value)' : 'r = ' + cell.r.toFixed(3);
     tooltip.innerHTML = '<div class="tt-row"><span class="tt-value">' + rTxt + '</span></div>' +
       '<div class="tt-time">' + data.rows[ri].label + ' × ' + data.cols[ci].label + '</div>' +
-      '<div class="tt-time">n = ' + (cell.n || 0) + ' ' + (data.pairNoun || 'pairs') + '</div>';
+      '<div class="tt-time">n = ' + (cell.n || 0) + ' ' + (data.pairNoun || 'pairs') +
+      (cell.flights !== undefined && data.pairNoun !== 'flights' ? ' from ' + cell.flights + ' flight' + (cell.flights === 1 ? '' : 's') : '') + '</div>';
     tooltip.style.left = (L.left + (ci + 0.5) * L.cellW) + 'px';
     tooltip.style.top = (L.top + ri * L.cellH) + 'px';
     tooltip.style.display = 'block';

@@ -2368,12 +2368,13 @@ def offline_merged_transect(name, date):
 #  - all variables: a plain all-against-all matrix of the readings taken
 #    during flights (each flight's window from _detect_flights, ground
 #    lead-in included), for every flight or one of them;
-#  - ground vs height: for each hover level, the correlation ACROSS
-#    FLIGHTS between a variable's ground value (its mean in the 0 m bin)
-#    and the value at that level - of the same variable, or of one chosen
-#    target variable (e.g. ground temperature / humidity / PM against
-#    ozone at each height). One flight is one sample, so this needs
-#    several flights; scope=all pools every merged date of the session;
+#  - ground vs height: for each hover level, the correlation between a
+#    variable's ground readings (the 0 m bin) and the readings at that
+#    level - of the same variable, or of one chosen target variable (e.g.
+#    ground temperature / humidity / PM against ozone at each height).
+#    Readings are paired reading by reading within each flight (the full
+#    hover, not its mean) and pooled over flights, or optionally one pair
+#    of means per flight; scope=all pools every downloaded day;
 #  - station vs distance: the same along the linear route, between the
 #    hover point over the launch area (0 m) and the ones further out.
 CORR_SCOPES = ("date", "all")
@@ -2490,28 +2491,65 @@ def _flight_label(sess, d, idx, f):
             "end": f["end"].strftime("%Y-%m-%d %H:%M:%S")}
 
 
-def _level_correlations(per_flight, columns, target, levels, ground_key):
+CORR_PAIRINGS = ("series", "means")
+
+
+def _bin_series(points, bin_size, key, value_key):
+    """
+    {bin centre: [values in time order]} - the readings of each centred bin
+    (same centres as _bin_altitude_profile / _bin_by_distance) kept as a
+    series rather than summarised, for the reading-by-reading pairing.
+    """
+    out = {}
+    for p in points:
+        centre = round(p[key] / bin_size) * bin_size + 0.0
+        out.setdefault(centre, []).append(p[value_key])
+    return out
+
+
+def _level_correlations(per_flight, columns, target, levels, ground_key, pairing="series"):
     """
     The cells of a ground-vs-level grid: for each level and column, Pearson
-    r across flights between the column's ground value (its mean in the
-    ground bin) and either its own mean at that level (target "self") or
-    the target column's mean there. per_flight: [{column: {level: mean}}],
-    one entry per flight. n is the number of flights behind each r.
+    r between the column's ground readings (its ground bin) and either its
+    own readings at that level (target "self") or the target column's.
+    per_flight: [{column: {level: [values in time order]}}], one per flight.
+
+    pairing "series": within each flight the two series are paired
+    reading by reading in time order (the k-th ground reading with the
+    k-th reading at the level, truncated to the shorter one - a 40 s hover
+    gives ~40 pairs), and the pairs of every flight are pooled; n is the
+    number of pairs, "flights" how many contributed. pairing "means": one
+    pair per flight, the two bins' means; n is the number of flights.
     """
     cells = []
     for lvl in levels:
         for c in columns:
             t = c if target == "self" else target
             xs, ys = [], []
-            for means in per_flight:
-                g = means[c].get(ground_key)
-                v = means[t].get(lvl)
-                if g is not None and v is not None:
-                    xs.append(g)
-                    ys.append(v)
+            flights = 0
+            for series in per_flight:
+                g = series[c].get(ground_key)
+                v = series[t].get(lvl)
+                if not g or not v:
+                    continue
+                flights += 1
+                if pairing == "means":
+                    xs.append(sum(g) / len(g))
+                    ys.append(sum(v) / len(v))
+                else:
+                    k = min(len(g), len(v))
+                    xs.extend(g[:k])
+                    ys.extend(v[:k])
             r, n = _pearson(xs, ys)
-            cells.append({"level": lvl, "column": c, "r": r, "n": n})
+            cells.append({"level": lvl, "column": c, "r": r, "n": n, "flights": flights})
     return cells
+
+
+def _pairing_param():
+    pairing = (request.args.get("pairing") or "series").lower()
+    if pairing not in CORR_PAIRINGS:
+        return None, (jsonify({"ok": False, "error": "pairing must be series or means."}), 400)
+    return pairing, None
 
 
 @app.route("/offline/session/<name>/merged/<date>/correlation_matrix")
@@ -2597,10 +2635,12 @@ def offline_merged_correlation_matrix(name, date):
 def offline_merged_correlation_vertical(name, date):
     """
     Ground-vs-height correlation grid (see the section comment above): one
-    cell per (hover level, column), r across flights between the column's
-    0 m bin mean and the target's mean at that level. Same binning and
-    hover test as /altitude_profile. Always uses every flight in the scope
-    (one flight is one sample).
+    cell per (hover level, column), r between the column's 0 m bin readings
+    and the target's readings at that level - paired reading by reading
+    within each flight and pooled (pairing=series), or one pair of bin
+    means per flight (pairing=means); see _level_correlations. Same
+    binning and hover test as /altitude_profile. Always uses every flight
+    in the scope.
     """
     params, err = _correlation_request(name, date)
     if err:
@@ -2618,6 +2658,9 @@ def offline_merged_correlation_vertical(name, date):
     leg = (request.args.get("leg") or "both").lower()
     if leg not in ("both", "up", "down"):
         return jsonify({"ok": False, "error": "leg must be both, up or down."}), 400
+    pairing, err = _pairing_param()
+    if err:
+        return err
     params["flight_index"] = -1
     scoped, err = _scope_flights(name, params)
     if err:
@@ -2634,27 +2677,27 @@ def offline_merged_correlation_vertical(name, date):
         for idx, f in flights:
             window = _rows_in_window(sensor_rows, f["start"], f["end"])
             prof = _profile_points_for_flight(track, f, window, columns, params["hover_only"], leg)
-            means = {c: {b["altitude"] + 0.0: b["mean"] for b in _bin_altitude_profile(prof["points"][c], bin_size)}
-                     for c in columns}
-            if any(means[c] for c in columns):
-                per_flight.append(means)
+            series = {c: _bin_series(prof["points"][c], bin_size, "y", "x") for c in columns}
+            if any(series[c] for c in columns):
+                per_flight.append(series)
                 flights_seen.append(_flight_label(sess, d, idx, f))
 
-    levels = sorted({lvl for means in per_flight for c in columns for lvl in means[c]})
-    cells = _level_correlations(per_flight, columns, target, levels, 0.0)
+    levels = sorted({lvl for series in per_flight for c in columns for lvl in series[c]})
+    cells = _level_correlations(per_flight, columns, target, levels, 0.0, pairing)
     return jsonify({"ok": True, "columns": columns, "target": target, "levels": levels, "cells": cells,
                     "flights": flights_seen, "bin_size": bin_size, "hover_only": params["hover_only"],
-                    "leg": leg, "scope": params["scope"], "dates": params["dates"], "ground_level": 0.0})
+                    "leg": leg, "pairing": pairing, "scope": params["scope"], "dates": params["dates"],
+                    "ground_level": 0.0})
 
 
 @app.route("/offline/session/<name>/merged/<date>/correlation_horizontal")
 def offline_merged_correlation_horizontal(name, date):
     """
     Station-vs-distance correlation grid along the linear route: one cell
-    per (distance bin, column), r across flights between the column's
-    mean at the launch-area hover (0 m bin) and the target's mean at that
-    distance. Same route detection and binning as /transect; flights
-    without a route are left out and counted.
+    per (distance bin, column), r between the column's readings at the
+    launch-area hover (0 m bin) and the target's readings at that
+    distance, paired as in /correlation_vertical. Same route detection and
+    binning as /transect; flights without a route are left out and counted.
     """
     params, err = _correlation_request(name, date)
     if err:
@@ -2669,6 +2712,9 @@ def offline_merged_correlation_horizontal(name, date):
         return jsonify({"ok": False, "error": "Invalid bin_size."}), 400
     if bin_size not in TRANSECT_BIN_SIZES_ALLOWED:
         return jsonify({"ok": False, "error": f"bin_size must be one of {sorted(TRANSECT_BIN_SIZES_ALLOWED)}."}), 400
+    pairing, err = _pairing_param()
+    if err:
+        return err
     params["flight_index"] = -1
     scoped, err = _scope_flights(name, params)
     if err:
@@ -2689,20 +2735,19 @@ def offline_merged_correlation_horizontal(name, date):
             if tp["transect"] is None:
                 without_route += 1
                 continue
-            means = {c: {b["distance"] + 0.0: b["mean"] for b in _bin_by_distance(tp["points"][c], bin_size)}
-                     for c in columns}
-            if any(means[c] for c in columns):
+            series = {c: _bin_series(tp["points"][c], bin_size, "x", "v") for c in columns}
+            if any(series[c] for c in columns):
                 info = _flight_label(sess, d, idx, f)
                 info["far_m"] = tp["far_m"]
-                per_flight.append(means)
+                per_flight.append(series)
                 flights_seen.append(info)
 
-    distances = sorted({dist for means in per_flight for c in columns for dist in means[c]})
-    cells = _level_correlations(per_flight, columns, target, distances, 0.0)
+    distances = sorted({dist for series in per_flight for c in columns for dist in series[c]})
+    cells = _level_correlations(per_flight, columns, target, distances, 0.0, pairing)
     return jsonify({"ok": True, "columns": columns, "target": target, "distances": distances, "cells": cells,
                     "flights": flights_seen, "flights_without_route": without_route, "bin_size": bin_size,
-                    "hover_only": params["hover_only"], "scope": params["scope"], "dates": params["dates"],
-                    "station_distance": 0.0})
+                    "hover_only": params["hover_only"], "pairing": pairing, "scope": params["scope"],
+                    "dates": params["dates"], "station_distance": 0.0})
 
 
 # ---------- Offline: a Claude-backed assistant scoped to one day's data ----------
