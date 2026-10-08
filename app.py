@@ -6515,6 +6515,73 @@ def backup_to_drive():
         return jsonify({"ok": True, "started": True})
 
 
+# ---------- Backup straight from the Pi into the OneDrive backup folder ----------
+# The connected dashboard's counterpart to "Backup to External Drive": the
+# same copy jobs, aimed at the OneDrive destination chosen on the OneDrive
+# page (<OneDrive>/<folder>/<name> for "all data", <OneDrive>/<folder>/<date>
+# per day for "specific days" - the same layout the OneDrive page's local
+# backup produces, so both routes converge on the same folders).
+
+@app.route("/onedrive/pi_backup/status")
+def onedrive_pi_backup_status():
+    backup_dir = _onedrive_backup_dir()
+    return jsonify({"ok": True, "backup_dir": backup_dir, "root": _onedrive_root(),
+                    "folder": _onedrive_settings().get("folder") if backup_dir else None})
+
+
+@app.route("/onedrive/pi_backup/check_folder", methods=["POST"])
+def onedrive_pi_backup_check_folder():
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    if not _valid_folder_name(name):
+        return jsonify({"ok": False, "error": "Folder name contains invalid characters."}), 400
+    backup_dir = _onedrive_backup_dir()
+    if not backup_dir:
+        return jsonify({"ok": False, "error": "No OneDrive destination is set - choose one on the OneDrive Backup page first."}), 400
+    target = os.path.join(backup_dir, name)
+    return jsonify({"ok": True, "exists": os.path.isdir(target), "path": target})
+
+
+@app.route("/onedrive/pi_backup", methods=["POST"])
+def onedrive_pi_backup():
+    data = request.get_json() or {}
+    scope = (data.get("scope") or "all").strip()
+    backup_dir = _onedrive_backup_dir()
+    if not backup_dir:
+        return jsonify({"ok": False, "error": "No OneDrive destination is set - choose one on the OneDrive Backup page first."}), 400
+    with _onedrive_job_lock:
+        if _onedrive_job.get("running"):
+            return jsonify({"ok": False, "error": "A local-to-OneDrive backup is running on the OneDrive page; wait for it to finish."}), 409
+
+    with state["lock"]:
+        if not state["connected"] or not state["sftp"]:
+            return jsonify({"ok": False, "error": "Not connected to remote host."}), 400
+        sftp = state["sftp"]
+
+        if scope == "days":
+            dates = _valid_dates(data.get("dates"))
+            if not dates:
+                return jsonify({"ok": False, "error": "Pick at least one day."}), 400
+            started, error = _start_days_download_job(sftp, dates, backup_dir, kind="backup_days")
+            if not started:
+                return jsonify({"ok": False, "error": error}), 409
+            return jsonify({"ok": True, "started": True, "target_root": backup_dir})
+
+        name = (data.get("name") or "").strip()
+        force = bool(data.get("force", False))
+        if not _valid_folder_name(name):
+            return jsonify({"ok": False, "error": "Folder name is required and must not contain path characters."}), 400
+        target_root = os.path.join(backup_dir, name)
+        try:
+            os.makedirs(target_root, exist_ok=True)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Could not create folder in OneDrive: {e}"}), 500
+        started, error = _start_copy_job(sftp, target_root, name, force=force, kind="backup")
+        if not started:
+            return jsonify({"ok": False, "error": error}), 409
+        return jsonify({"ok": True, "started": True, "target_root": target_root})
+
+
 @app.route("/backup_selected_days", methods=["POST"])
 def backup_selected_days():
     """

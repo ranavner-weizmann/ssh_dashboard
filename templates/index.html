@@ -1247,7 +1247,8 @@
           <div class="hint" id="download-status"></div>
           <div id="download-results"></div>
 
-          <button class="btn-download" id="backup-btn" style="margin-top: 14px;" onclick="startBackup()">Backup to External Drive</button>
+          <button class="btn-download" id="backup-btn" style="margin-top: 14px;" onclick="startBackup('drive')">Backup to External Drive</button>
+          <button class="btn-download" id="backup-onedrive-btn" style="margin-top: 8px;" onclick="startBackup('onedrive')">Backup to OneDrive</button>
           <div class="progress-bar-track" id="backup-progress-bar-track">
             <div class="progress-bar-fill" id="backup-progress-bar-fill"></div>
           </div>
@@ -2778,38 +2779,72 @@ function closeBackupModal() {
   document.getElementById('backup-modal-overlay').classList.remove('active');
 }
 
-async function startBackup() {
-  document.getElementById('backup-modal-title').textContent = 'Backup to external drive';
-  document.getElementById('backup-modal-body').innerHTML = `<p>Looking for connected drives...</p>`;
+// Which destination the open backup modal is for: 'drive' (a mounted
+// external drive, picked in the modal) or 'onedrive' (the folder chosen on
+// the OneDrive Backup page). Same form, same jobs, different endpoints.
+let backupTarget = 'drive';
+
+async function startBackup(target) {
+  backupTarget = target || backupTarget || 'drive';
+  const isOneDrive = backupTarget === 'onedrive';
+  document.getElementById('backup-modal-title').textContent = isOneDrive ? 'Backup to OneDrive' : 'Backup to external drive';
+  document.getElementById('backup-modal-body').innerHTML = isOneDrive
+    ? `<p>Checking the OneDrive destination...</p>`
+    : `<p>Looking for connected drives...</p>`;
   document.getElementById('backup-modal-actions').innerHTML = `
     <button class="btn-ghost" onclick="closeBackupModal()">Cancel</button>
   `;
   openBackupModal();
 
   try {
-    const res = await fetch('/external_volumes');
-    const data = await res.json();
-    const volumes = (data.ok && data.volumes) || [];
+    let destinationHtml;
+    if (isOneDrive) {
+      const res = await fetch('/onedrive/pi_backup/status');
+      const data = await res.json();
+      if (!data.ok || !data.backup_dir) {
+        document.getElementById('backup-modal-body').innerHTML = `
+          <p>No OneDrive destination is set yet. Choose (or create) the destination folder on the
+          <a href="/onedrive" target="_blank" style="color: var(--accent);">OneDrive Backup page</a>, then come back here.</p>
+        `;
+        document.getElementById('backup-modal-actions').innerHTML = `
+          <button class="btn-ghost" onclick="closeBackupModal()">Close</button>
+          <button class="btn-primary" style="width:auto;" onclick="startBackup('onedrive')">Check again</button>
+        `;
+        return;
+      }
+      destinationHtml = `
+        <label>destination in OneDrive</label>
+        <div class="download-target-path" style="margin-top:4px;">${escapeHtml(data.backup_dir)}</div>
+        <div class="hint" style="margin-top:4px;">Copies straight from the Pi into this folder (change it on the OneDrive Backup page). The cloud copy exists once the OneDrive app has finished uploading.</div>
+      `;
+    } else {
+      const res = await fetch('/external_volumes');
+      const data = await res.json();
+      const volumes = (data.ok && data.volumes) || [];
 
-    if (!volumes.length) {
-      document.getElementById('backup-modal-body').innerHTML = `
-        <p>No external drives found. Plug one in, give it a moment to mount, then try again.</p>
+      if (!volumes.length) {
+        document.getElementById('backup-modal-body').innerHTML = `
+          <p>No external drives found. Plug one in, give it a moment to mount, then try again.</p>
+        `;
+        document.getElementById('backup-modal-actions').innerHTML = `
+          <button class="btn-ghost" onclick="closeBackupModal()">Close</button>
+          <button class="btn-primary" style="width:auto;" onclick="startBackup('drive')">Check again</button>
+        `;
+        return;
+      }
+
+      const volumeOptions = volumes.map(v =>
+        `<option value="${escapeHtml(v.path)}">${escapeHtml(v.name)}</option>`
+      ).join('');
+      destinationHtml = `
+        <label for="backup-volume-select">external drive</label>
+        <select id="backup-volume-select" class="select-input" style="width:100%;">${volumeOptions}</select>
       `;
-      document.getElementById('backup-modal-actions').innerHTML = `
-        <button class="btn-ghost" onclick="closeBackupModal()">Close</button>
-        <button class="btn-primary" style="width:auto;" onclick="startBackup()">Check again</button>
-      `;
-      return;
     }
-
-    const volumeOptions = volumes.map(v =>
-      `<option value="${escapeHtml(v.path)}">${escapeHtml(v.name)}</option>`
-    ).join('');
 
     backupDaysLoaded = false;
     document.getElementById('backup-modal-body').innerHTML = `
-      <label for="backup-volume-select">external drive</label>
-      <select id="backup-volume-select" class="select-input" style="width:100%;">${volumeOptions}</select>
+      ${destinationHtml}
 
       <label style="margin-top:14px;">what to back up</label>
       <div class="scope-choice">
@@ -2824,14 +2859,14 @@ async function startBackup() {
       </div>
 
       <div id="backup-all-fields">
-        <label for="backup-folder-name-input" style="margin-top:14px;">subfolder name (on the drive)</label>
+        <label for="backup-folder-name-input" style="margin-top:14px;">subfolder name (at the destination)</label>
         <input type="text" id="backup-folder-name-input" placeholder="session_2026_06_18" autocomplete="off">
 
         <label style="margin-top:14px;">copy mode - asked every time, no fixed default</label>
         <div style="display:flex; flex-direction:column; gap:6px; margin-top:2px;">
           <label style="display:flex; align-items:center; gap:8px; font-family:inherit; font-size:13px; color:var(--text); text-transform:none;">
             <input type="radio" name="backup-mode" value="incremental" checked>
-            Incremental - skip files already on the drive that match by size
+            Incremental - skip files already at the destination that match by size
           </label>
           <label style="display:flex; align-items:center; gap:8px; font-family:inherit; font-size:13px; color:var(--text); text-transform:none;">
             <input type="radio" name="backup-mode" value="full">
@@ -2901,7 +2936,8 @@ async function loadBackupDaysList() {
 async function submitBackupDetails() {
   const scope = document.querySelector('input[name="backup-scope"]:checked').value;
   const errBox = document.getElementById('backup-modal-error');
-  const volumePath = document.getElementById('backup-volume-select').value;
+  const volumeSelect = document.getElementById('backup-volume-select');
+  const volumePath = volumeSelect ? volumeSelect.value : null;   // null for OneDrive
 
   if (scope === 'days') {
     const dates = selectedDayPickerDates();
@@ -2924,7 +2960,7 @@ async function submitBackupDetails() {
   }
 
   try {
-    const res = await fetch('/check_backup_folder', {
+    const res = await fetch(backupTarget === 'onedrive' ? '/onedrive/pi_backup/check_folder' : '/check_backup_folder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ volume_path: volumePath, name })
@@ -2950,15 +2986,15 @@ async function submitBackupDetails() {
 function showBackupOverwriteConfirm(volumePath, name, force, path) {
   document.getElementById('backup-modal-title').textContent = 'Folder already exists';
   document.getElementById('backup-modal-body').innerHTML = `
-    <p><b>${escapeHtml(name)}</b> already exists on that drive.<br><br>
+    <p><b>${escapeHtml(name)}</b> already exists at the destination.<br><br>
     ${force
       ? 'Full copy mode will re-copy and overwrite everything in it.'
       : 'Files already there that match will be reused as-is; only new or changed files will actually be copied.'}
     Continue into this folder, or go back and choose a different name?</p>
   `;
   document.getElementById('backup-modal-actions').innerHTML = `
-    <button class="btn-ghost" onclick="startBackup()">Choose different name</button>
-    <button class="btn-primary" style="width:auto;" onclick="confirmBackupOverwrite('${volumePath.replace(/'/g, "\\'")}', '${name.replace(/'/g, "\\'")}', ${force})">Continue</button>
+    <button class="btn-ghost" onclick="startBackup(backupTarget)">Choose different name</button>
+    <button class="btn-primary" style="width:auto;" onclick="confirmBackupOverwrite(${volumePath === null ? 'null' : "'" + volumePath.replace(/'/g, "\\'") + "'"}, '${name.replace(/'/g, "\\'")}', ${force})">Continue</button>
   `;
 }
 
@@ -2975,6 +3011,7 @@ async function runBackup(volumePath, name, force) {
   const fill = document.getElementById('backup-progress-bar-fill');
 
   btn.disabled = true;
+  document.getElementById('backup-onedrive-btn').disabled = true;
   statusEl.textContent = 'Starting backup...';
   statusEl.style.color = 'var(--text-dim)';
   resultsEl.innerHTML = '';
@@ -2982,10 +3019,12 @@ async function runBackup(volumePath, name, force) {
   fill.style.width = '0%';
 
   try {
-    const res = await fetch('/backup_to_drive', {
+    const res = await fetch(backupTarget === 'onedrive' ? '/onedrive/pi_backup' : '/backup_to_drive', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ volume_path: volumePath, name, force })
+      body: JSON.stringify(backupTarget === 'onedrive'
+        ? { scope: 'all', name, force }
+        : { volume_path: volumePath, name, force })
     });
     const data = await res.json();
 
@@ -2994,6 +3033,7 @@ async function runBackup(volumePath, name, force) {
       statusEl.style.color = 'var(--err)';
       track.classList.remove('active');
       btn.disabled = false;
+    document.getElementById('backup-onedrive-btn').disabled = false;
       return;
     }
 
@@ -3003,6 +3043,7 @@ async function runBackup(volumePath, name, force) {
     statusEl.style.color = 'var(--err)';
     track.classList.remove('active');
     btn.disabled = false;
+    document.getElementById('backup-onedrive-btn').disabled = false;
   }
 }
 
@@ -3014,6 +3055,7 @@ async function runDaysBackup(volumePath, dates) {
   const fill = document.getElementById('backup-progress-bar-fill');
 
   btn.disabled = true;
+  document.getElementById('backup-onedrive-btn').disabled = true;
   statusEl.textContent = 'Starting backup...';
   statusEl.style.color = 'var(--text-dim)';
   resultsEl.innerHTML = '';
@@ -3021,10 +3063,12 @@ async function runDaysBackup(volumePath, dates) {
   fill.style.width = '0%';
 
   try {
-    const res = await fetch('/backup_selected_days', {
+    const res = await fetch(backupTarget === 'onedrive' ? '/onedrive/pi_backup' : '/backup_selected_days', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ volume_path: volumePath, dates })
+      body: JSON.stringify(backupTarget === 'onedrive'
+        ? { scope: 'days', dates }
+        : { volume_path: volumePath, dates })
     });
     const data = await res.json();
 
@@ -3033,6 +3077,7 @@ async function runDaysBackup(volumePath, dates) {
       statusEl.style.color = 'var(--err)';
       track.classList.remove('active');
       btn.disabled = false;
+    document.getElementById('backup-onedrive-btn').disabled = false;
       return;
     }
 
@@ -3042,6 +3087,7 @@ async function runDaysBackup(volumePath, dates) {
     statusEl.style.color = 'var(--err)';
     track.classList.remove('active');
     btn.disabled = false;
+    document.getElementById('backup-onedrive-btn').disabled = false;
   }
 }
 
@@ -3068,6 +3114,7 @@ async function pollBackupProgress() {
     }
 
     btn.disabled = false;
+    document.getElementById('backup-onedrive-btn').disabled = false;
 
     if (p.error) {
       statusEl.textContent = p.error;
@@ -3108,6 +3155,7 @@ async function pollBackupProgress() {
     statusEl.textContent = 'Lost connection to local app server while backing up.';
     statusEl.style.color = 'var(--err)';
     btn.disabled = false;
+    document.getElementById('backup-onedrive-btn').disabled = false;
     track.classList.remove('active');
   }
 }
