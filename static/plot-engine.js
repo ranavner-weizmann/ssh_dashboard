@@ -1589,6 +1589,209 @@ function createTransectController(canvasId, tooltipId) {
 // The canvases are drawn at device-pixel resolution with a transparent
 // background, so the PNG is composed on an offscreen canvas: panel
 // background, a caption line, then the chart as rendered.
+// ---------- Correlation heatmap ----------
+// A grid of Pearson r values: rows x columns, each cell coloured on a
+// diverging blue (-1) / white (0) / red (+1) scale with the r printed in
+// it, a colour bar on the right, and the number of pairs behind every
+// cell in the tooltip. Used by the offline Correlations tab for the
+// all-variables matrix and for the ground-vs-height / station-vs-
+// distance grids.
+const HEATMAP_CELL = 58;
+const HEATMAP_ROW_H = 30;
+const HEATMAP_BAR_W = 14;
+
+function heatmapColor(r) {
+  // -1 -> #2166ac (blue), 0 -> white, +1 -> #b2182b (red), linear in between.
+  const t = Math.max(-1, Math.min(1, r));
+  const mix = (a, b, f) => Math.round(a + (b - a) * f);
+  const from = t < 0 ? [33, 102, 172] : [178, 24, 43];
+  const f = 1 - Math.abs(t);
+  return 'rgb(' + mix(from[0], 255, f) + ', ' + mix(from[1], 255, f) + ', ' + mix(from[2], 255, f) + ')';
+}
+
+// Where the grid sits inside the canvas, given the labels' widths. Shared
+// by the drawing and the hover so they agree on cell positions.
+function heatmapLayout(ctx, data, width) {
+  ctx.font = '11px ' + getCssVar('--sans');
+  const rowLabelW = Math.max(40, ...data.rows.map((r) => ctx.measureText(r.label).width)) + 12;
+  const left = rowLabelW + (data.rowAxisLabel ? 18 : 4);
+  const right = 16 + HEATMAP_BAR_W + 40;
+  const availW = width - left - right;
+  const cellW = Math.max(34, Math.min(HEATMAP_CELL, availW / Math.max(1, data.cols.length)));
+  const colLabelH = Math.ceil(Math.max(30, ...data.cols.map((c) => ctx.measureText(c.label).width)) * 0.72) + 12;
+  const top = (data.note ? LEGEND_LINE_H + 4 : 0) + colLabelH + 4;
+  const bottom = data.colAxisLabel ? 22 : 8;
+  return { left, top, cellW, cellH: HEATMAP_ROW_H, rowLabelW, colLabelH, bottom,
+           barX: left + cellW * data.cols.length + 16 };
+}
+
+function heatmapHeightFor(data, width) {
+  const ctx = document.createElement('canvas').getContext('2d');
+  const l = heatmapLayout(ctx, data, width || 600);
+  return l.top + HEATMAP_ROW_H * data.rows.length + l.bottom;
+}
+
+// data: {rows: [{key, label}], cols: [{key, label}], cells: {"rowKey|colKey": {r, n}},
+//        rowAxisLabel, colAxisLabel, note}. hover: {row, col} indexes or null.
+function drawCorrelationHeatmap(canvas, data, hover) {
+  const { ctx, width, height } = getCanvasContext(canvas);
+  ctx.clearRect(0, 0, width, height);
+  const L = heatmapLayout(ctx, data, width);
+  const text = getCssVar('--text') || '#000';
+  const dim = getCssVar('--text-dim') || '#555';
+  const border = getCssVar('--panel-border') || '#ccc';
+  const panel = getCssVar('--panel') || '#fff';
+
+  if (data.note) {
+    ctx.fillStyle = dim;
+    ctx.font = '11px ' + getCssVar('--sans');
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(data.note, L.left, LEGEND_LINE_H / 2 + 2);
+  }
+
+  // Column labels, slanted so long names do not collide.
+  ctx.font = '11px ' + getCssVar('--sans');
+  data.cols.forEach((c, ci) => {
+    const x = L.left + (ci + 0.5) * L.cellW;
+    ctx.save();
+    ctx.translate(x, L.top - 6);
+    ctx.rotate(-Math.PI / 4);
+    ctx.fillStyle = hover && hover.col === ci ? text : dim;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(c.label, 0, 0);
+    ctx.restore();
+  });
+
+  // Row labels.
+  data.rows.forEach((r, ri) => {
+    const y = L.top + (ri + 0.5) * L.cellH;
+    ctx.fillStyle = hover && hover.row === ri ? text : dim;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(r.label, L.left - 6, y);
+  });
+
+  // Cells.
+  ctx.font = '11px ' + getCssVar('--mono');
+  data.rows.forEach((r, ri) => {
+    data.cols.forEach((c, ci) => {
+      const x = L.left + ci * L.cellW, y = L.top + ri * L.cellH;
+      const cell = data.cells[r.key + '|' + c.key];
+      const has = !!cell && cell.r !== null && cell.r !== undefined;
+      const isHover = hover && hover.row === ri && hover.col === ci;
+      ctx.fillStyle = has ? heatmapColor(cell.r) : (getCssVar('--surface-sunken') || '#eee');
+      ctx.fillRect(x, y, L.cellW, L.cellH);
+      ctx.strokeStyle = isHover ? text : panel;
+      ctx.lineWidth = isHover ? 2 : 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, L.cellW - 1, L.cellH - 1);
+      ctx.fillStyle = has ? (Math.abs(cell.r) > 0.6 ? '#fff' : '#111') : dim;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(has ? cell.r.toFixed(2) : '-', x + L.cellW / 2, y + L.cellH / 2);
+    });
+  });
+
+  // Colour bar: +1 at the top, -1 at the bottom.
+  const barH = Math.max(60, L.cellH * data.rows.length);
+  const barTop = L.top;
+  for (let i = 0; i < barH; i++) {
+    ctx.fillStyle = heatmapColor(1 - 2 * (i / Math.max(1, barH - 1)));
+    ctx.fillRect(L.barX, barTop + i, HEATMAP_BAR_W, 1.5);
+  }
+  ctx.strokeStyle = border;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(L.barX + 0.5, barTop + 0.5, HEATMAP_BAR_W, barH);
+  ctx.fillStyle = dim;
+  ctx.font = '10px ' + getCssVar('--mono');
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('+1', L.barX + HEATMAP_BAR_W + 4, barTop + 4);
+  ctx.fillText('0', L.barX + HEATMAP_BAR_W + 4, barTop + barH / 2);
+  ctx.fillText('-1', L.barX + HEATMAP_BAR_W + 4, barTop + barH - 4);
+  ctx.save();
+  ctx.translate(L.barX + HEATMAP_BAR_W + 32, barTop + barH / 2);
+  ctx.rotate(Math.PI / 2);
+  ctx.font = '10px ' + getCssVar('--sans');
+  ctx.textAlign = 'center';
+  ctx.fillText('Pearson r', 0, 0);
+  ctx.restore();
+
+  // Axis titles.
+  ctx.font = '11px ' + getCssVar('--sans');
+  ctx.fillStyle = dim;
+  if (data.colAxisLabel) {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(data.colAxisLabel, L.left + (L.cellW * data.cols.length) / 2, height - 4);
+  }
+  if (data.rowAxisLabel) {
+    ctx.save();
+    ctx.translate(10, L.top + (L.cellH * data.rows.length) / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(data.rowAxisLabel, 0, 0);
+    ctx.restore();
+  }
+  return L;
+}
+
+function createHeatmapController(canvasId, tooltipId) {
+  const canvas = document.getElementById(canvasId);
+  const tooltip = document.getElementById(tooltipId);
+  let data = null;
+  let emptyMessage = 'No data';
+  let hover = null;
+
+  function draw() {
+    if (!data || !data.rows.length || !data.cols.length) {
+      canvas.style.height = '110px';
+      const { ctx, width, height } = getCanvasContext(canvas);
+      ctx.clearRect(0, 0, width, height);
+      drawEmptyPlotMessage(ctx, width, height, emptyMessage);
+      return;
+    }
+    const w = canvas.getBoundingClientRect().width || 600;
+    canvas.style.height = heatmapHeightFor(data, w) + 'px';
+    drawCorrelationHeatmap(canvas, data, hover);
+  }
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (!data || !data.rows.length) return;
+    const rect = canvas.getBoundingClientRect();
+    const L = heatmapLayout(canvas.getContext('2d'), data, rect.width);
+    const ci = Math.floor((e.clientX - rect.left - L.left) / L.cellW);
+    const ri = Math.floor((e.clientY - rect.top - L.top) / L.cellH);
+    if (ci < 0 || ri < 0 || ci >= data.cols.length || ri >= data.rows.length) {
+      if (hover) { hover = null; draw(); }
+      tooltip.style.display = 'none';
+      return;
+    }
+    hover = { row: ri, col: ci };
+    draw();
+    const cell = data.cells[data.rows[ri].key + '|' + data.cols[ci].key] || {};
+    const rTxt = cell.r === null || cell.r === undefined
+      ? 'no r (fewer than 2 pairs, or a constant value)' : 'r = ' + cell.r.toFixed(3);
+    tooltip.innerHTML = '<div class="tt-row"><span class="tt-value">' + rTxt + '</span></div>' +
+      '<div class="tt-time">' + data.rows[ri].label + ' × ' + data.cols[ci].label + '</div>' +
+      '<div class="tt-time">n = ' + (cell.n || 0) + ' ' + (data.pairNoun || 'pairs') + '</div>';
+    tooltip.style.left = (L.left + (ci + 0.5) * L.cellW) + 'px';
+    tooltip.style.top = (L.top + ri * L.cellH) + 'px';
+    tooltip.style.display = 'block';
+  });
+  canvas.addEventListener('mouseleave', () => { hover = null; tooltip.style.display = 'none'; draw(); });
+  window.addEventListener('resize', () => { if (data) draw(); });
+
+  return {
+    setData(d) { data = d; hover = null; draw(); },
+    setEmptyMessage(m) { data = null; emptyMessage = m; draw(); },
+    getData() { return data; },
+    draw,
+  };
+}
+
 function exportCanvasPng(canvas, filename, caption) {
   const dpr = window.devicePixelRatio || 1;
   const out = document.createElement('canvas');

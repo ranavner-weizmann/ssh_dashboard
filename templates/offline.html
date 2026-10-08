@@ -410,6 +410,20 @@
   .route-canvas-wrap { position: relative; width: 100%; height: 260px; }
   .route-canvas-wrap canvas { width: 100%; height: 100%; display: block; }
 
+  /* ---- correlations: a rolling checklist of variables and three heatmaps ---- */
+
+  .corr-checklist {
+    display: flex; flex-wrap: wrap; gap: 4px 16px; align-content: flex-start;
+    max-height: 170px; overflow-y: auto;
+    border: 1px solid var(--panel-border); border-radius: 6px; padding: 6px 10px 10px;
+    background: var(--surface-sunken);
+  }
+  .corr-checklist-group { flex: 0 0 100%; font-size: 11px; color: var(--text-dim); margin-top: 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .corr-checklist label { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 12px; white-space: nowrap; cursor: pointer; }
+  .corr-section { margin-top: 18px; }
+  .corr-canvas-wrap { position: relative; width: 100%; }
+  .corr-canvas-wrap canvas { width: 100%; height: 110px; display: block; }
+
   /* ---- assistant chat panel ---- */
 
   .assistant-log {
@@ -515,6 +529,7 @@
       <button class="tab-btn active" id="ofl-tab-btn-plot" onclick="oflSwitchTab('plot')">Plot</button>
       <button class="tab-btn" id="ofl-tab-btn-altitude" onclick="oflSwitchTab('altitude')">Vertical Profiles</button>
       <button class="tab-btn" id="ofl-tab-btn-horizontal" onclick="oflSwitchTab('horizontal')">Horizontal Profiles</button>
+      <button class="tab-btn" id="ofl-tab-btn-correlation" onclick="oflSwitchTab('correlation')">Correlations</button>
       <button class="tab-btn" id="ofl-tab-btn-explore" onclick="oflSwitchTab('explore')">Explore</button>
       <button class="tab-btn" id="ofl-tab-btn-assistant" onclick="oflSwitchTab('assistant')">Assistant</button>
     </div>
@@ -613,6 +628,77 @@
       <div class="alt-profile-grid" id="route-grid"></div>
     </div>
     <div class="hint" id="hp-status"></div>
+  </div>
+  </div>
+
+  <div class="tab-panel" id="ofl-tab-correlation">
+  <div class="panel" id="correlation-panel">
+    <div class="panel-header">
+      <label>correlations</label>
+    </div>
+    <div class="hint" style="margin-bottom: 10px;">Pearson correlations between the ticked variables, using only readings taken during flights (from each flight's start, with its 2-minute ground lead-in, to its landing). The selection drives all three grids. <b>All variables</b> correlates the variables' mean values per time step (30 s by default, since the MA200 reports every 30 s and the POM every ~10 s) within the chosen flights. <b>Ground vs height</b> treats each flight as one sample: a variable's mean in the 0 m bin (the drone on the ground and at the 0 m hover) is correlated across flights with the mean at each hover level (20 m bins, hovering readings only) - either of the same variable, or of one target variable, for example how ground temperature, humidity and PM relate to ozone at each height. <b>Station vs distance</b> does the same along the linear route, between the hover point over the launch area (0 m) and the hover points every 100 m out to the far point. A cell is blank when fewer than 2 pairs exist; hover a cell for its number of pairs. Correlations across flights only mean much with several flights - pick "all downloaded days" to pool every merged day under the downloads folder.</div>
+    <div id="corr-content" style="display:none;">
+      <div class="plot-toolbar" style="margin-bottom: 6px;">
+        <span class="hint" id="corr-checklist-count"></span>
+        <span class="chart-dl">
+          <button class="btn-ghost" onclick="corrResetDefaults()" title="back to the default set of variables">Defaults</button>
+          <button class="btn-ghost" onclick="corrSetAll(false)" title="untick every variable">None</button>
+        </span>
+      </div>
+      <div class="corr-checklist" id="corr-checklist"></div>
+      <div class="plot-toolbar" style="margin-top: 10px; justify-content: flex-start;">
+        <select id="corr-scope-select" class="select-input" style="width: auto;" onchange="corrRenderAll()" title="which flights to use"></select>
+        <select id="corr-resample-select" class="select-input" style="width: auto;" onchange="corrRenderAll()" title="all variables: instruments log at different rates (POM ~10 s, MA200 30 s, others 1 Hz), so values are averaged per time step before pairing">
+          <option value="1">pair by the same second</option>
+          <option value="10">10 s means</option>
+          <option value="30" selected>30 s means</option>
+          <option value="60">1 min means</option>
+          <option value="300">5 min means</option>
+        </select>
+        <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="profiles and routes: keep only readings taken while the drone held position">
+          <input type="checkbox" id="corr-hover-only" checked onchange="corrRenderAll(true)"> hover only
+        </label>
+      </div>
+
+      <div class="corr-section">
+        <div class="explore-toolbar">
+          <label class="explore-section-title" style="margin: 0;">all variables</label>
+          <span class="chart-dl">
+            <button class="btn-ghost" onclick="corrDownload('general', 'png')" title="save this grid as an image">PNG</button>
+            <button class="btn-ghost" onclick="corrDownload('general', 'csv')" title="save the correlation table">CSV</button>
+          </span>
+        </div>
+        <div class="corr-canvas-wrap"><canvas id="corr-general-canvas"></canvas><div class="plot-tooltip" id="corr-general-tooltip"></div></div>
+        <div class="hint" id="corr-general-status"></div>
+      </div>
+
+      <div class="corr-section">
+        <div class="explore-toolbar">
+          <label class="explore-section-title" style="margin: 0;">ground vs height (vertical profiles)</label>
+          <select id="corr-target-select" class="select-input" style="width: auto;" onchange="corrRenderAll(true)" title="what the ground values are correlated with"></select>
+          <span class="chart-dl">
+            <button class="btn-ghost" onclick="corrDownload('vertical', 'png')" title="save this grid as an image">PNG</button>
+            <button class="btn-ghost" onclick="corrDownload('vertical', 'csv')" title="save the correlation table">CSV</button>
+          </span>
+        </div>
+        <div class="corr-canvas-wrap"><canvas id="corr-vertical-canvas"></canvas><div class="plot-tooltip" id="corr-vertical-tooltip"></div></div>
+        <div class="hint" id="corr-vertical-status"></div>
+      </div>
+
+      <div class="corr-section">
+        <div class="explore-toolbar">
+          <label class="explore-section-title" style="margin: 0;">station vs distance (linear route)</label>
+          <span class="hint" id="corr-horizontal-target-note"></span>
+          <span class="chart-dl">
+            <button class="btn-ghost" onclick="corrDownload('horizontal', 'png')" title="save this grid as an image">PNG</button>
+            <button class="btn-ghost" onclick="corrDownload('horizontal', 'csv')" title="save the correlation table">CSV</button>
+          </span>
+        </div>
+        <div class="corr-canvas-wrap"><canvas id="corr-horizontal-canvas"></canvas><div class="plot-tooltip" id="corr-horizontal-tooltip"></div></div>
+        <div class="hint" id="corr-horizontal-status"></div>
+      </div>
+    </div>
+    <div class="hint" id="corr-status"></div>
   </div>
   </div>
 
@@ -1111,6 +1197,7 @@ async function viewOfflineDay(session, date) {
     oflPlot.setEmptyMessage('Pick a numeric column to plot');
     oflRenderExplorePanel();
     altProfileLoadFlights();
+    corrInit();
     statusEl.textContent = '';
 
     document.getElementById('ofl-tabs-wrap').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1393,13 +1480,14 @@ function oflClearPlot() {
 // ever drawn in response to a direct user action within that tab (picking
 // a variable, hovering, ...), which can't happen while its controls are
 // display:none, so nothing draws at a stale 0x0 size.
-const OFL_TAB_NAMES = ['plot', 'altitude', 'horizontal', 'explore', 'assistant'];
+const OFL_TAB_NAMES = ['plot', 'altitude', 'horizontal', 'correlation', 'explore', 'assistant'];
 
 function oflSwitchTab(name) {
   OFL_TAB_NAMES.forEach((n) => {
     document.getElementById('ofl-tab-' + n).classList.toggle('active', n === name);
     document.getElementById('ofl-tab-btn-' + n).classList.toggle('active', n === name);
   });
+  if (name === 'correlation') corrTabShown();
 }
 
 function oflClearPlotPanel() {
@@ -1420,6 +1508,7 @@ function oflClearPlotPanel() {
   altProfileRouteCharts = [];
   document.getElementById('route-grid').innerHTML = '';
   document.getElementById('hp-legend').innerHTML = '';
+  corrReset();
 }
 
 // ---------- Altitude profile: one chart per flight, instrument vs. altitude ----------
@@ -1503,6 +1592,7 @@ async function altProfileLoadFlights() {
     altProfileFlights = data.flights;
     altProfileBuildGrid();
     altProfilePopulateVariableSelect();
+    corrPopulateScope();
     statusEl.textContent = '';
     content.style.display = 'block';
   } catch (e) {
@@ -1838,6 +1928,351 @@ async function altProfileRenderAll() {
     statusEl.textContent = 'Could not reach the local app server.';
     statusEl.style.color = 'var(--err)';
   }
+}
+
+// ---------- Correlations tab ----------
+// One ticked set of variables drives three heatmaps (see the
+// correlation_* endpoints in app.py): the all-variables matrix over
+// flight-time readings, the ground-vs-height grid and the station-vs-
+// distance grid. The last two correlate ACROSS flights (one flight = one
+// sample), so they always use every flight of the chosen scope even when
+// the all-variables matrix is narrowed to a single flight.
+
+const CORR_DEFAULT_COLUMNS = [
+  'pom_Ozone_ppb', 'pops_PM1_ug_m3', 'pops_PM2.5_ug_m3',
+  'imet_temp_C', 'imet_rel_hum', 'imet_pressure',
+  'miniaeth_AAE_fit', 'partector2pro_ldsa_um2_cm3', 'partector2pro_number_cm3', 'partector2pro_diameter_nm',
+  'trisonica_U_Vector', 'trisonica_V_Vector',
+];
+// Short names for the grid labels (the unit is appended from unitOfColumn).
+const CORR_SHORT_LABELS = {
+  pom_Ozone_ppb: 'O₃', pops_PM1_ug_m3: 'PM1', 'pops_PM2.5_ug_m3': 'PM2.5', pops_PartCon: 'POPS N',
+  imet_temp_C: 'T', imet_rel_hum: 'RH', imet_pressure: 'P', imet_hum_temp_C: 'T (RH sensor)',
+  miniaeth_AAE_fit: 'AAE', miniaeth_AAE: 'AAE (device)', miniaeth_AAE_fit_amp: 'AAE amp.', miniaeth_IR_BCc: 'BC (IR)', miniaeth_UV_BCc: 'BC (UV)',
+  partector2pro_ldsa_um2_cm3: 'LDSA', partector2pro_number_cm3: 'N', partector2pro_diameter_nm: 'd',
+  partector2pro_mass_ug_m3: 'mass', partector2pro_total_surface_um2_cm3: 'surface',
+  trisonica_U_Vector: 'U', trisonica_V_Vector: 'V', trisonica_W_Vector: 'W',
+  trisonica_Wind_Speed: 'WS', trisonica_Wind_Direction: 'WD',
+};
+
+function corrLabelOf(column) {
+  const base = CORR_SHORT_LABELS[column] || columnFieldLabelOf(column);
+  const unit = unitOfColumn(column);
+  return unit ? `${base} (${unit})` : base;
+}
+
+const corrState = { columns: [], loaded: false, dirty: true, generation: 0 };
+const corrCharts = {
+  general: createHeatmapController('corr-general-canvas', 'corr-general-tooltip'),
+  vertical: createHeatmapController('corr-vertical-canvas', 'corr-vertical-tooltip'),
+  horizontal: createHeatmapController('corr-horizontal-canvas', 'corr-horizontal-tooltip'),
+};
+const corrData = { general: null, vertical: null, horizontal: null };
+
+function corrReset() {
+  corrState.columns = [];
+  corrState.loaded = false;
+  corrState.dirty = true;
+  corrState.generation += 1;
+  corrData.general = corrData.vertical = corrData.horizontal = null;
+  document.getElementById('corr-checklist').innerHTML = '';
+  document.getElementById('corr-content').style.display = 'none';
+  document.getElementById('corr-status').textContent = '';
+}
+
+// Builds the checklist from this day's merged sensor columns (grouped by
+// instrument, defaults ticked) - called once a day's variables are known.
+function corrInit() {
+  corrReset();
+  const vars = oflState.availableVariables.filter((v) => v.source === 'merged');
+  const status = document.getElementById('corr-status');
+  if (!vars.length) {
+    status.textContent = 'No merged sensor data for this date.';
+    return;
+  }
+  const available = new Set(vars.map((v) => v.column));
+  corrState.columns = CORR_DEFAULT_COLUMNS.filter((c) => available.has(c));
+
+  const groups = new Map();
+  vars.forEach((v) => {
+    const key = columnInstrumentOf(v.column);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(v.column);
+  });
+  const list = document.getElementById('corr-checklist');
+  [...groups.keys()].sort().forEach((key) => {
+    const g = document.createElement('div');
+    g.className = 'corr-checklist-group';
+    g.textContent = key;
+    list.appendChild(g);
+    // Ticked (default) variables first within each instrument, so the
+    // usual set is visible without scrolling through every column.
+    const ticked = (c) => (corrState.columns.includes(c) ? 0 : 1);
+    groups.get(key).slice().sort((a, b) => ticked(a) - ticked(b)).forEach((column) => {
+      const lab = document.createElement('label');
+      lab.title = column;
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = column;
+      cb.checked = corrState.columns.includes(column);
+      cb.onchange = corrChecklistChanged;
+      lab.appendChild(cb);
+      const short = CORR_SHORT_LABELS[column];
+      lab.appendChild(document.createTextNode(short ? `${corrLabelOf(column)} · ${columnFieldLabelOf(column)}` : columnFieldLabelOf(column)));
+      list.appendChild(lab);
+    });
+  });
+  corrState.loaded = true;
+  document.getElementById('corr-content').style.display = '';
+  corrPopulateScope();
+  corrPopulateTarget();
+  corrMarkDirty();
+}
+
+// Keeps the default order first (O3, PM, T, ...) so the matrix reads the
+// same way every time, then any extra ticks in checklist order.
+function corrChecklistChanged() {
+  const checked = [...document.querySelectorAll('#corr-checklist input[type=checkbox]')]
+    .filter((cb) => cb.checked).map((cb) => cb.value);
+  corrState.columns = CORR_DEFAULT_COLUMNS.filter((c) => checked.includes(c))
+    .concat(checked.filter((c) => !CORR_DEFAULT_COLUMNS.includes(c)));
+  corrPopulateTarget();
+  corrMarkDirty();
+}
+
+function corrSetAll(on) {
+  document.querySelectorAll('#corr-checklist input[type=checkbox]').forEach((cb) => { cb.checked = on; });
+  corrChecklistChanged();
+}
+
+function corrResetDefaults() {
+  document.querySelectorAll('#corr-checklist input[type=checkbox]').forEach((cb) => {
+    cb.checked = CORR_DEFAULT_COLUMNS.includes(cb.value);
+  });
+  corrChecklistChanged();
+}
+
+// Scope options: every flight of every merged date, every flight of this
+// date, or one of this date's flights (the latter narrows the
+// all-variables matrix only). Rebuilt when the flights load.
+function corrPopulateScope() {
+  const select = document.getElementById('corr-scope-select');
+  const previous = select.value;
+  select.innerHTML = '';
+  const add = (value, label) => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    select.appendChild(opt);
+  };
+  add('date:-1', 'All flights, this date');
+  add('all:-1', 'All flights, all downloaded days');
+  (altProfileFlights || []).forEach((f) => {
+    add(`date:${f.index}`, `Flight ${f.index + 1} (${f.start.slice(11, 16)}–${f.end.slice(11, 16)})`);
+  });
+  select.value = [...select.options].some((o) => o.value === previous) ? previous : 'date:-1';
+}
+
+function corrPopulateTarget() {
+  const select = document.getElementById('corr-target-select');
+  const previous = select.value;
+  select.innerHTML = '';
+  const add = (value, label) => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    select.appendChild(opt);
+  };
+  add('self', 'each variable vs its own ground value');
+  corrState.columns.forEach((c) => add(c, `${corrLabelOf(c)} aloft vs ground variables`));
+  select.value = [...select.options].some((o) => o.value === previous) ? previous : 'self';
+}
+
+function corrScope() {
+  const [scope, idx] = (document.getElementById('corr-scope-select').value || 'date:-1').split(':');
+  return [scope, parseInt(idx, 10)];
+}
+
+// Re-renders now if the tab is showing, otherwise when it next shows (a
+// hidden canvas has no size to draw into).
+function corrMarkDirty() {
+  corrState.dirty = true;
+  if (document.getElementById('ofl-tab-correlation').classList.contains('active')) corrRenderAll();
+}
+
+function corrTabShown() {
+  if (!corrState.loaded) return;
+  if (corrState.dirty) corrRenderAll();
+  else Object.values(corrCharts).forEach((c) => c.draw());
+}
+
+async function corrRenderAll(missionOnly) {
+  if (!corrState.loaded) return;
+  corrState.dirty = false;
+  const cols = corrState.columns;
+  const status = document.getElementById('corr-status');
+  document.getElementById('corr-checklist-count').textContent =
+    `${cols.length} variable${cols.length === 1 ? '' : 's'} ticked`;
+  if (cols.length < 2) {
+    Object.values(corrCharts).forEach((c) => c.setEmptyMessage('Tick at least two variables'));
+    ['general', 'vertical', 'horizontal'].forEach((k) => { document.getElementById(`corr-${k}-status`).textContent = ''; });
+    corrData.general = corrData.vertical = corrData.horizontal = null;
+    status.textContent = '';
+    return;
+  }
+  const [scope, flightIndex] = corrScope();
+  const base = `/offline/session/${encodeURIComponent(oflState.session)}/merged/${encodeURIComponent(oflState.date)}/`;
+  const q = `columns=${encodeURIComponent(cols.join(','))}&scope=${encodeURIComponent(scope)}`;
+  const hover = document.getElementById('corr-hover-only').checked ? '1' : '0';
+  const target = document.getElementById('corr-target-select').value || 'self';
+  const gen = ++corrState.generation;
+  status.textContent = 'Computing...';
+  status.style.color = 'var(--text-dim)';
+  try {
+    const wanted = [
+      missionOnly ? null : fetch(`${base}correlation_matrix?${q}&flight_index=${flightIndex}` +
+        `&resample_s=${encodeURIComponent(document.getElementById('corr-resample-select').value || '30')}`).then((r) => r.json()),
+      fetch(`${base}correlation_vertical?${q}&hover_only=${hover}&target=${encodeURIComponent(target)}`).then((r) => r.json()),
+      fetch(`${base}correlation_horizontal?${q}&hover_only=${hover}&target=${encodeURIComponent(target)}`).then((r) => r.json()),
+    ];
+    const [g, v, h] = await Promise.all(wanted);
+    if (gen !== corrState.generation) return;
+    if (g) corrShowGeneral(g, flightIndex);
+    corrShowVertical(v);
+    corrShowHorizontal(h);
+    status.textContent = '';
+  } catch (e) {
+    if (gen !== corrState.generation) return;
+    status.textContent = 'Could not reach the local app server.';
+    status.style.color = 'var(--err)';
+  }
+}
+
+function corrFail(kind, data) {
+  const st = document.getElementById(`corr-${kind}-status`);
+  corrCharts[kind].setEmptyMessage('Could not compute this grid.');
+  st.textContent = data.error || 'Unknown error';
+  st.style.color = 'var(--err)';
+  corrData[kind] = null;
+}
+
+function corrScopeText(data) {
+  if (data.scope !== 'all' || !data.dates) return '';
+  const n = data.dates.length;
+  const label = (d) => (/^\d{8}$/.test(d) ? formatRunDate(d) : d);
+  return ` over ${n} day${n === 1 ? '' : 's'} (${data.dates.map(label).join(', ')})`;
+}
+
+function corrShowGeneral(data, flightIndex) {
+  if (!data.ok) { corrFail('general', data); return; }
+  const st = document.getElementById('corr-general-status');
+  const cells = {};
+  data.matrix.forEach((m) => {
+    cells[`${m.a}|${m.b}`] = { r: m.r, n: m.n };
+    cells[`${m.b}|${m.a}`] = { r: m.r, n: m.n };
+  });
+  const axis = data.columns.map((c) => ({ key: c, label: corrLabelOf(c) }));
+  corrData.general = data;
+  const step = data.resample_s || 1;
+  const stepTxt = step === 1 ? 'same second' : step >= 60 ? `${step / 60} min` : `${step} s`;
+  corrCharts.general.setData({
+    rows: axis, cols: axis, cells, pairNoun: step === 1 ? 'reading pairs' : `${stepTxt} pairs`,
+    note: step === 1 ? 'Pearson r between readings logged in the same second during flights'
+      : `Pearson r between ${stepTxt} mean values during flights`,
+  });
+  const flightsTxt = flightIndex >= 0 ? `flight ${flightIndex + 1}` : `${data.flights} flight${data.flights === 1 ? '' : 's'}`;
+  st.textContent = `${data.rows.toLocaleString()} rows of readings` +
+    (step === 1 ? '' : ` in ${data.buckets.toLocaleString()} steps of ${stepTxt}`) +
+    ` during ${flightsTxt}${corrScopeText(data)}`;
+  st.style.color = 'var(--text-dim)';
+}
+
+function corrTargetText(data, where, groundName) {
+  return data.target === 'self'
+    ? `each variable ${where} vs its own value at the ${groundName}`
+    : `${corrLabelOf(data.target)} ${where} vs each variable at the ${groundName}`;
+}
+
+function corrFlightsText(data, what) {
+  const n = data.flights.length;
+  let txt = `${n} flight${n === 1 ? '' : 's'} with ${what}${corrScopeText(data)}`;
+  if (n < 3) txt = `Only ${txt} - correlations across flights need several. `;
+  else txt += ' · ';
+  return txt;
+}
+
+function corrShowVertical(data) {
+  if (!data.ok) { corrFail('vertical', data); return; }
+  const st = document.getElementById('corr-vertical-status');
+  corrData.vertical = data;
+  if (!data.levels.length) {
+    corrCharts.vertical.setEmptyMessage('No profile data in these flights');
+    st.textContent = '';
+    return;
+  }
+  const levels = data.levels.slice().sort((a, b) => b - a);
+  const rows = levels.map((l) => ({ key: String(l), label: `${l} m` }));
+  const cols = data.columns.map((c) => ({ key: c, label: corrLabelOf(c) }));
+  const cells = {};
+  data.cells.forEach((c) => { cells[`${c.level}|${c.column}`] = { r: c.r, n: c.n }; });
+  corrCharts.vertical.setData({
+    rows, cols, cells, pairNoun: 'flights', rowAxisLabel: 'altitude (m AGL)',
+    note: 'r across flights: ' + corrTargetText(data, 'at that height', '0 m bin (ground)'),
+  });
+  st.textContent = corrFlightsText(data, 'profile data') +
+    `${data.bin_size} m bins${data.hover_only ? ', hovering readings only' : ''}`;
+  st.style.color = 'var(--text-dim)';
+}
+
+function corrShowHorizontal(data) {
+  if (!data.ok) { corrFail('horizontal', data); return; }
+  const st = document.getElementById('corr-horizontal-status');
+  corrData.horizontal = data;
+  document.getElementById('corr-horizontal-target-note').textContent =
+    data.target === 'self' ? '' : `${corrLabelOf(data.target)} at each distance vs the ground variables at the station`;
+  if (!data.distances.length) {
+    corrCharts.horizontal.setEmptyMessage('No linear-route data in these flights');
+    st.textContent = data.flights_without_route ? `${data.flights_without_route} flight(s) without a route` : '';
+    return;
+  }
+  const cols = data.distances.map((d) => ({ key: String(d), label: `${d} m` }));
+  const rows = data.columns.map((c) => ({ key: c, label: corrLabelOf(c) }));
+  const cells = {};
+  data.cells.forEach((c) => { cells[`${c.column}|${c.level}`] = { r: c.r, n: c.n }; });
+  corrCharts.horizontal.setData({
+    rows, cols, cells, pairNoun: 'flights', colAxisLabel: 'distance from launch (m)',
+    note: 'r across flights: ' + corrTargetText(data, 'at that distance', 'launch-area hover (0 m)'),
+  });
+  let txt = corrFlightsText(data, 'a linear route') +
+    `${data.bin_size} m bins${data.hover_only ? ', hovering readings only' : ''}`;
+  if (data.flights_without_route) txt += ` · ${data.flights_without_route} flight(s) without a route left out`;
+  st.textContent = txt;
+  st.style.color = 'var(--text-dim)';
+}
+
+function corrDownload(kind, what) {
+  const data = corrData[kind];
+  if (!data || !corrCharts[kind].getData()) return;
+  const stem = oflFileStem(`correlation_${kind}`);
+  const where = `${oflState.session} ${formatRunDate(oflState.date)}`;
+  if (what === 'png') {
+    const captions = {
+      general: `${where} - correlations between variables during flights`,
+      vertical: `${where} - ground vs height correlations across flights`,
+      horizontal: `${where} - station vs distance correlations across flights`,
+    };
+    exportCanvasPng(document.getElementById(`corr-${kind}-canvas`), stem + '.png', captions[kind]);
+    return;
+  }
+  if (kind === 'general') {
+    const rows = data.matrix.map((m) => [m.a, m.b, m.r === null ? '' : m.r.toFixed(4), m.n]);
+    downloadTextFile(stem + '.csv', csvFromRows(['a', 'b', 'r', 'n_pairs'], rows));
+    return;
+  }
+  const rows = data.cells.map((c) => [c.level, c.column, data.target === 'self' ? c.column : data.target,
+    c.r === null ? '' : c.r.toFixed(4), c.n]);
+  const levelName = kind === 'vertical' ? 'altitude_m' : 'distance_m';
+  downloadTextFile(stem + '.csv', csvFromRows([levelName, 'ground_variable', 'aloft_variable', 'r', 'n_flights'], rows));
 }
 
 // ---------- Downloads: every chart on this page as PNG or CSV ----------

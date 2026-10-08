@@ -1877,6 +1877,151 @@ def offline_merged_flights(name, date):
     })
 
 
+def _read_sensor_columns(name, date, columns, t_start=None, t_end=None):
+    """
+    One pass over a date's merged sensor CSV for the given columns:
+    [(timestamp, {column: value}), ...] sorted by time, optionally limited
+    to t_start..t_end, with blanks left out of each row's dict and the
+    impossible negatives (NONNEGATIVE_COLUMN_RE) dropped. Shared by the
+    vertical profile, the linear route and the correlation endpoints so
+    they all read the file the same way - and, for the correlations, only
+    once per date rather than once per flight.
+
+    Returns (rows, None) or (None, error_response).
+    """
+    sensor_path = os.path.join(_session_merged_dir(name, date), f"merged_data_{date}_merged.csv")
+    if not os.path.isfile(sensor_path):
+        return None, (jsonify({"ok": False, "error": "This date's sensor runs haven't been merged yet - use \"Merge\" first."}), 400)
+    try:
+        with open(sensor_path, "r", encoding="utf-8", errors="replace") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            for column in columns:
+                if column not in fieldnames:
+                    return None, (jsonify({"ok": False, "error": f'Column "{column}" not found in this date\'s sensor data.'}), 400)
+            time_column = fieldnames[0]
+            rows = []
+            for row in reader:
+                ts = _parse_csv_timestamp(row.get(time_column))
+                if ts is None or (t_start is not None and ts < t_start) or (t_end is not None and ts > t_end):
+                    continue
+                vals = {}
+                for column in columns:
+                    val = _parse_numeric(row.get(column))
+                    if val is None or (val < 0 and NONNEGATIVE_COLUMN_RE.search(column)):
+                        continue
+                    vals[column] = val
+                if vals:
+                    rows.append((ts, vals))
+    except Exception as e:
+        return None, (jsonify({"ok": False, "error": f"Could not read this date's sensor data: {e}"}), 500)
+    rows.sort(key=lambda r: r[0])
+    return rows, None
+
+
+def _rows_in_window(sensor_rows, start, end):
+    """The slice of time-sorted (ts, vals) rows with start <= ts <= end."""
+    times = [r[0] for r in sensor_rows]
+    lo = bisect.bisect_left(times, start)
+    hi = bisect.bisect_right(times, end)
+    return sensor_rows[lo:hi]
+
+
+def _profile_points_for_flight(track, flight, sensor_rows, columns, hover_only=True, leg="both"):
+    """
+    One flight's vertical-profile join: for each column, the (value,
+    altitude) points of the readings taken while the drone was profiling
+    over the launch point. The profile ends the first time the drone is
+    PROFILE_MAX_RADIUS_M from launch (the transit out to the linear route
+    would otherwise count as one long hover). Which telemetry samples
+    count: hovering ones (unless hover_only is off), on the requested leg.
+    Each reading is then tagged with the kept altitude sample nearest in
+    time (within SENSOR_TO_DRONE_MAX_GAP_SECONDS) - joining from the
+    instrument side keeps n an honest count of instrument samples; a
+    reading with no kept altitude within reach was taken while climbing
+    between levels (or in a telemetry gap) and is counted as dropped.
+
+    track: the day's (ts, alt, lat, lon) rows; sensor_rows: (ts, {col: val})
+    rows from _read_sensor_columns (any outside the flight are ignored).
+    """
+    flight_track = [r for r in track if flight["start"] <= r[0] <= flight["end"]]
+    profile_truncated = False
+    if len(flight_track) >= 10:
+        head = flight_track[:10]
+        lat0 = sum(r[2] for r in head) / len(head)
+        lon0 = sum(r[3] for r in head) / len(head)
+        for i, r in enumerate(flight_track):
+            if _horizontal_distance_m(r[2], r[3], lat0, lon0) > PROFILE_MAX_RADIUS_M:
+                flight_track = flight_track[:i]
+                profile_truncated = True
+                break
+    flight_drone_rows = [(r[0], r[1]) for r in flight_track]
+
+    hover = _hover_flags(flight_drone_rows)
+    legs = _leg_flags(flight_drone_rows)
+    kept_rows = [
+        row for row, is_hover, row_leg in zip(flight_drone_rows, hover, legs)
+        if (is_hover or not hover_only) and (leg == "both" or row_leg == leg)
+    ]
+    drone_times = [r[0] for r in kept_rows]
+    drone_alts = [r[1] for r in kept_rows]
+
+    points = {column: [] for column in columns}
+    dropped = {column: 0 for column in columns}
+    for ts, vals in sensor_rows:
+        if ts < flight["start"] or ts > flight["end"]:
+            continue
+        alt, _gap_s = _nearest_within(drone_times, drone_alts, ts, SENSOR_TO_DRONE_MAX_GAP_SECONDS)
+        for column in columns:
+            if column not in vals:
+                continue
+            if alt is None:
+                dropped[column] += 1
+            else:
+                points[column].append({"x": vals[column], "y": alt})
+    return {"points": points, "dropped": dropped, "flight_drone_rows": flight_drone_rows,
+            "kept_rows": kept_rows, "profile_truncated": profile_truncated}
+
+
+def _transect_points_for_flight(track, flight, sensor_rows, columns, hover_only=True):
+    """
+    One flight's linear-route join (see _detect_transect): for each column,
+    the (distance from launch, value) points of the readings taken on the
+    inbound run, tagged with the drone's distance at their own time
+    (nearest kept telemetry sample within SENSOR_TO_DRONE_MAX_GAP_SECONDS).
+    With hover_only only samples where the drone held position count.
+    Returns {"transect": None, "far_m"} for a flight without a route.
+    """
+    flight_rows = [r for r in track if flight["start"] <= r[0] <= flight["end"]]
+    transect = _detect_transect(flight_rows)
+    if transect is None or not transect["rows"]:
+        return {"transect": None, "far_m": transect["far_m"] if transect else 0.0}
+    all_rows = transect["rows"]
+    hover = _hover_flags([(r[0], r[1]) for r in all_rows], ROUTE_HOVER_WINDOW_SECONDS, ROUTE_HOVER_MAX_RANGE_M)
+    hover_points = _route_hover_points(all_rows, hover)
+    t_rows = [r for r, h in zip(all_rows, hover) if h or not hover_only]
+    if len(t_rows) < 2:
+        t_rows = all_rows
+    t_times = [r[0] for r in t_rows]
+    t_dist = [r[1] for r in t_rows]
+
+    points = {column: [] for column in columns}
+    dropped = {column: 0 for column in columns}
+    for ts, vals in sensor_rows:
+        if ts < transect["start"] or ts > transect["end"]:
+            continue
+        d, _gap = _nearest_within(t_times, t_dist, ts, SENSOR_TO_DRONE_MAX_GAP_SECONDS)
+        for column in columns:
+            if column not in vals:
+                continue
+            if d is None:
+                dropped[column] += 1
+            else:
+                points[column].append({"x": d, "v": vals[column]})
+    return {"transect": transect, "all_rows": all_rows, "hover": hover, "hover_points": hover_points,
+            "points": points, "dropped": dropped, "far_m": transect["far_m"]}
+
+
 @app.route("/offline/session/<name>/merged/<date>/altitude_profile")
 def offline_merged_altitude_profile(name, date):
     """
@@ -1921,89 +2066,24 @@ def offline_merged_altitude_profile(name, date):
     if flight_index < 0 or flight_index >= len(flights):
         return jsonify({"ok": False, "error": "That flight was not found for this date."}), 400
     flight = flights[flight_index]
-    flight_track = [r for r in track if flight["start"] <= r[0] <= flight["end"]]
+    sensor_rows, err = _read_sensor_columns(name, date, columns, flight["start"], flight["end"])
+    if err:
+        return err
+    prof = _profile_points_for_flight(track, flight, sensor_rows, columns, hover_only, leg)
+    flight_drone_rows = prof["flight_drone_rows"]
+    kept_rows = prof["kept_rows"]
+    profile_truncated = prof["profile_truncated"]
 
-    # The profile is the part of the flight flown over the launch point.
-    # Once the drone heads out for the linear route (see /transect) it is
-    # no longer profiling: that run, flown at one constant altitude, would
-    # otherwise count as a long "hover" in one of the bins. So the profile
-    # ends the first time the drone is PROFILE_MAX_RADIUS_M from launch.
-    profile_truncated = False
-    if len(flight_track) >= 10:
-        head = flight_track[:10]
-        lat0 = sum(r[2] for r in head) / len(head)
-        lon0 = sum(r[3] for r in head) / len(head)
-        for i, r in enumerate(flight_track):
-            if _horizontal_distance_m(r[2], r[3], lat0, lon0) > PROFILE_MAX_RADIUS_M:
-                flight_track = flight_track[:i]
-                profile_truncated = True
-                break
-    flight_drone_rows = [(r[0], r[1]) for r in flight_track]
-
-    # Which altitude samples count: hovering ones (unless asked for all),
-    # on the requested leg of the flight.
-    hover = _hover_flags(flight_drone_rows)
-    legs = _leg_flags(flight_drone_rows)
-    kept_rows = [
-        row for row, is_hover, row_leg in zip(flight_drone_rows, hover, legs)
-        if (is_hover or not hover_only) and (leg == "both" or row_leg == leg)
-    ]
-    drone_times = [r[0] for r in kept_rows]
-    drone_alts = [r[1] for r in kept_rows]
-
-    # Read only this flight's window of the day's sensor data.
-    sensor_path = os.path.join(_session_merged_dir(name, date), f"merged_data_{date}_merged.csv")
-    if not os.path.isfile(sensor_path):
-        return jsonify({"ok": False, "error": "This date's sensor runs haven't been merged yet - use \"Merge\" first."}), 400
-    try:
-        with open(sensor_path, "r", encoding="utf-8", errors="replace") as f:
-            reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames or []
-            for column in columns:
-                if column not in fieldnames:
-                    return jsonify({"ok": False, "error": f'Column "{column}" not found in this date\'s sensor data.'}), 400
-            time_column = fieldnames[0]
-            sensor_series = {column: [] for column in columns}
-            for row in reader:
-                ts = _parse_csv_timestamp(row.get(time_column))
-                if ts is None or ts < flight["start"] or ts > flight["end"]:
-                    continue
-                for column in columns:
-                    val = _parse_numeric(row.get(column))
-                    if val is not None and val < 0 and NONNEGATIVE_COLUMN_RE.search(column):
-                        continue
-                    if val is not None:
-                        sensor_series[column].append((ts, val))
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"Could not read this date's sensor data: {e}"}), 500
-
-    # Join from the instrument side: each sensor reading gets the altitude
-    # the drone was at when it was taken (nearest kept telemetry sample
-    # within SENSOR_TO_DRONE_MAX_GAP_SECONDS). Joining from the drone side
-    # instead - every 1 Hz altitude sample grabbing its nearest sensor
-    # value - repeats a slow instrument's reading many times (an MA200 at a
-    # 30 s timebase would count 30 times per value), inflating n and
-    # flattening the spread; this way n is honest instrument samples. A
-    # reading with no kept altitude within reach was taken while climbing
-    # between levels (with hover_only) or in a telemetry gap, and is dropped.
     series = []
     for column in columns:
-        points = []
-        dropped = 0
-        for ts, val in sorted(sensor_series[column], key=lambda r: r[0]):
-            alt, _gap_s = _nearest_within(drone_times, drone_alts, ts, SENSOR_TO_DRONE_MAX_GAP_SECONDS)
-            if alt is None:
-                dropped += 1
-                continue
-            points.append({"x": val, "y": alt})
-
+        points = prof["points"][column]
         xs = [p["x"] for p in points]
         ys = [p["y"] for p in points]
         r, n = _pearson(xs, ys)
         series.append({
             "column": column,
             "bins": _bin_altitude_profile(points, bin_size),
-            "n": n, "dropped": dropped, "r": r,
+            "n": n, "dropped": prof["dropped"][column], "r": r,
             "r_squared": (r * r) if r is not None else None,
         })
 
@@ -2243,55 +2323,21 @@ def offline_merged_transect(name, date):
                       f"(a route needs {TRANSECT_MIN_DISTANCE_M:.0f} m).",
         })
 
-    all_rows = transect["rows"]
-    # Hovering = horizontal position holding still (same test as the
-    # profile's altitude hover, applied to distance from launch).
-    hover = _hover_flags([(r[0], r[1]) for r in all_rows], ROUTE_HOVER_WINDOW_SECONDS, ROUTE_HOVER_MAX_RANGE_M)
-    hover_points = _route_hover_points(all_rows, hover)
-    t_rows = [r for r, h in zip(all_rows, hover) if h or not hover_only]
-    if len(t_rows) < 2:
-        t_rows = all_rows
-    t_times = [r[0] for r in t_rows]
-    t_dist = [r[1] for r in t_rows]
+    sensor_rows, err = _read_sensor_columns(name, date, columns, flight["start"], flight["end"])
+    if err:
+        return err
+    tp = _transect_points_for_flight(track, flight, sensor_rows, columns, hover_only)
+    all_rows = tp["all_rows"]
+    hover = tp["hover"]
+    hover_points = tp["hover_points"]
     alts = [r[2] for r in all_rows]
     duration_s = max(1.0, (all_rows[-1][0] - all_rows[0][0]).total_seconds())
 
-    sensor_path = os.path.join(_session_merged_dir(name, date), f"merged_data_{date}_merged.csv")
-    if not os.path.isfile(sensor_path):
-        return jsonify({"ok": False, "error": "This date's sensor runs haven't been merged yet - use \"Merge\" first."}), 400
-    try:
-        with open(sensor_path, "r", encoding="utf-8", errors="replace") as f:
-            reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames or []
-            for column in columns:
-                if column not in fieldnames:
-                    return jsonify({"ok": False, "error": f'Column "{column}" not found in this date\'s sensor data.'}), 400
-            time_column = fieldnames[0]
-            sensor_series = {column: [] for column in columns}
-            for row in reader:
-                ts = _parse_csv_timestamp(row.get(time_column))
-                if ts is None or ts < transect["start"] or ts > transect["end"]:
-                    continue
-                for column in columns:
-                    val = _parse_numeric(row.get(column))
-                    if val is not None and val < 0 and NONNEGATIVE_COLUMN_RE.search(column):
-                        continue
-                    if val is not None:
-                        sensor_series[column].append((ts, val))
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"Could not read this date's sensor data: {e}"}), 500
-
     series = []
     for column in columns:
-        points = []
-        dropped = 0
-        for ts, val in sorted(sensor_series[column], key=lambda r: r[0]):
-            d, _gap = _nearest_within(t_times, t_dist, ts, SENSOR_TO_DRONE_MAX_GAP_SECONDS)
-            if d is None:
-                dropped += 1
-                continue
-            points.append({"x": d, "v": val})
-        series.append({"column": column, "bins": _bin_by_distance(points, bin_size), "n": len(points), "dropped": dropped})
+        points = tp["points"][column]
+        series.append({"column": column, "bins": _bin_by_distance(points, bin_size),
+                       "n": len(points), "dropped": tp["dropped"][column]})
 
     return jsonify({
         "ok": True,
@@ -2315,6 +2361,348 @@ def offline_merged_transect(name, date):
         "series": series,
         "max_gap_seconds": SENSOR_TO_DRONE_MAX_GAP_SECONDS,
     })
+
+
+# ---------- Offline: correlations over a day's (or every day's) flights ----------
+# Three views over one chosen set of variables:
+#  - all variables: a plain all-against-all matrix of the readings taken
+#    during flights (each flight's window from _detect_flights, ground
+#    lead-in included), for every flight or one of them;
+#  - ground vs height: for each hover level, the correlation ACROSS
+#    FLIGHTS between a variable's ground value (its mean in the 0 m bin)
+#    and the value at that level - of the same variable, or of one chosen
+#    target variable (e.g. ground temperature / humidity / PM against
+#    ozone at each height). One flight is one sample, so this needs
+#    several flights; scope=all pools every merged date of the session;
+#  - station vs distance: the same along the linear route, between the
+#    hover point over the launch area (0 m) and the ones further out.
+CORR_SCOPES = ("date", "all")
+CORR_MAX_COLUMNS = 40
+# The all-variables matrix pairs values by time bucket: instruments log at
+# different rates (the POM every ~10 s, the MA200 every 30 s, the rest at
+# 1 Hz), so pairing by the exact second would leave the slow pairs with
+# few or no points. Each column is averaged per bucket first; 1 = pair
+# readings logged in the same second.
+CORR_RESAMPLE_SECONDS_ALLOWED = (1, 10, 30, 60, 300)
+CORR_RESAMPLE_SECONDS_DEFAULT = 30
+
+
+def _dates_with_flights(name):
+    """Dates in this session with both a merged sensor day and merged drone drone telemetry."""
+    dates = set(_list_run_dirs_by_date(name)) | set(_list_drone_files_by_date(name))
+    out = []
+    for d in sorted(dates):
+        sensor_path = os.path.join(_session_merged_dir(name, d), f"merged_data_{d}_merged.csv")
+        if _drone_day_merged_dir_if_present(name, d) and os.path.isfile(sensor_path):
+            out.append(d)
+    return out
+
+
+def _all_flight_days():
+    """
+    [(session, date), ...] for every merged day with flights under the
+    sessions root, across every session folder - a download is usually one
+    day's session folder, so pooling "all dates" means pooling sessions.
+    """
+    root = _sessions_root()
+    out = []
+    if os.path.isdir(root):
+        for sess in sorted(os.listdir(root)):
+            if not _valid_session_name(sess) or not os.path.isdir(os.path.join(root, sess)):
+                continue
+            for d in _dates_with_flights(sess):
+                out.append((sess, d))
+    return out
+
+
+def _day_label(sess, d):
+    return d if sess == d else f"{sess}/{d}"
+
+
+def _correlation_request(name, date):
+    """
+    The query arguments the correlation endpoints share: columns, scope
+    ("date" = this date, "all" = every merged date of the session),
+    flight_index (-1 = every flight; ignored under scope=all) and
+    hover_only. Returns (params, None) or (None, error_response).
+    """
+    if not _valid_session_name(name):
+        return None, (jsonify({"ok": False, "error": "Invalid session name."}), 400)
+    if not re.match(r"^\d{8}$", date):
+        return None, (jsonify({"ok": False, "error": "Invalid date."}), 400)
+    columns = [c for c in (request.args.get("columns") or "").split(",") if c]
+    if len(columns) < 2:
+        return None, (jsonify({"ok": False, "error": "At least two columns are required."}), 400)
+    if len(columns) > CORR_MAX_COLUMNS:
+        return None, (jsonify({"ok": False, "error": f"At most {CORR_MAX_COLUMNS} columns at once."}), 400)
+    scope = (request.args.get("scope") or "date").lower()
+    if scope not in CORR_SCOPES:
+        return None, (jsonify({"ok": False, "error": "scope must be date or all."}), 400)
+    try:
+        flight_index = int(request.args.get("flight_index", "-1") or "-1")
+    except ValueError:
+        return None, (jsonify({"ok": False, "error": "Invalid flight_index."}), 400)
+    hover_only = (request.args.get("hover_only", "1") or "1").lower() not in ("0", "false", "no")
+    if scope == "all":
+        flight_index = -1
+        days = _all_flight_days() or [(name, date)]
+    else:
+        days = [(name, date)]
+    return {"columns": columns, "scope": scope, "flight_index": flight_index,
+            "days": days, "dates": [_day_label(sess, d) for sess, d in days],
+            "hover_only": hover_only}, None
+
+
+def _scope_flights(name, params):
+    """
+    [(session, date, track, [(index, flight), ...]), ...] for every day
+    in the scope - all of a day's flights, or just the requested one. A
+    day that cannot be read is skipped under scope=all (it has nothing to
+    contribute) but is an error for scope=date.
+    Returns (list, None) or (None, error_response).
+    """
+    out = []
+    for sess, d in params["days"]:
+        track, err = _read_drone_track(sess, d)
+        if err:
+            if params["scope"] == "all":
+                continue
+            return None, err
+        flights = list(enumerate(_detect_flights([(r[0], r[1]) for r in track])))
+        if params["flight_index"] >= 0:
+            if params["flight_index"] >= len(flights):
+                return None, (jsonify({"ok": False, "error": "That flight was not found for this date."}), 400)
+            flights = [flights[params["flight_index"]]]
+        if flights:
+            out.append((sess, d, track, flights))
+    return out, None
+
+
+def _target_param(columns):
+    target = (request.args.get("target") or "self").strip()
+    if target != "self" and target not in columns:
+        return None, (jsonify({"ok": False, "error": "target must be self or one of the chosen columns."}), 400)
+    return target, None
+
+
+def _flight_label(sess, d, idx, f):
+    return {"session": sess, "date": d, "index": idx, "start": f["start"].strftime("%Y-%m-%d %H:%M:%S"),
+            "end": f["end"].strftime("%Y-%m-%d %H:%M:%S")}
+
+
+def _level_correlations(per_flight, columns, target, levels, ground_key):
+    """
+    The cells of a ground-vs-level grid: for each level and column, Pearson
+    r across flights between the column's ground value (its mean in the
+    ground bin) and either its own mean at that level (target "self") or
+    the target column's mean there. per_flight: [{column: {level: mean}}],
+    one entry per flight. n is the number of flights behind each r.
+    """
+    cells = []
+    for lvl in levels:
+        for c in columns:
+            t = c if target == "self" else target
+            xs, ys = [], []
+            for means in per_flight:
+                g = means[c].get(ground_key)
+                v = means[t].get(lvl)
+                if g is not None and v is not None:
+                    xs.append(g)
+                    ys.append(v)
+            r, n = _pearson(xs, ys)
+            cells.append({"level": lvl, "column": c, "r": r, "n": n})
+    return cells
+
+
+@app.route("/offline/session/<name>/merged/<date>/correlation_matrix")
+def offline_merged_correlation_matrix(name, date):
+    """
+    Pairwise Pearson r between every pair of the chosen columns over the
+    readings taken during flights only, each column first averaged per
+    resample_s-second bucket (see CORR_RESAMPLE_SECONDS_ALLOWED).
+    Pairwise-deleted like /correlation: each pair uses the buckets where
+    both columns have a value. scope=all pools every merged day.
+    """
+    params, err = _correlation_request(name, date)
+    if err:
+        return err
+    columns = params["columns"]
+    try:
+        resample_s = int(request.args.get("resample_s", CORR_RESAMPLE_SECONDS_DEFAULT) or CORR_RESAMPLE_SECONDS_DEFAULT)
+    except ValueError:
+        return jsonify({"ok": False, "error": "Invalid resample_s."}), 400
+    if resample_s not in CORR_RESAMPLE_SECONDS_ALLOWED:
+        return jsonify({"ok": False, "error": f"resample_s must be one of {list(CORR_RESAMPLE_SECONDS_ALLOWED)}."}), 400
+    scoped, err = _scope_flights(name, params)
+    if err:
+        return err
+
+    pairs = {}
+    rows_used = 0
+    buckets_used = 0
+    flights_used = 0
+    dates_used = []
+    for sess, d, _track, flights in scoped:
+        sensor_rows, err = _read_sensor_columns(sess, d, columns)
+        if err:
+            if params["scope"] == "all":
+                continue
+            return err
+        windows = [(f["start"], f["end"]) for _i, f in flights]
+        wi = 0
+        buckets = {}   # bucket -> {column: [sum, count]}
+        for ts, vals in sensor_rows:
+            while wi < len(windows) and ts > windows[wi][1]:
+                wi += 1
+            if wi >= len(windows):
+                break
+            if ts < windows[wi][0]:
+                continue
+            rows_used += 1
+            key = int(ts.timestamp() // resample_s) if resample_s > 1 else ts
+            bucket = buckets.setdefault(key, {})
+            for c, v in vals.items():
+                acc = bucket.get(c)
+                if acc is None:
+                    bucket[c] = [v, 1]
+                else:
+                    acc[0] += v
+                    acc[1] += 1
+        buckets_used += len(buckets)
+        for bucket in buckets.values():
+            present = [c for c in columns if c in bucket]
+            means = {c: bucket[c][0] / bucket[c][1] for c in present}
+            for i, a in enumerate(present):
+                va = means[a]
+                for b in present[i:]:
+                    xs, ys = pairs.setdefault((a, b), ([], []))
+                    xs.append(va)
+                    ys.append(means[b])
+        flights_used += len(flights)
+        dates_used.append(_day_label(sess, d))
+
+    matrix = []
+    for i, a in enumerate(columns):
+        for b in columns[i:]:
+            xs, ys = pairs.get((a, b), ([], []))
+            r, n = _pearson(xs, ys)
+            matrix.append({"a": a, "b": b, "r": r, "n": n})
+    return jsonify({"ok": True, "columns": columns, "matrix": matrix, "rows": rows_used,
+                    "buckets": buckets_used, "resample_s": resample_s,
+                    "flights": flights_used, "dates": dates_used, "scope": params["scope"],
+                    "flight_index": params["flight_index"]})
+
+
+@app.route("/offline/session/<name>/merged/<date>/correlation_vertical")
+def offline_merged_correlation_vertical(name, date):
+    """
+    Ground-vs-height correlation grid (see the section comment above): one
+    cell per (hover level, column), r across flights between the column's
+    0 m bin mean and the target's mean at that level. Same binning and
+    hover test as /altitude_profile. Always uses every flight in the scope
+    (one flight is one sample).
+    """
+    params, err = _correlation_request(name, date)
+    if err:
+        return err
+    columns = params["columns"]
+    target, err = _target_param(columns)
+    if err:
+        return err
+    try:
+        bin_size = float(request.args.get("bin_size", ALTITUDE_BIN_SIZE_M))
+    except ValueError:
+        return jsonify({"ok": False, "error": "Invalid bin_size."}), 400
+    if bin_size not in ALTITUDE_BIN_SIZES_ALLOWED:
+        return jsonify({"ok": False, "error": f"bin_size must be one of {sorted(ALTITUDE_BIN_SIZES_ALLOWED)}."}), 400
+    leg = (request.args.get("leg") or "both").lower()
+    if leg not in ("both", "up", "down"):
+        return jsonify({"ok": False, "error": "leg must be both, up or down."}), 400
+    params["flight_index"] = -1
+    scoped, err = _scope_flights(name, params)
+    if err:
+        return err
+
+    per_flight = []
+    flights_seen = []
+    for sess, d, track, flights in scoped:
+        sensor_rows, err = _read_sensor_columns(sess, d, columns)
+        if err:
+            if params["scope"] == "all":
+                continue
+            return err
+        for idx, f in flights:
+            window = _rows_in_window(sensor_rows, f["start"], f["end"])
+            prof = _profile_points_for_flight(track, f, window, columns, params["hover_only"], leg)
+            means = {c: {b["altitude"] + 0.0: b["mean"] for b in _bin_altitude_profile(prof["points"][c], bin_size)}
+                     for c in columns}
+            if any(means[c] for c in columns):
+                per_flight.append(means)
+                flights_seen.append(_flight_label(sess, d, idx, f))
+
+    levels = sorted({lvl for means in per_flight for c in columns for lvl in means[c]})
+    cells = _level_correlations(per_flight, columns, target, levels, 0.0)
+    return jsonify({"ok": True, "columns": columns, "target": target, "levels": levels, "cells": cells,
+                    "flights": flights_seen, "bin_size": bin_size, "hover_only": params["hover_only"],
+                    "leg": leg, "scope": params["scope"], "dates": params["dates"], "ground_level": 0.0})
+
+
+@app.route("/offline/session/<name>/merged/<date>/correlation_horizontal")
+def offline_merged_correlation_horizontal(name, date):
+    """
+    Station-vs-distance correlation grid along the linear route: one cell
+    per (distance bin, column), r across flights between the column's
+    mean at the launch-area hover (0 m bin) and the target's mean at that
+    distance. Same route detection and binning as /transect; flights
+    without a route are left out and counted.
+    """
+    params, err = _correlation_request(name, date)
+    if err:
+        return err
+    columns = params["columns"]
+    target, err = _target_param(columns)
+    if err:
+        return err
+    try:
+        bin_size = float(request.args.get("bin_size", TRANSECT_BIN_SIZE_M))
+    except ValueError:
+        return jsonify({"ok": False, "error": "Invalid bin_size."}), 400
+    if bin_size not in TRANSECT_BIN_SIZES_ALLOWED:
+        return jsonify({"ok": False, "error": f"bin_size must be one of {sorted(TRANSECT_BIN_SIZES_ALLOWED)}."}), 400
+    params["flight_index"] = -1
+    scoped, err = _scope_flights(name, params)
+    if err:
+        return err
+
+    per_flight = []
+    flights_seen = []
+    without_route = 0
+    for sess, d, track, flights in scoped:
+        sensor_rows, err = _read_sensor_columns(sess, d, columns)
+        if err:
+            if params["scope"] == "all":
+                continue
+            return err
+        for idx, f in flights:
+            window = _rows_in_window(sensor_rows, f["start"], f["end"])
+            tp = _transect_points_for_flight(track, f, window, columns, params["hover_only"])
+            if tp["transect"] is None:
+                without_route += 1
+                continue
+            means = {c: {b["distance"] + 0.0: b["mean"] for b in _bin_by_distance(tp["points"][c], bin_size)}
+                     for c in columns}
+            if any(means[c] for c in columns):
+                info = _flight_label(sess, d, idx, f)
+                info["far_m"] = tp["far_m"]
+                per_flight.append(means)
+                flights_seen.append(info)
+
+    distances = sorted({dist for means in per_flight for c in columns for dist in means[c]})
+    cells = _level_correlations(per_flight, columns, target, distances, 0.0)
+    return jsonify({"ok": True, "columns": columns, "target": target, "distances": distances, "cells": cells,
+                    "flights": flights_seen, "flights_without_route": without_route, "bin_size": bin_size,
+                    "hover_only": params["hover_only"], "scope": params["scope"], "dates": params["dates"],
+                    "station_distance": 0.0})
 
 
 # ---------- Offline: a Claude-backed assistant scoped to one day's data ----------
