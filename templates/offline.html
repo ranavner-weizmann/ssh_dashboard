@@ -2120,7 +2120,7 @@ async function oflRenderHistogram() {
       return;
     }
 
-    oflHist.setData({ edges: data.edges, counts: data.counts, decimals: 2 });
+    oflHist.setData({ edges: data.edges, counts: data.counts, decimals: 2, label: document.getElementById('explore-hist-select').value });
     statusEl.textContent = data.n ? `${data.n} values across ${data.counts.length} bins.` : 'No numeric values found.';
     statusEl.style.color = 'var(--text-dim)';
   } catch (e) {

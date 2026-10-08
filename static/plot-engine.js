@@ -8,6 +8,146 @@
 
 const PLOT_PADDING = { top: 16, right: 16, bottom: 24, left: 46 };
 
+// ---------- Units, axis groups, ticks, legend ----------
+// The CSVs carry no unit metadata, so the unit is read off the column name
+// (the logger's own naming: *_ug_m3, *_ppb, *_C, *_pct, altitude_agl_m, ...).
+// Unknown columns get no unit and are labelled by name alone. Order matters:
+// the more specific patterns come first.
+const COLUMN_UNIT_RULES = [
+  [/_ug_m3$/i, 'µg/m³'],
+  [/_ppb$/i, 'ppb'],
+  [/_ppm$/i, 'ppm'],
+  [/(^|_)(UV|blue|green|red|IR)_BC(1|2|c)(_smooth)?$|(^|_)BCc_(WB|FF)$|(^|_)delta_C$/i, 'ng/m³'],
+  [/(^|_)(imet_)?temp$|(^|_)hum_temp$/i, '°C ×100'],
+  [/_pct$|_percent$|(^|_)rel_hum$|(^|_)Relative_Humidity$|(^|_)sample_RH$/i, '%'],
+  [/_C$|(^|_)Temperature$|(^|_)LDTemp$|(^|_)TofP$|(^|_)Temp$/i, '°C'],
+  [/_K$/, 'K'],
+  [/_Pa$/, 'Pa'],
+  [/_mbar$|_mb$/i, 'mbar'],
+  [/_torr$/i, 'torr'],
+  [/_hPa$|(^|_)pressure$|(^|_)Pressure$|(^|_)P$/i, 'hPa'],
+  [/_um2_cm3$/i, 'µm²/cm³'],
+  [/_cm3$|(^|_)PartCon$/i, '#/cm³'],
+  [/(^|_)POPS_Flow$/i, 'cm³/s'],
+  [/_lpm$/i, 'L/min'],
+  [/_ms$|(^|_)Wind_Speed$|(^|_)gps_speed$|(^|_)(U|V|W)_Vector$/i, 'm/s'],
+  [/_deg$|(^|_)Wind_Direction$|(^|_)Compass_Heading$|(^|_)Pitch$|(^|_)Roll$|(^|_)yaw$/i, '°'],
+  [/_mm$/i, 'mm'],
+  [/_nm$/i, 'nm'],
+  [/_m$|(^|_)altitude$|(^|_)Altitude$/i, 'm'],
+  [/_mA$/, 'mA'],
+  [/_nA$/, 'nA'],
+  [/_V$/, 'V'],
+  [/_hrs$/i, 'h'],
+  [/_s$/, 's'],
+  [/(^|_)AAE/i, ''],
+  [/(^|_)PartCt$|(^|_)HistSum$|(^|_)b\d+$/i, 'counts'],
+];
+
+function unitOfColumn(column) {
+  const name = String(column || '');
+  for (const [re, unit] of COLUMN_UNIT_RULES) {
+    if (re.test(name)) return unit;
+  }
+  return '';
+}
+
+function labelWithUnit(column) {
+  const unit = unitOfColumn(column);
+  return unit ? `${column} (${unit})` : String(column);
+}
+
+// Round tick positions: 1/2/5 x 10^k steps, at most maxTicks of them, with
+// the number of decimals the step needs.
+function niceTicks(min, max, maxTicks) {
+  const range = max - min;
+  if (!(range > 0)) return { ticks: [min], decimals: 1 };
+  const rawStep = range / Math.max(1, maxTicks || 5);
+  const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const norm = rawStep / mag;
+  const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+  const decimals = Math.max(0, -Math.floor(Math.log10(step)));
+  const ticks = [];
+  for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-6; v += step) {
+    ticks.push(Number(v.toFixed(decimals)));
+  }
+  return { ticks, decimals };
+}
+
+function paddedRange(lo, hi, frac) {
+  if (!(hi > lo)) return [lo - 1, hi + 1];
+  const pad = (hi - lo) * (frac === undefined ? 0.08 : frac);
+  return [lo - pad, hi + pad];
+}
+
+// Groups series by unit so every variable is drawn on a real axis: all the
+// series sharing a unit share one axis and one range; each further unit
+// gets its own axis. rangeOf(series) -> [lo, hi] of what that series draws.
+// A group with one series takes that series' colour, so axis labels say
+// which line they belong to; a shared group uses the neutral text colour.
+function axisGroupsFor(seriesList, rangeOf, singleColor) {
+  const groups = [];
+  const byKey = new Map();
+  seriesList.forEach((s, idx) => {
+    const unit = unitOfColumn(s.column);
+    const key = unit || ('col:' + s.column);
+    let g = byKey.get(key);
+    if (!g) {
+      g = { unit, label: unit || s.column, indices: [], lo: Infinity, hi: -Infinity };
+      byKey.set(key, g);
+      groups.push(g);
+    }
+    const [lo, hi] = rangeOf(s);
+    if (lo < g.lo) g.lo = lo;
+    if (hi > g.hi) g.hi = hi;
+    g.indices.push(idx);
+  });
+  groups.forEach((g) => {
+    const [lo, hi] = paddedRange(g.lo, g.hi);
+    g.min = lo; g.max = hi;
+    g.color = g.indices.length === 1
+      ? (seriesList.length === 1 ? singleColor : (seriesList[g.indices[0]].color || singleColor))
+      : getCssVar('--text-dim');
+    g.indices.forEach((i) => { seriesList[i]._group = g; });
+  });
+  return groups;
+}
+
+// A legend box inside the plot: colour swatch + "column (unit)" per entry,
+// on a translucent panel so it stays readable over the data. Returns the
+// box height so callers can keep it clear of the first axis labels.
+function drawLegend(ctx, entries, x, y, maxWidth) {
+  if (!entries.length) return 0;
+  const font = '11px ' + getCssVar('--sans');
+  ctx.save();
+  ctx.font = font;
+  const lineH = 15;
+  const sw = 10;
+  let w = 0;
+  entries.forEach((e) => { w = Math.max(w, ctx.measureText(e.label).width); });
+  const boxW = Math.min(maxWidth || Infinity, w + sw + 22);
+  const boxH = entries.length * lineH + 8;
+  ctx.fillStyle = hexToRgba(getCssVar('--panel') || '#ffffff', 0.85);
+  ctx.strokeStyle = getCssVar('--panel-border');
+  ctx.lineWidth = 1;
+  ctx.fillRect(x, y, boxW, boxH);
+  ctx.strokeRect(x + 0.5, y + 0.5, boxW - 1, boxH - 1);
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  entries.forEach((e, i) => {
+    const cy = y + 4 + lineH * i + lineH / 2;
+    ctx.fillStyle = e.color;
+    ctx.fillRect(x + 7, cy - sw / 2, sw, sw);
+    ctx.fillStyle = getCssVar('--text');
+    let label = e.label;
+    const avail = boxW - sw - 22;
+    while (label.length > 4 && ctx.measureText(label).width > avail) label = label.slice(0, -2) + '…';
+    ctx.fillText(label, x + 7 + sw + 6, cy);
+  });
+  ctx.restore();
+  return boxH;
+}
+
 
 function plotTimeOnly(ts) {
   // "2026-07-06 15:15:11" -> "15:15:11"
@@ -159,6 +299,12 @@ function nearestPointByTime(points, targetMs) {
 // Returns {tMin, tMax, fullTMin, fullTMax} - the window actually drawn
 // plus the underlying data's full extent - so the caller's hover
 // handler and zoom/pan math don't have to recompute either.
+// Time-series overlay: every series on a real axis. Series sharing a unit
+// share one axis; the first unit's axis is on the left, each further unit
+// gets its own axis on the right (46 px each). A legend names each line
+// with its unit so an exported image stands on its own.
+const EXTRA_AXIS_W = 50;
+
 function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
   const { ctx, width, height } = getCanvasContext(canvas);
   ctx.clearRect(0, 0, width, height);
@@ -183,14 +329,9 @@ function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
   const tMin = viewWindow ? viewWindow.min : fullTMin;
   const tMax = viewWindow ? viewWindow.max : fullTMax;
 
-  const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
-  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
-  const xForMs = (ms) => PLOT_PADDING.left + ((ms - tMin) / (tMax - tMin)) * plotW;
-
   // Only points inside the current window count for drawing and for
-  // auto-scaling the y-axis - a series with no data in a narrow zoomed
-  // window just doesn't draw anything, rather than stretching a
-  // flat/misleading line across it.
+  // auto-scaling the axes - a series with no data in a narrow zoomed
+  // window just doesn't draw anything.
   const nonEmpty = withPoints
     .map((s) => ({ ...s, visible: s.points.filter((p) => p.ms >= tMin && p.ms <= tMax) }))
     .filter((s) => s.visible.length > 0);
@@ -205,42 +346,56 @@ function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
   }
 
   const single = nonEmpty.length === 1;
-
-  nonEmpty.forEach((s) => {
+  const accent = getCssVar('--accent');
+  const groups = axisGroupsFor(nonEmpty, (s) => {
     const values = s.visible.map((p) => p.v);
-    let minV = Math.min(...values), maxV = Math.max(...values);
-    if (minV === maxV) { minV -= 1; maxV += 1; } else {
-      const pad = (maxV - minV) * 0.1;
-      minV -= pad; maxV += pad;
+    return [Math.min(...values), Math.max(...values)];
+  }, accent);
+
+  const rightPad = PLOT_PADDING.right + Math.max(0, groups.length - 1) * EXTRA_AXIS_W;
+  const plotW = width - PLOT_PADDING.left - rightPad;
+  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+  const xForMs = (ms) => PLOT_PADDING.left + ((ms - tMin) / (tMax - tMin)) * plotW;
+  groups.forEach((g) => { g.yFor = (v) => PLOT_PADDING.top + plotH - ((v - g.min) / (g.max - g.min)) * plotH; });
+  nonEmpty.forEach((s) => { s._yForValue = s._group.yFor; });
+
+  // Gridlines follow the first axis; every axis gets its own tick labels.
+  ctx.font = '11px ' + getCssVar('--mono');
+  ctx.textBaseline = 'middle';
+  groups.forEach((g, gi) => {
+    const { ticks, decimals } = niceTicks(g.min, g.max, 5);
+    const dec = Math.max(decimals, gi === 0 && single ? (nonEmpty[0].decimals ?? 0) : 0);
+    ticks.forEach((v, ti) => {
+      const y = Math.round(g.yFor(v)) + 0.5;
+      if (gi === 0) {
+        ctx.strokeStyle = getCssVar('--panel-border');
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(PLOT_PADDING.left, y);
+        ctx.lineTo(PLOT_PADDING.left + plotW, y);
+        ctx.stroke();
+      }
+      ctx.fillStyle = g.color;
+      const text = v.toFixed(Math.min(dec, 4)) + (ti === ticks.length - 1 && g.unit ? ' ' + g.unit : '');
+      if (gi === 0) {
+        ctx.textAlign = 'right';
+        ctx.fillText(text, PLOT_PADDING.left - 8, y - 0.5);
+      } else {
+        ctx.textAlign = 'left';
+        ctx.fillText(text, PLOT_PADDING.left + plotW + 8 + (gi - 1) * EXTRA_AXIS_W, y - 0.5);
+      }
+    });
+    if (gi > 0) {
+      const ax = Math.round(PLOT_PADDING.left + plotW + (gi - 1) * EXTRA_AXIS_W) + 0.5;
+      ctx.strokeStyle = g.color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(ax, PLOT_PADDING.top);
+      ctx.lineTo(ax, PLOT_PADDING.top + plotH);
+      ctx.stroke();
     }
-    s._minV = minV; s._maxV = maxV;
-    s._yForValue = (v) => PLOT_PADDING.top + plotH - ((v - minV) / (maxV - minV)) * plotH;
   });
 
-  // Gridlines - real value labels for a single series, relative % for
-  // an overlay (each series' own 0-100%, never a fabricated shared unit).
-  const gridLines = 4;
-  ctx.strokeStyle = getCssVar('--panel-border');
-  ctx.lineWidth = 1;
-  ctx.fillStyle = getCssVar('--text-dim');
-  ctx.font = '11px ' + getCssVar('--mono');
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  for (let i = 0; i <= gridLines; i++) {
-    const y = Math.round(PLOT_PADDING.top + (plotH * i) / gridLines) + 0.5;
-    ctx.beginPath();
-    ctx.moveTo(PLOT_PADDING.left, y);
-    ctx.lineTo(width - PLOT_PADDING.right, y);
-    ctx.stroke();
-
-    const label = single
-      ? (nonEmpty[0]._minV + ((nonEmpty[0]._maxV - nonEmpty[0]._minV) * (gridLines - i)) / gridLines).toFixed(nonEmpty[0].decimals ?? 1)
-      : Math.round(((gridLines - i) / gridLines) * 100) + '%';
-    ctx.fillText(label, PLOT_PADDING.left - 8, y - 0.5);
-  }
-
-  // Area fill only makes sense for one series - overlapping washes from
-  // several would just muddy the plot.
   if (single) {
     const s = nonEmpty[0];
     ctx.beginPath();
@@ -249,13 +404,12 @@ function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
     ctx.lineTo(xForMs(s.visible[s.visible.length - 1].ms), PLOT_PADDING.top + plotH);
     ctx.lineTo(xForMs(s.visible[0].ms), PLOT_PADDING.top + plotH);
     ctx.closePath();
-    ctx.fillStyle = hexToRgba(getCssVar('--accent'), 0.1);
+    ctx.fillStyle = hexToRgba(accent, 0.1);
     ctx.fill();
   }
 
   nonEmpty.forEach((s) => {
-    const color = single ? getCssVar('--accent') : s.color;
-
+    const color = single ? accent : s.color;
     ctx.beginPath();
     s.visible.forEach((p, i) => {
       const x = xForMs(p.ms), y = s._yForValue(p.v);
@@ -269,14 +423,8 @@ function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
 
     const last = s.visible[s.visible.length - 1];
     const lastX = xForMs(last.ms), lastY = s._yForValue(last.v);
-    ctx.beginPath();
-    ctx.arc(lastX, lastY, 6, 0, Math.PI * 2);
-    ctx.fillStyle = getCssVar('--panel');
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(lastX, lastY, 6, 0, Math.PI * 2); ctx.fillStyle = getCssVar('--panel'); ctx.fill();
+    ctx.beginPath(); ctx.arc(lastX, lastY, 4, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
   });
 
   ctx.fillStyle = getCssVar('--text-dim');
@@ -285,7 +433,12 @@ function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
   ctx.textAlign = 'left';
   ctx.fillText(formatMsAsTime(tMin), PLOT_PADDING.left, height - 6);
   ctx.textAlign = 'right';
-  ctx.fillText(formatMsAsTime(tMax), width - PLOT_PADDING.right, height - 6);
+  ctx.fillText(formatMsAsTime(tMax), PLOT_PADDING.left + plotW, height - 6);
+  ctx.textAlign = 'center';
+  ctx.fillText('time →', PLOT_PADDING.left + plotW / 2, height - 6);
+
+  drawLegend(ctx, nonEmpty.map((s) => ({ color: single ? accent : s.color, label: labelWithUnit(s.column) })),
+    PLOT_PADDING.left + 8, PLOT_PADDING.top + 6, plotW * 0.6);
 
   if (hoverMs !== null) {
     const hx = xForMs(hoverMs);
@@ -295,20 +448,13 @@ function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
     ctx.strokeStyle = getCssVar('--text-dim');
     ctx.lineWidth = 1;
     ctx.stroke();
-
     nonEmpty.forEach((s) => {
-      const color = single ? getCssVar('--accent') : s.color;
+      const color = single ? accent : s.color;
       const p = nearestPointByTime(s.visible, hoverMs);
       if (!p) return;
       const hy = s._yForValue(p.v);
-      ctx.beginPath();
-      ctx.arc(xForMs(p.ms), hy, 4, 0, Math.PI * 2);
-      ctx.fillStyle = getCssVar('--panel');
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(xForMs(p.ms), hy, 3, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
+      ctx.beginPath(); ctx.arc(xForMs(p.ms), hy, 4, 0, Math.PI * 2); ctx.fillStyle = getCssVar('--panel'); ctx.fill();
+      ctx.beginPath(); ctx.arc(xForMs(p.ms), hy, 3, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
     });
   }
 
@@ -539,7 +685,7 @@ function drawEmptyPlotMessage(ctx, width, height, message) {
 
 // edges: [lo, ..., hi] (bin_count + 1 values), counts: [bin_count values].
 // hoverIndex (or null) highlights one bar, for the hover tooltip below.
-function drawHistogram(canvas, edges, counts, decimals, hoverIndex) {
+function drawHistogram(canvas, edges, counts, decimals, hoverIndex, label) {
   const { ctx, width, height } = getCanvasContext(canvas);
   ctx.clearRect(0, 0, width, height);
 
@@ -554,23 +700,23 @@ function drawHistogram(canvas, edges, counts, decimals, hoverIndex) {
   const xForEdge = (i) => PLOT_PADDING.left + (i / counts.length) * plotW;
   const yForCount = (c) => PLOT_PADDING.top + plotH - (maxCount ? (c / maxCount) * plotH : 0);
 
-  const gridLines = 4;
   ctx.strokeStyle = getCssVar('--panel-border');
   ctx.lineWidth = 1;
   ctx.fillStyle = getCssVar('--text-dim');
   ctx.font = '11px ' + getCssVar('--mono');
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  for (let i = 0; i <= gridLines; i++) {
-    const y = Math.round(PLOT_PADDING.top + (plotH * i) / gridLines) + 0.5;
+  const { ticks } = niceTicks(0, maxCount || 1, 5);
+  ticks.forEach((c, i) => {
+    const y = Math.round(yForCount(c)) + 0.5;
     ctx.beginPath();
     ctx.moveTo(PLOT_PADDING.left, y);
     ctx.lineTo(width - PLOT_PADDING.right, y);
     ctx.stroke();
-    ctx.fillText(Math.round((maxCount * (gridLines - i)) / gridLines), PLOT_PADDING.left - 8, y - 0.5);
-  }
+    ctx.fillText(String(Math.round(c)) + (i === ticks.length - 1 ? ' n' : ''), PLOT_PADDING.left - 8, y - 0.5);
+  });
 
-  const barGap = 2; // a visible surface gap between adjacent bars, not a solid block
+  const barGap = 2;
   const accent = getCssVar('--accent');
   counts.forEach((count, i) => {
     const x0 = xForEdge(i) + barGap / 2;
@@ -593,6 +739,16 @@ function drawHistogram(canvas, edges, counts, decimals, hoverIndex) {
   ctx.fillText(edges[0].toFixed(decimals ?? 1), PLOT_PADDING.left, height - 6);
   ctx.textAlign = 'right';
   ctx.fillText(edges[edges.length - 1].toFixed(decimals ?? 1), width - PLOT_PADDING.right, height - 6);
+  if (label) {
+    ctx.textAlign = 'center';
+    ctx.fillText(`${labelWithUnit(label)} →`, PLOT_PADDING.left + plotW / 2, height - 6);
+  }
+  ctx.save();
+  ctx.translate(12, PLOT_PADDING.top + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.fillText('count →', 0, 0);
+  ctx.restore();
 }
 
 function createHistogramController(canvasId, tooltipId) {
@@ -602,6 +758,7 @@ function createHistogramController(canvasId, tooltipId) {
   let edges = [];
   let counts = [];
   let decimals = 1;
+  let label = '';
   let emptyMessage = 'Pick a variable to see its distribution';
   let hoverIndex = null;
 
@@ -612,7 +769,7 @@ function createHistogramController(canvasId, tooltipId) {
       drawEmptyPlotMessage(ctx, width, height, emptyMessage);
       return;
     }
-    drawHistogram(canvas, edges, counts, decimals, hoverIndex);
+    drawHistogram(canvas, edges, counts, decimals, hoverIndex, label);
   }
 
   canvas.addEventListener('mousemove', (e) => {
@@ -645,6 +802,7 @@ function createHistogramController(canvasId, tooltipId) {
       edges = data.edges || [];
       counts = data.counts || [];
       decimals = data.decimals ?? 1;
+      label = data.label || '';
       hoverIndex = null;
       draw();
     },
@@ -681,22 +839,21 @@ function drawScatter(canvas, points, regression, xLabel, yLabel, decimals, hover
   const xFor = (x) => PLOT_PADDING.left + ((x - minX) / (maxX - minX)) * plotW;
   const yFor = (y) => PLOT_PADDING.top + plotH - ((y - minY) / (maxY - minY)) * plotH;
 
-  const gridLines = 4;
   ctx.strokeStyle = getCssVar('--panel-border');
   ctx.lineWidth = 1;
   ctx.fillStyle = getCssVar('--text-dim');
   ctx.font = '11px ' + getCssVar('--mono');
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  for (let i = 0; i <= gridLines; i++) {
-    const y = Math.round(PLOT_PADDING.top + (plotH * i) / gridLines) + 0.5;
+  const yt = niceTicks(minY, maxY, 5);
+  yt.ticks.forEach((v) => {
+    const y = Math.round(yFor(v)) + 0.5;
     ctx.beginPath();
     ctx.moveTo(PLOT_PADDING.left, y);
     ctx.lineTo(width - PLOT_PADDING.right, y);
     ctx.stroke();
-    const label = minY + ((maxY - minY) * (gridLines - i)) / gridLines;
-    ctx.fillText(label.toFixed(decimals ?? 1), PLOT_PADDING.left - 8, y - 0.5);
-  }
+    ctx.fillText(v.toFixed(Math.min(yt.decimals, 4)), PLOT_PADDING.left - 8, y - 0.5);
+  });
 
   const accent = getCssVar('--accent');
   points.forEach((p) => {
@@ -740,14 +897,14 @@ function drawScatter(canvas, points, regression, xLabel, yLabel, decimals, hover
   ctx.textAlign = 'right';
   ctx.fillText(maxX.toFixed(decimals ?? 1), width - PLOT_PADDING.right, height - 6);
   ctx.textAlign = 'center';
-  ctx.fillText(`${xLabel} →`, PLOT_PADDING.left + plotW / 2, height - 6);
+  ctx.fillText(`${labelWithUnit(xLabel)} →`, PLOT_PADDING.left + plotW / 2, height - 6);
 
   ctx.save();
   ctx.translate(12, PLOT_PADDING.top + plotH / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`${yLabel} →`, 0, 0);
+  ctx.fillText(`${labelWithUnit(yLabel)} →`, 0, 0);
   ctx.restore();
 }
 
@@ -867,6 +1024,12 @@ function profileAltitudeAxis(series) {
   return { minY, maxY, step };
 }
 
+// Vertical profile: altitude (m) is the shared vertical axis on fixed 20 m
+// ticks; the instrument values run horizontally on real axes - one per
+// unit, the first along the bottom, the next along the top, any further
+// ones as extra rows above. A legend names each series with its unit.
+const PROFILE_TOP_AXIS_H = 18;
+
 function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
   const { ctx, width, height } = getCanvasContext(canvas);
   ctx.clearRect(0, 0, width, height);
@@ -877,24 +1040,23 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
     return;
   }
 
+  const single = withBins.length === 1;
+  const accent = getCssVar('--accent');
+  const groups = axisGroupsFor(withBins, (s) => [
+    Math.min(...s.bins.map((b) => b.mean - b.std)),
+    Math.max(...s.bins.map((b) => b.mean + b.std)),
+  ], accent);
+
+  const topPad = PLOT_PADDING.top + Math.max(0, groups.length - 1) * PROFILE_TOP_AXIS_H;
   const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
-  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+  const plotH = height - topPad - PLOT_PADDING.bottom;
 
   const { minY, maxY, step } = profileAltitudeAxis(withBins);
-  const yFor = (y) => PLOT_PADDING.top + plotH - ((y - minY) / (maxY - minY)) * plotH;
+  const yFor = (y) => topPad + plotH - ((y - minY) / (maxY - minY)) * plotH;
+  groups.forEach((g) => { g.xFor = (x) => PLOT_PADDING.left + ((x - g.min) / (g.max - g.min)) * plotW; });
+  withBins.forEach((s) => { s._xFor = s._group.xFor; s._minX = s._group.min; s._maxX = s._group.max; });
 
-  const single = withBins.length === 1;
-
-  withBins.forEach((s) => {
-    let minX = Math.min(...s.bins.map((b) => b.mean - b.std));
-    let maxX = Math.max(...s.bins.map((b) => b.mean + b.std));
-    if (minX === maxX) { minX -= 1; maxX += 1; } else { const pad = (maxX - minX) * 0.08; minX -= pad; maxX += pad; }
-    s._minX = minX; s._maxX = maxX;
-    s._xFor = (x) => PLOT_PADDING.left + ((x - minX) / (maxX - minX)) * plotW;
-  });
-
-  // Altitude gridlines at every tick (20 m by default) - the shared axis,
-  // so always real metres (never a fabricated shared unit across series).
+  // altitude gridlines + labels (m)
   ctx.strokeStyle = getCssVar('--panel-border');
   ctx.lineWidth = 1;
   ctx.fillStyle = getCssVar('--text-dim');
@@ -910,15 +1072,35 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
     ctx.fillText(String(Math.round(v)), PLOT_PADDING.left - 8, y - 0.5);
   }
 
-  withBins.forEach((s) => {
-    const color = single ? getCssVar('--accent') : s.color;
+  // value axes: group 0 along the bottom, others along the top
+  ctx.textBaseline = 'alphabetic';
+  groups.forEach((g, gi) => {
+    const { ticks, decimals: dec } = niceTicks(g.min, g.max, plotW < 300 ? 3 : 5);
+    ctx.fillStyle = g.color;
+    const yText = gi === 0 ? height - 6 : topPad - 6 - (gi - 1) * PROFILE_TOP_AXIS_H;
+    ticks.forEach((v, ti) => {
+      const x = g.xFor(v);
+      ctx.textAlign = ti === 0 ? 'left' : ti === ticks.length - 1 ? 'right' : 'center';
+      const tx = ti === 0 ? Math.max(x, PLOT_PADDING.left) : ti === ticks.length - 1 ? Math.min(x, width - PLOT_PADDING.right) : x;
+      ctx.fillText(v.toFixed(Math.min(dec, 4)), tx, yText);
+      ctx.beginPath();
+      const y0 = gi === 0 ? topPad + plotH : topPad;
+      ctx.moveTo(Math.round(x) + 0.5, y0);
+      ctx.lineTo(Math.round(x) + 0.5, y0 + (gi === 0 ? 4 : -4));
+      ctx.strokeStyle = g.color;
+      ctx.stroke();
+    });
+    if (g.unit) {
+      ctx.textAlign = 'center';
+      const mid = PLOT_PADDING.left + plotW / 2;
+      // the unit sits between the first and last tick labels; skip it if
+      // the chart is too narrow for three labels on one line
+      if (plotW > 200) ctx.fillText(g.unit, mid, yText);
+    }
+  });
 
-    // Shaded mean±std band - one polygon tracing (mean-std, altitude) up
-    // through every bin, then back down through (mean+std, altitude).
-    // Kept even when several series overlap (unlike drawOverlayPlot,
-    // which only fills for a single series) since the band is the whole
-    // point of this chart, not just emphasis - each series' own color at
-    // low alpha keeps overlapping bands distinguishable.
+  withBins.forEach((s) => {
+    const color = single ? accent : s.color;
     ctx.beginPath();
     s.bins.forEach((b, i) => {
       const x = s._xFor(b.mean - b.std), y = yFor(b.altitude);
@@ -931,7 +1113,6 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
     ctx.fillStyle = hexToRgba(color, single ? 0.15 : 0.12);
     ctx.fill();
 
-    // Mean line.
     ctx.beginPath();
     s.bins.forEach((b, i) => {
       const x = s._xFor(b.mean), y = yFor(b.altitude);
@@ -942,9 +1123,6 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
     ctx.lineJoin = 'round';
     ctx.stroke();
 
-    // One dot per bin, on the mean line - hover targets, same idea as
-    // drawScatter's per-point dots but one per bin instead of one per
-    // raw reading.
     s.bins.forEach((b) => {
       ctx.beginPath();
       ctx.arc(s._xFor(b.mean), yFor(b.altitude), 3, 0, Math.PI * 2);
@@ -953,11 +1131,6 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
     });
   });
 
-  // Hover crosshair - a horizontal line at the hovered altitude, with
-  // each series' nearest bin marked. Mirrors drawOverlayPlot's vertical
-  // hover line, just rotated: there time is the shared axis and the
-  // crosshair is vertical; here altitude is the shared axis and it's
-  // horizontal.
   if (hoverAltitude !== null) {
     const hy = yFor(hoverAltitude);
     ctx.beginPath();
@@ -966,68 +1139,31 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
     ctx.strokeStyle = getCssVar('--text-dim');
     ctx.lineWidth = 1;
     ctx.stroke();
-
     withBins.forEach((s) => {
-      const color = single ? getCssVar('--accent') : s.color;
+      const color = single ? accent : s.color;
       let nearest = s.bins[0], bestDist = Infinity;
       s.bins.forEach((b) => {
         const d = Math.abs(b.altitude - hoverAltitude);
         if (d < bestDist) { bestDist = d; nearest = b; }
       });
       const x = s._xFor(nearest.mean), y = yFor(nearest.altitude);
-      ctx.beginPath();
-      ctx.arc(x, y, 5, 0, Math.PI * 2);
-      ctx.fillStyle = getCssVar('--panel');
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(x, y, 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fillStyle = getCssVar('--panel'); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
     });
   }
 
   ctx.fillStyle = getCssVar('--text-dim');
   ctx.font = '11px ' + getCssVar('--mono');
-  ctx.textBaseline = 'alphabetic';
-  let minLabel, maxLabel, centerLabel;
-  if (single) {
-    minLabel = withBins[0]._minX.toFixed(decimals ?? 1);
-    maxLabel = withBins[0]._maxX.toFixed(decimals ?? 1);
-    centerLabel = `${withBins[0].column} (mean ± std) →`;
-  } else {
-    minLabel = '0%';
-    maxLabel = '100%';
-    centerLabel = 'mean ± std, per variable →';
-  }
-  ctx.textAlign = 'left';
-  const minLabelW = ctx.measureText(minLabel).width;
-  const maxLabelW = ctx.measureText(maxLabel).width;
-  const centerLabelW = ctx.measureText(centerLabel).width;
-
-  ctx.fillText(minLabel, PLOT_PADDING.left, height - 6);
-  ctx.textAlign = 'right';
-  ctx.fillText(maxLabel, width - PLOT_PADDING.right, height - 6);
-
-  // The narrow small-multiple charts this feeds (one per flight, several
-  // per row - see the altitude-profile panel) don't have room for all
-  // three bottom labels at once - skip the center one rather than let it
-  // overlap min/max, since the active variables are already named in the
-  // legend above every chart on this page.
-  const centerX = PLOT_PADDING.left + plotW / 2;
-  const gap = 8;
-  if (centerX - centerLabelW / 2 > PLOT_PADDING.left + minLabelW + gap &&
-      centerX + centerLabelW / 2 < width - PLOT_PADDING.right - maxLabelW - gap) {
-    ctx.textAlign = 'center';
-    ctx.fillText(centerLabel, centerX, height - 6);
-  }
-
   ctx.save();
-  ctx.translate(12, PLOT_PADDING.top + plotH / 2);
+  ctx.translate(12, topPad + plotH / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
   ctx.fillText(`${yLabel} (m) →`, 0, 0);
   ctx.restore();
+
+  drawLegend(ctx, withBins.map((s) => ({ color: single ? accent : s.color, label: labelWithUnit(s.column) + ' mean ± std' })),
+    PLOT_PADDING.left + 6, topPad + 6, plotW - 12);
 }
 
 function createProfileController(canvasId, tooltipId) {
@@ -1057,14 +1193,16 @@ function createProfileController(canvasId, tooltipId) {
     const my = e.clientY - rect.top;
 
     const { minY, maxY } = profileAltitudeAxis(withBins);
-    const plotH = rect.height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+    const nUnits = new Set(withBins.map((s) => unitOfColumn(s.column) || ('col:' + s.column))).size;
+    const topPad = PLOT_PADDING.top + Math.max(0, nUnits - 1) * PROFILE_TOP_AXIS_H;
+    const plotH = rect.height - topPad - PLOT_PADDING.bottom;
 
-    if (my < PLOT_PADDING.top - 10 || my > PLOT_PADDING.top + plotH + 10) {
+    if (my < topPad - 10 || my > topPad + plotH + 10) {
       if (hoverAltitude !== null) { hoverAltitude = null; tooltip.style.display = 'none'; draw(); }
       return;
     }
 
-    const rawAltitude = minY + ((PLOT_PADDING.top + plotH - my) / plotH) * (maxY - minY);
+    const rawAltitude = minY + ((topPad + plotH - my) / plotH) * (maxY - minY);
     hoverAltitude = Math.max(minY, Math.min(maxY, rawAltitude));
     draw();
 
@@ -1131,7 +1269,15 @@ function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax
     return;
   }
 
-  const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
+  const single = withBins.length === 1;
+  const accent = getCssVar('--accent');
+  const groups = axisGroupsFor(withBins, (s) => [
+    Math.min(...s.bins.map((b) => b.mean - b.std)),
+    Math.max(...s.bins.map((b) => b.mean + b.std)),
+  ], accent);
+
+  const rightPad = PLOT_PADDING.right + Math.max(0, groups.length - 1) * EXTRA_AXIS_W;
+  const plotW = width - PLOT_PADDING.left - rightPad;
   const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
 
   let minX = 0;
@@ -1139,38 +1285,54 @@ function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax
   withBins.forEach((s) => s.bins.forEach((b) => { if (b.to > maxX) maxX = b.to; }));
   if (maxX <= minX) maxX = minX + 1;
   const xFor = (x) => PLOT_PADDING.left + ((x - minX) / (maxX - minX)) * plotW;
+  groups.forEach((g) => { g.yFor = (v) => PLOT_PADDING.top + plotH - ((v - g.min) / (g.max - g.min)) * plotH; });
+  withBins.forEach((s) => { s._yFor = s._group.yFor; s._minY = s._group.min; s._maxY = s._group.max; });
 
-  const single = withBins.length === 1;
-  withBins.forEach((s) => {
-    let minY = Math.min(...s.bins.map((b) => b.mean - b.std));
-    let maxY = Math.max(...s.bins.map((b) => b.mean + b.std));
-    if (minY === maxY) { minY -= 1; maxY += 1; } else { const pad = (maxY - minY) * 0.08; minY -= pad; maxY += pad; }
-    s._minY = minY; s._maxY = maxY;
-    s._yFor = (y) => PLOT_PADDING.top + plotH - ((y - minY) / (maxY - minY)) * plotH;
-  });
-
-  // Distance gridlines (shared axis, real metres).
-  const gridLines = 5;
+  // distance gridlines (shared axis, real metres)
+  const xt = niceTicks(minX, maxX, 6);
   ctx.strokeStyle = getCssVar('--panel-border');
   ctx.lineWidth = 1;
   ctx.fillStyle = getCssVar('--text-dim');
   ctx.font = '11px ' + getCssVar('--mono');
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
-  for (let i = 0; i <= gridLines; i++) {
-    const xv = minX + ((maxX - minX) * i) / gridLines;
+  xt.ticks.forEach((xv) => {
     const x = Math.round(xFor(xv)) + 0.5;
     ctx.beginPath();
     ctx.moveTo(x, PLOT_PADDING.top);
     ctx.lineTo(x, PLOT_PADDING.top + plotH);
     ctx.stroke();
     ctx.fillText(xv.toFixed(0), x, height - 6);
-  }
+  });
+
+  // value axes: group 0 on the left, others on the right
+  ctx.textBaseline = 'middle';
+  groups.forEach((g, gi) => {
+    const { ticks, decimals: dec } = niceTicks(g.min, g.max, 5);
+    ctx.fillStyle = g.color;
+    ticks.forEach((v, ti) => {
+      const y = Math.round(g.yFor(v)) + 0.5;
+      const text = v.toFixed(Math.min(dec, 4)) + (ti === ticks.length - 1 && g.unit ? ' ' + g.unit : '');
+      if (gi === 0) {
+        ctx.textAlign = 'right';
+        ctx.fillText(text, PLOT_PADDING.left - 8, y - 0.5);
+      } else {
+        ctx.textAlign = 'left';
+        ctx.fillText(text, PLOT_PADDING.left + plotW + 8 + (gi - 1) * EXTRA_AXIS_W, y - 0.5);
+      }
+    });
+    if (gi > 0) {
+      const ax = Math.round(PLOT_PADDING.left + plotW + (gi - 1) * EXTRA_AXIS_W) + 0.5;
+      ctx.strokeStyle = g.color;
+      ctx.beginPath();
+      ctx.moveTo(ax, PLOT_PADDING.top);
+      ctx.lineTo(ax, PLOT_PADDING.top + plotH);
+      ctx.stroke();
+    }
+  });
 
   withBins.forEach((s) => {
-    const color = single ? getCssVar('--accent') : s.color;
-
-    // mean±std band
+    const color = single ? accent : s.color;
     ctx.beginPath();
     s.bins.forEach((b, i) => {
       const x = xFor(b.distance), y = s._yFor(b.mean - b.std);
@@ -1183,7 +1345,6 @@ function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax
     ctx.fillStyle = hexToRgba(color, single ? 0.15 : 0.12);
     ctx.fill();
 
-    // mean line
     ctx.beginPath();
     s.bins.forEach((b, i) => {
       const x = xFor(b.distance), y = s._yFor(b.mean);
@@ -1211,7 +1372,7 @@ function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax
     ctx.lineWidth = 1;
     ctx.stroke();
     withBins.forEach((s) => {
-      const color = single ? getCssVar('--accent') : s.color;
+      const color = single ? accent : s.color;
       let nearest = s.bins[0], bestDist = Infinity;
       s.bins.forEach((b) => {
         const d = Math.abs(b.distance - hoverDistance);
@@ -1223,27 +1384,14 @@ function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax
     });
   }
 
-  // y labels: real range for one series, 0-100% for several
   ctx.fillStyle = getCssVar('--text-dim');
   ctx.font = '11px ' + getCssVar('--mono');
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  const yMinLabel = single ? withBins[0]._minY.toFixed(decimals ?? 1) : '0%';
-  const yMaxLabel = single ? withBins[0]._maxY.toFixed(decimals ?? 1) : '100%';
-  ctx.fillText(yMaxLabel, PLOT_PADDING.left - 8, PLOT_PADDING.top);
-  ctx.fillText(yMinLabel, PLOT_PADDING.left - 8, PLOT_PADDING.top + plotH);
-
-  ctx.save();
-  ctx.translate(12, PLOT_PADDING.top + plotH / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
-  ctx.fillText(single ? `${withBins[0].column} (mean ± std)` : 'mean ± std, per variable', 0, 0);
-  ctx.restore();
-
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
   ctx.fillText(`← ${xLabel} →`, PLOT_PADDING.left + plotW / 2, height - 18);
+
+  drawLegend(ctx, withBins.map((s) => ({ color: single ? accent : s.color, label: labelWithUnit(s.column) + ' mean ± std' })),
+    PLOT_PADDING.left + 8, PLOT_PADDING.top + 6, plotW * 0.6);
 }
 
 function createTransectController(canvasId, tooltipId) {
@@ -1274,7 +1422,8 @@ function createTransectController(canvasId, tooltipId) {
     let maxX = xMax || 0;
     withBins.forEach((s) => s.bins.forEach((b) => { if (b.to > maxX) maxX = b.to; }));
     if (maxX <= 0) maxX = 1;
-    const plotW = rect.width - PLOT_PADDING.left - PLOT_PADDING.right;
+    const nUnits = new Set(withBins.map((s) => unitOfColumn(s.column) || ('col:' + s.column))).size;
+    const plotW = rect.width - PLOT_PADDING.left - PLOT_PADDING.right - Math.max(0, nUnits - 1) * EXTRA_AXIS_W;
     if (mx < PLOT_PADDING.left - 10 || mx > PLOT_PADDING.left + plotW + 10) {
       if (hoverDistance !== null) { hoverDistance = null; tooltip.style.display = 'none'; draw(); }
       return;

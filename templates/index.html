@@ -3399,7 +3399,7 @@ function plotXY(points, width, height, minV, maxV) {
   return { plotW, plotH, xForIndex, yForValue };
 }
 
-function drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue, emptyMessage) {
+function drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue, emptyMessage, unit) {
   const { ctx, width, height } = getCanvasContext(canvas);
   ctx.clearRect(0, 0, width, height);
 
@@ -3441,7 +3441,7 @@ function drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue, emptyMessag
     ctx.moveTo(PLOT_PADDING.left, y);
     ctx.lineTo(width - PLOT_PADDING.right, y);
     ctx.stroke();
-    ctx.fillText(formatValue(v), PLOT_PADDING.left - 8, y - 0.5);
+    ctx.fillText(formatValue(v) + (i === gridLines && unit ? ' ' + unit : ''), PLOT_PADDING.left - 8, y - 0.5);
   }
 
   // Area fill (accent hue, ~10% opacity wash)
@@ -3532,7 +3532,7 @@ function altitudeAtTime(altPoints, tMs) {
   return Math.abs(best._t - tMs) <= 10000 ? best.v : null;   // nothing within 10 s: no altitude
 }
 
-function drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, formatValue, unit) {
+function drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, formatValue, unit, label) {
   const { ctx, width, height } = getCanvasContext(canvas);
   ctx.clearRect(0, 0, width, height);
   if (!points.length) {
@@ -3628,9 +3628,10 @@ function drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, format
   ctx.fillText(plotTimeOnly(points[0].t), PLOT_PADDING.left, height - 6);
   ctx.textAlign = 'right';
   ctx.fillText(plotTimeOnly(last.t), PLOT_PADDING.left + plotW, height - 6);
-  ctx.textAlign = 'center';
-  ctx.fillStyle = altColor;
-  ctx.fillText('altitude (m) →', PLOT_PADDING.left + plotW / 2, height - 6);
+  drawLegend(ctx, [
+    { color: accent, label: unit ? `${label || 'variable'} (${unit})` : (label || 'variable') },
+    { color: altColor, label: 'drone altitude (m)' },
+  ], PLOT_PADDING.left + 8, PLOT_PADDING.top + 6, plotW * 0.7);
 
   if (hoverIndex !== null && points[hoverIndex]) {
     const hp = points[hoverIndex];
@@ -3804,10 +3805,11 @@ function createPlotController(suffix, defaultSensor) {
 
   function draw() {
     if (overlayOn()) {
-      drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, formatValue, statUnitEl.textContent);
+      drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, formatValue, statUnitEl.textContent,
+        selectEl.options[selectEl.selectedIndex] ? selectEl.options[selectEl.selectedIndex].text : currentSensor);
     } else {
       points.forEach((p) => { delete p._x; });
-      drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue);
+      drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue, undefined, statUnitEl.textContent);
     }
   }
 
