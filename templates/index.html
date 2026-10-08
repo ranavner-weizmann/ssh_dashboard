@@ -930,7 +930,20 @@
     padding: 24px;
     width: 100%;
     max-width: 420px;
+    /* Never taller than the screen: the body scrolls while the title and
+       the action buttons stay visible. Without this a tall modal (the
+       OneDrive backup's destination block plus an opened day list) grew
+       past the viewport and the Continue button could not be reached. */
+    max-height: calc(100vh - 40px);
+    display: flex;
+    flex-direction: column;
   }
+  .modal-body {
+    overflow-y: auto;
+    min-height: 0;
+    flex: 1 1 auto;
+  }
+  .modal-actions { flex: none; }
   .modal-title {
     font-size: 16px;
     font-weight: 600;
@@ -2832,7 +2845,7 @@ async function startBackup(target) {
       }
       destinationHtml = `
         <label>destination in OneDrive</label>
-        <div class="download-target-path" style="margin-top:4px;">${escapeHtml(data.backup_dir)}</div>
+        <div style="margin-top:4px; font-family: var(--mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(data.backup_dir)}">${escapeHtml(data.backup_dir)}</div>
         <div class="hint" style="margin-top:4px;">Copies straight from the Pi into this folder (change it on the OneDrive Backup page). The cloud copy exists once the OneDrive app has finished uploading.</div>
       `;
     } else {
