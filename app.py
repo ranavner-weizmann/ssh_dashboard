@@ -262,6 +262,316 @@ def index():
     )
 
 
+
+# ---------- OneDrive backup: copy downloaded sessions into the user's OneDrive ----------
+# A plain copy of the sessions already downloaded to this computer
+# (DOWNLOADS_ROOT) into a folder of the user's choosing inside their OneDrive
+# folder. Nothing is ever deleted locally, and a session already in OneDrive
+# is brought up to date: files that are new, grew or changed are copied
+# again, unchanged ones skipped - a day's folder keeps gaining runs. The
+# OneDrive location and the chosen subfolder are remembered per computer in
+# USER_DATA_DIR so the same setup works on another laptop. The offline
+# explorer can be pointed at the backup folder (?root=onedrive).
+
+ONEDRIVE_SETTINGS_PATH = os.path.join(USER_DATA_DIR, "onedrive_settings.json")
+ONEDRIVE_FALLBACK_ROOT = r"C:\Users\YRGROUP\OneDrive - weizmann.ac.il"
+
+
+def _onedrive_detected_roots():
+    """OneDrive folders this computer knows about, most likely first."""
+    roots = []
+    for var in ("OneDriveCommercial", "OneDrive", "OneDriveConsumer"):
+        p = os.environ.get(var)
+        if p and os.path.isdir(p) and p not in roots:
+            roots.append(p)
+    home = os.path.expanduser("~")
+    try:
+        for entry in sorted(os.listdir(home)):
+            p = os.path.join(home, entry)
+            if entry.lower().startswith("onedrive") and os.path.isdir(p) and p not in roots:
+                roots.append(p)
+    except OSError:
+        pass
+    if os.path.isdir(ONEDRIVE_FALLBACK_ROOT) and ONEDRIVE_FALLBACK_ROOT not in roots:
+        roots.append(ONEDRIVE_FALLBACK_ROOT)
+    return roots
+
+
+def _onedrive_settings():
+    try:
+        with open(ONEDRIVE_SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_onedrive_settings(data):
+    os.makedirs(USER_DATA_DIR, exist_ok=True)
+    with open(ONEDRIVE_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def _onedrive_root():
+    """The OneDrive folder in use: the saved one if it still exists, else the first detected."""
+    saved = _onedrive_settings().get("root")
+    if saved and os.path.isdir(saved):
+        return saved
+    detected = _onedrive_detected_roots()
+    return detected[0] if detected else None
+
+
+def _onedrive_backup_dir():
+    """<root>/<chosen folder>, or None until both are set and exist."""
+    root = _onedrive_root()
+    folder = _onedrive_settings().get("folder")
+    if not root or not folder:
+        return None
+    path = os.path.join(root, folder)
+    return path if os.path.isdir(path) else None
+
+
+def _valid_folder_name(name):
+    return bool(name) and name not in (".", "..") and not any(c in name for c in '/\\:*?"<>|')
+
+
+def _onedrive_subfolders(root):
+    out = []
+    try:
+        for entry in sorted(os.listdir(root), key=str.lower):
+            if entry.startswith(".") or entry.startswith("~"):
+                continue
+            if os.path.isdir(os.path.join(root, entry)):
+                out.append(entry)
+    except OSError:
+        pass
+    return out
+
+
+def _file_needs_copy(src, dst):
+    """New, grown/shrunk, or modified since the copy - never 'identical'."""
+    try:
+        st = os.stat(src)
+    except OSError:
+        return False
+    try:
+        dt = os.stat(dst)
+    except OSError:
+        return True
+    return st.st_size != dt.st_size or st.st_mtime > dt.st_mtime + 1
+
+
+def _session_backup_state(local_dir, dest_dir):
+    """Counts for one local session against its copy under dest_dir (may not exist)."""
+    files = pending = 0
+    size = pending_bytes = 0
+    for dirpath, _dirs, names in os.walk(local_dir):
+        rel = os.path.relpath(dirpath, local_dir)
+        for name in names:
+            src = os.path.join(dirpath, name)
+            try:
+                b = os.path.getsize(src)
+            except OSError:
+                continue
+            files += 1
+            size += b
+            dst = os.path.join(dest_dir, rel, name) if dest_dir else None
+            if dst is None or _file_needs_copy(src, dst):
+                pending += 1
+                pending_bytes += b
+    if dest_dir is None or not os.path.isdir(dest_dir):
+        status = "not backed up"
+    elif pending == 0:
+        status = "up to date"
+    else:
+        status = "changes to copy"
+    return {"files": files, "bytes": size, "pending_files": pending, "pending_bytes": pending_bytes, "status": status}
+
+
+def _onedrive_config_payload():
+    root = _onedrive_root()
+    settings = _onedrive_settings()
+    folder = settings.get("folder")
+    backup_dir = _onedrive_backup_dir()
+    sessions = []
+    if os.path.isdir(DOWNLOADS_ROOT):
+        for name in sorted(os.listdir(DOWNLOADS_ROOT), key=str.lower):
+            local = os.path.join(DOWNLOADS_ROOT, name)
+            if not os.path.isdir(local):
+                continue
+            state_ = _session_backup_state(local, os.path.join(backup_dir, name) if backup_dir else None)
+            state_["name"] = name
+            sessions.append(state_)
+    return {
+        "ok": True,
+        "root": root,
+        "root_saved": settings.get("root"),
+        "detected_roots": _onedrive_detected_roots(),
+        "folders": _onedrive_subfolders(root) if root else [],
+        "folder": folder if (folder and backup_dir) else None,
+        "backup_dir": backup_dir,
+        "downloads_root": DOWNLOADS_ROOT,
+        "sessions": sessions,
+    }
+
+
+@app.route("/onedrive")
+def onedrive_page():
+    return render_template("onedrive.html")
+
+
+@app.route("/onedrive/config")
+def onedrive_config():
+    return jsonify(_onedrive_config_payload())
+
+
+@app.route("/onedrive/config", methods=["POST"])
+def onedrive_config_save():
+    data = request.get_json() or {}
+    settings = _onedrive_settings()
+    if "root" in data:
+        root = (data.get("root") or "").strip()
+        if root:
+            if not os.path.isabs(root) or not os.path.isdir(root):
+                return jsonify({"ok": False, "error": "That OneDrive folder does not exist on this computer."}), 400
+            if os.path.normcase(os.path.abspath(root)) != os.path.normcase(os.path.abspath(settings.get("root") or "")):
+                settings.pop("folder", None)   # a different OneDrive: the old subfolder no longer applies
+            settings["root"] = os.path.abspath(root)
+        else:
+            settings.pop("root", None)
+    if "folder" in data:
+        folder = (data.get("folder") or "").strip()
+        if folder:
+            if not _valid_folder_name(folder):
+                return jsonify({"ok": False, "error": "Invalid folder name."}), 400
+            root = settings.get("root") if settings.get("root") and os.path.isdir(settings["root"]) else _onedrive_root()
+            if not root or not os.path.isdir(os.path.join(root, folder)):
+                return jsonify({"ok": False, "error": "That folder does not exist in the OneDrive folder."}), 400
+            settings["folder"] = folder
+        else:
+            settings.pop("folder", None)
+    _save_onedrive_settings(settings)
+    return jsonify(_onedrive_config_payload())
+
+
+@app.route("/onedrive/folder", methods=["POST"])
+def onedrive_folder_create():
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    if not _valid_folder_name(name):
+        return jsonify({"ok": False, "error": "Invalid folder name."}), 400
+    root = _onedrive_root()
+    if not root:
+        return jsonify({"ok": False, "error": "No OneDrive folder is set."}), 400
+    try:
+        os.makedirs(os.path.join(root, name), exist_ok=True)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"Could not create the folder: {e}"}), 500
+    settings = _onedrive_settings()
+    settings["root"] = root
+    settings["folder"] = name
+    _save_onedrive_settings(settings)
+    return jsonify(_onedrive_config_payload())
+
+
+_onedrive_job = {"running": False}
+_onedrive_job_lock = threading.Lock()
+
+
+def _run_onedrive_backup(session_names, backup_dir):
+    job = _onedrive_job
+    try:
+        plan = []   # (src, dst, bytes, session)
+        for name in session_names:
+            local = os.path.join(DOWNLOADS_ROOT, name)
+            for dirpath, _dirs, files in os.walk(local):
+                rel = os.path.relpath(dirpath, local)
+                for fname in files:
+                    src = os.path.join(dirpath, fname)
+                    dst = os.path.join(backup_dir, name, rel, fname)
+                    if _file_needs_copy(src, dst):
+                        try:
+                            plan.append((src, dst, os.path.getsize(src), name))
+                        except OSError:
+                            continue
+        with _onedrive_job_lock:
+            job["total_files"] = len(plan)
+            job["total_bytes"] = sum(p[2] for p in plan)
+        for src, dst, size, name in plan:
+            with _onedrive_job_lock:
+                job["current"] = os.path.relpath(src, DOWNLOADS_ROOT)
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                if os.path.getsize(dst) != size:
+                    raise OSError("size mismatch after copy")
+                with _onedrive_job_lock:
+                    job["copied_files"] += 1
+                    job["copied_bytes"] += size
+                    job["per_session"].setdefault(name, {"copied": 0, "errors": 0})["copied"] += 1
+            except OSError as e:
+                with _onedrive_job_lock:
+                    job["errors"].append(f"{os.path.relpath(src, DOWNLOADS_ROOT)}: {e}")
+                    job["per_session"].setdefault(name, {"copied": 0, "errors": 0})["errors"] += 1
+    except Exception as e:
+        app.logger.exception("OneDrive backup job failed")
+        with _onedrive_job_lock:
+            job["errors"].append(f"backup stopped: {type(e).__name__}: {e}")
+    finally:
+        with _onedrive_job_lock:
+            job["running"] = False
+            job["finished_at"] = time.time()
+            job["current"] = None
+
+
+@app.route("/onedrive/backup", methods=["POST"])
+def onedrive_backup_start():
+    data = request.get_json() or {}
+    names = data.get("sessions") or []
+    if not isinstance(names, list) or not names:
+        return jsonify({"ok": False, "error": "Pick at least one session."}), 400
+    for name in names:
+        if not isinstance(name, str) or not _valid_folder_name(name) or not os.path.isdir(os.path.join(DOWNLOADS_ROOT, name)):
+            return jsonify({"ok": False, "error": f"Unknown session: {name}"}), 400
+    backup_dir = _onedrive_backup_dir()
+    if not backup_dir:
+        return jsonify({"ok": False, "error": "Choose a destination folder in OneDrive first."}), 400
+    with _onedrive_job_lock:
+        if _onedrive_job.get("running"):
+            return jsonify({"ok": False, "error": "A backup is already running."}), 409
+        _onedrive_job.clear()
+        _onedrive_job.update({
+            "running": True, "started_at": time.time(), "finished_at": None, "sessions": list(names),
+            "backup_dir": backup_dir, "total_files": None, "total_bytes": 0,
+            "copied_files": 0, "copied_bytes": 0, "current": None, "errors": [], "per_session": {},
+        })
+    threading.Thread(target=_run_onedrive_backup, args=(list(names), backup_dir), daemon=True).start()
+    return jsonify({"ok": True, "started": True})
+
+
+@app.route("/onedrive/progress")
+def onedrive_progress():
+    with _onedrive_job_lock:
+        return jsonify({"ok": True, "job": dict(_onedrive_job)})
+
+
+def _sessions_root():
+    """
+    Where the offline explorer's sessions live for this request: the local
+    downloads folder, or the OneDrive backup folder when the page was
+    opened with ?root=onedrive (every offline request carries it).
+    """
+    try:
+        root = request.args.get("root") or ""
+    except RuntimeError:
+        root = ""
+    if root == "onedrive":
+        backup_dir = _onedrive_backup_dir()
+        if backup_dir:
+            return backup_dir
+    return DOWNLOADS_ROOT
+
+
 @app.route("/offline")
 def offline():
     """
@@ -282,12 +592,13 @@ def offline_sessions():
     in it (run count under output/, if present) and when it was last
     touched, newest first.
     """
-    if not os.path.isdir(DOWNLOADS_ROOT):
+    sessions_root = _sessions_root()
+    if not os.path.isdir(sessions_root):
         return jsonify({"ok": True, "sessions": []})
 
     sessions = []
-    for name in os.listdir(DOWNLOADS_ROOT):
-        full = os.path.join(DOWNLOADS_ROOT, name)
+    for name in os.listdir(sessions_root):
+        full = os.path.join(sessions_root, name)
         if not os.path.isdir(full):
             continue
         run_count = 0
@@ -325,11 +636,11 @@ def _valid_session_name(name):
 
 
 def _session_output_dir(session_name):
-    return os.path.join(DOWNLOADS_ROOT, session_name, "output")
+    return os.path.join(_sessions_root(), session_name, "output")
 
 
 def _session_merged_dir(session_name, date):
-    return os.path.join(DOWNLOADS_ROOT, session_name, "merged", date)
+    return os.path.join(_sessions_root(), session_name, "merged", date)
 
 
 def _session_drone_dir(session_name):
@@ -338,7 +649,7 @@ def _session_drone_dir(session_name):
     # DOWNLOAD_SOURCES) - flat telemetry_<date>_<time>.csv files, one per
     # flight, unrelated to and not nested under output/ (the drone's own
     # PSDK C app writes these independently of uri_aplogger/runall.py).
-    return os.path.join(DOWNLOADS_ROOT, session_name, "data_from_drone")
+    return os.path.join(_sessions_root(), session_name, "data_from_drone")
 
 
 def _session_drone_merged_dir(session_name, date):
@@ -2530,6 +2841,12 @@ def _offline_tool_list_flights(name, date, inp):
 
 def _offline_internal_get(url):
     """Call one of this app's own GET endpoints in-process and return its JSON."""
+    try:
+        root = request.args.get("root") or ""
+    except RuntimeError:
+        root = ""
+    if root:
+        url += ("&" if "?" in url else "?") + "root=" + root
     with app.test_client() as tc:
         return tc.get(url).get_json() or {}
 

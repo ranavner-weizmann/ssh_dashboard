@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MAMP Dashboard — OneDrive Backup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #e9edf2;
+    --panel: #ffffff;
+    --panel-border: #c3ccd7;
+    --text: #16202c;
+    --text-dim: #4c5a68;
+    --accent: #1d5fa3;
+    --accent-dim: #123f6e;
+    --accent-text: #ffffff;
+    --ok: #1f8a55;
+    --err: #c62828;
+    --warn-bg: #fff6e0;
+    --warn-border: #e8c76a;
+    --surface-sunken: #e2e7ee;
+    --mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+    --sans: "Inter", -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans);
+    min-height: 100vh; display: flex; align-items: flex-start; justify-content: center; padding: 20px 16px;
+  }
+  .wrap { width: 100%; max-width: 760px; }
+  .back-link { display: inline-block; margin-bottom: 14px; color: var(--text-dim); text-decoration: none; font-size: 13px; }
+  .back-link:hover { color: var(--accent); }
+  h1 { font-size: 22px; margin: 0 0 6px 0; }
+  .panel { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
+  .panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .panel-header label { font-size: 13px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+  .hint { font-size: 12px; color: var(--text-dim); }
+  .notice { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 12px; }
+  .notice strong { display: block; margin-bottom: 2px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .row label { font-size: 12px; color: var(--text-dim); min-width: 120px; }
+  input[type=text], select {
+    font: 13px var(--sans); color: var(--text); background: var(--panel);
+    border: 1px solid var(--panel-border); border-radius: 6px; padding: 7px 9px; min-width: 0;
+  }
+  input[type=text] { flex: 1; }
+  input[type=text]:focus, select:focus { outline: none; border-color: var(--accent); }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .btn-primary, .btn-ghost {
+    font: 13px var(--sans); border-radius: 6px; padding: 8px 14px; cursor: pointer; white-space: nowrap;
+  }
+  .btn-primary { background: var(--accent); color: var(--accent-text); border: 1px solid var(--accent); }
+  .btn-primary:hover { background: var(--accent-dim); }
+  .btn-primary:disabled { opacity: 0.5; cursor: default; }
+  .btn-ghost { background: transparent; color: var(--text-dim); border: 1px solid var(--panel-border); }
+  .btn-ghost:hover { color: var(--text); border-color: var(--text-dim); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 11px; color: var(--text-dim); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--panel-border); }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--surface-sunken); vertical-align: middle; }
+  td.num { text-align: right; font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .status-ok { color: var(--ok); }
+  .status-pending { color: var(--accent); }
+  .status-none { color: var(--text-dim); }
+  .progress-track { height: 8px; background: var(--surface-sunken); border-radius: 4px; overflow: hidden; margin: 10px 0 6px 0; display: none; }
+  .progress-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.3s; }
+  .err { color: var(--err); }
+  ul.results { margin: 8px 0 0 0; padding-left: 18px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back-link" href="/">&larr; Back</a>
+  <h1>OneDrive Backup</h1>
+  <div class="hint" style="margin-bottom: 14px;">Copies the sessions already downloaded to this computer into a folder in your OneDrive, and lets you explore them from there.</div>
+
+  <div class="notice">
+    <strong>Only data already on this computer is backed up.</strong>
+    This copies the sessions in <span class="mono" id="downloads-root">…</span> - what you downloaded from the Pi with "Download Data" on the connected dashboard. It does not read anything from the Pi itself. Download first, then back up.
+  </div>
+  <div class="notice">
+    <strong>Nothing is deleted, and the cloud copy follows OneDrive's sync.</strong>
+    Files are copied, never moved. Right after a backup the copy exists in the OneDrive folder on this disk; it is in the cloud only once the OneDrive app has finished uploading it (check its icon in the taskbar). Sessions already backed up are brought up to date: files that are new or changed are copied again, unchanged ones are skipped.
+  </div>
+
+  <div class="panel">
+    <div class="panel-header"><label>destination in OneDrive</label></div>
+    <div class="row">
+      <label for="root-input">OneDrive folder</label>
+      <input type="text" id="root-input" class="mono" placeholder="C:\Users\...\OneDrive - ..." autocomplete="off">
+      <button class="btn-ghost" onclick="saveRoot()">Use this folder</button>
+    </div>
+    <div class="row" id="detected-row" style="display: none;">
+      <label></label>
+      <span class="hint">detected on this computer:</span>
+      <span id="detected-roots"></span>
+    </div>
+    <div class="row">
+      <label for="folder-select">backup folder</label>
+      <select id="folder-select" onchange="chooseFolder()">
+        <option value="">Choose a folder in OneDrive...</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="new-folder-input">or create new</label>
+      <input type="text" id="new-folder-input" placeholder="e.g. Drone data backup" autocomplete="off">
+      <button class="btn-ghost" onclick="createFolder()">Create and use</button>
+    </div>
+    <div class="hint" id="dest-status"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <label>sessions on this computer</label>
+      <div>
+        <button class="btn-ghost" onclick="loadConfig()">Refresh</button>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th style="width: 28px;"><input type="checkbox" id="select-all" onchange="toggleAll()"></th><th>session</th><th class="num">files</th><th class="num">size</th><th>in OneDrive</th></tr></thead>
+      <tbody id="session-rows"></tbody>
+    </table>
+    <div class="hint" id="sessions-empty" style="display: none;">No downloaded sessions found on this computer.</div>
+    <div class="row" style="margin-top: 12px;">
+      <button class="btn-primary" id="backup-btn" onclick="startBackup()" disabled>Back up selected to OneDrive</button>
+      <button class="btn-ghost" onclick="window.location.href='/offline?root=onedrive'">Explore OneDrive data</button>
+      <button class="btn-ghost" onclick="window.location.href='/offline'">Explore local data</button>
+    </div>
+    <div class="progress-track" id="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+    <div class="hint" id="backup-status"></div>
+    <ul class="results" id="backup-results"></ul>
+  </div>
+</div>
+
+<script>
+let config = null;
+let pollTimer = null;
+
+function fmtBytes(b) {
+  if (b >= 1e9) return (b / 1e9).toFixed(2) + ' GB';
+  if (b >= 1e6) return (b / 1e6).toFixed(1) + ' MB';
+  if (b >= 1e3) return (b / 1e3).toFixed(0) + ' KB';
+  return b + ' B';
+}
+
+async function loadConfig() {
+  try {
+    const res = await fetch('/onedrive/config');
+    config = await res.json();
+  } catch (e) {
+    document.getElementById('dest-status').innerHTML = '<span class="err">Could not reach the local app server.</span>';
+    return;
+  }
+  render();
+}
+
+function render() {
+  document.getElementById('downloads-root').textContent = config.downloads_root || '';
+  document.getElementById('root-input').value = config.root || '';
+
+  const detectedRow = document.getElementById('detected-row');
+  const detected = document.getElementById('detected-roots');
+  detected.innerHTML = '';
+  if (config.detected_roots && config.detected_roots.length) {
+    detectedRow.style.display = '';
+    config.detected_roots.forEach((p) => {
+      const a = document.createElement('a');
+      a.href = '#';
+      a.className = 'mono';
+      a.style.marginRight = '10px';
+      a.style.color = 'var(--accent)';
+      a.textContent = p;
+      a.onclick = (e) => { e.preventDefault(); document.getElementById('root-input').value = p; saveRoot(); };
+      detected.appendChild(a);
+    });
+  } else {
+    detectedRow.style.display = 'none';
+  }
+
+  const select = document.getElementById('folder-select');
+  select.innerHTML = '<option value="">Choose a folder in OneDrive...</option>';
+  (config.folders || []).forEach((name) => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    if (config.folder === name) opt.selected = true;
+    select.appendChild(opt);
+  });
+  select.disabled = !config.root;
+
+  const dest = document.getElementById('dest-status');
+  if (!config.root) {
+    dest.innerHTML = '<span class="err">No OneDrive folder found on this computer - type its path above.</span>';
+  } else if (!config.backup_dir) {
+    dest.textContent = 'Pick an existing folder in your OneDrive, or create a new one, to use as the backup destination.';
+  } else {
+    dest.innerHTML = 'Backing up to <span class="mono">' + config.backup_dir + '</span>';
+  }
+
+  const rows = document.getElementById('session-rows');
+  rows.innerHTML = '';
+  const sessions = config.sessions || [];
+  document.getElementById('sessions-empty').style.display = sessions.length ? 'none' : '';
+  sessions.forEach((s) => {
+    const tr = document.createElement('tr');
+    const pending = s.status === 'changes to copy' || s.status === 'not backed up';
+    const statusClass = s.status === 'up to date' ? 'status-ok' : (s.status === 'changes to copy' ? 'status-pending' : 'status-none');
+    const statusText = s.status === 'changes to copy'
+      ? `${s.pending_files} file${s.pending_files === 1 ? '' : 's'} new or changed (${fmtBytes(s.pending_bytes)})`
+      : s.status;
+    tr.innerHTML = `<td><input type="checkbox" class="session-check" value="${s.name}" ${pending && config.backup_dir ? 'checked' : ''} onchange="updateButton()"></td>` +
+      `<td>${s.name}</td><td class="num">${s.files}</td><td class="num">${fmtBytes(s.bytes)}</td>` +
+      `<td class="${statusClass}">${statusText}</td>`;
+    rows.appendChild(tr);
+  });
+  updateButton();
+}
+
+function selectedSessions() {
+  return Array.from(document.querySelectorAll('.session-check:checked')).map((c) => c.value);
+}
+
+function updateButton() {
+  const btn = document.getElementById('backup-btn');
+  btn.disabled = !config || !config.backup_dir || selectedSessions().length === 0 || !!pollTimer;
+}
+
+function toggleAll() {
+  const on = document.getElementById('select-all').checked;
+  document.querySelectorAll('.session-check').forEach((c) => { c.checked = on; });
+  updateButton();
+}
+
+async function postJson(url, body) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return res.json();
+}
+
+async function saveRoot() {
+  const root = document.getElementById('root-input').value.trim();
+  const data = await postJson('/onedrive/config', { root });
+  if (!data.ok) { document.getElementById('dest-status').innerHTML = '<span class="err">' + data.error + '</span>'; return; }
+  config = data;
+  render();
+}
+
+async function chooseFolder() {
+  const folder = document.getElementById('folder-select').value;
+  const data = await postJson('/onedrive/config', { folder });
+  if (!data.ok) { document.getElementById('dest-status').innerHTML = '<span class="err">' + data.error + '</span>'; return; }
+  config = data;
+  render();
+}
+
+async function createFolder() {
+  const name = document.getElementById('new-folder-input').value.trim();
+  if (!name) return;
+  const data = await postJson('/onedrive/folder', { name });
+  if (!data.ok) { document.getElementById('dest-status').innerHTML = '<span class="err">' + data.error + '</span>'; return; }
+  document.getElementById('new-folder-input').value = '';
+  config = data;
+  render();
+}
+
+async function startBackup() {
+  const sessions = selectedSessions();
+  if (!sessions.length) return;
+  const status = document.getElementById('backup-status');
+  document.getElementById('backup-results').innerHTML = '';
+  const data = await postJson('/onedrive/backup', { sessions });
+  if (!data.ok) { status.innerHTML = '<span class="err">' + data.error + '</span>'; return; }
+  document.getElementById('progress-track').style.display = '';
+  document.getElementById('progress-fill').style.width = '0%';
+  status.textContent = 'Preparing...';
+  pollTimer = setInterval(pollProgress, 700);
+  updateButton();
+}
+
+async function pollProgress() {
+  let data;
+  try { data = await (await fetch('/onedrive/progress')).json(); } catch (e) { return; }
+  const job = data.job || {};
+  const status = document.getElementById('backup-status');
+  const fill = document.getElementById('progress-fill');
+  if (job.total_files === null || job.total_files === undefined) {
+    status.textContent = 'Comparing with OneDrive...';
+  } else {
+    const pct = job.total_files ? Math.round((job.copied_files / job.total_files) * 100) : 100;
+    fill.style.width = pct + '%';
+    status.textContent = job.running
+      ? `Copying ${job.copied_files} of ${job.total_files} files (${fmtBytes(job.copied_bytes)} of ${fmtBytes(job.total_bytes)})` + (job.current ? ` - ${job.current}` : '')
+      : `Done: ${job.copied_files} file${job.copied_files === 1 ? '' : 's'} copied (${fmtBytes(job.copied_bytes)})` + (job.errors && job.errors.length ? `, ${job.errors.length} error${job.errors.length === 1 ? '' : 's'}` : '') + '. Let the OneDrive app finish uploading before relying on the cloud copy.';
+  }
+  if (!job.running) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+    const results = document.getElementById('backup-results');
+    results.innerHTML = '';
+    Object.entries(job.per_session || {}).forEach(([name, r]) => {
+      const li = document.createElement('li');
+      li.textContent = `${name}: ${r.copied} copied` + (r.errors ? `, ${r.errors} failed` : '');
+      results.appendChild(li);
+    });
+    (job.errors || []).slice(0, 10).forEach((e) => {
+      const li = document.createElement('li');
+      li.className = 'err';
+      li.textContent = e;
+      results.appendChild(li);
+    });
+    await loadConfig();
+  }
+}
+
+loadConfig();
+</script>
+</body>
+</html>

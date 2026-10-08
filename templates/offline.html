@@ -486,6 +486,7 @@
 
   <div class="eyebrow">drone_air_system // offline</div>
   <h1>Offline Data Exploration</h1>
+  <div class="hint" id="ofl-root-switch" style="margin: -6px 0 14px 0;"></div>
   <div class="subtitle">Browse data already on this machine - no connection to the Pi needed.</div>
 
   <div class="panel">
@@ -687,6 +688,28 @@
 
 <script src="{{ url_for('static', filename='plot-engine.js') }}"></script>
 <script>
+// Which sessions root this page shows: the local downloads folder, or the
+// OneDrive backup folder (opened from the OneDrive page with ?root=onedrive).
+// Every offline/assistant request is tagged with it so the server resolves
+// paths against the right root; nothing else on the page needs to know.
+const OFL_ROOT = new URLSearchParams(window.location.search).get('root') === 'onedrive' ? 'onedrive' : 'local';
+(function () {
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = function (url, opts) {
+    if (typeof url === 'string' && (url.startsWith('/offline/') || url.startsWith('/assistant/ask'))) {
+      url += (url.includes('?') ? '&' : '?') + 'root=' + OFL_ROOT;
+    }
+    return originalFetch(url, opts);
+  };
+  document.addEventListener('DOMContentLoaded', () => {
+    const el = document.getElementById('ofl-root-switch');
+    if (!el) return;
+    const link = (label, root) => OFL_ROOT === root
+      ? `<strong>${label}</strong>`
+      : `<a href="/offline${root === 'onedrive' ? '?root=onedrive' : ''}" style="color: var(--accent);">${label}</a>`;
+    el.innerHTML = `showing: ${link('local downloads', 'local')} · ${link('OneDrive backup', 'onedrive')}`;
+  });
+})();
 function escapeHtml(s) {
   const div = document.createElement('div');
   div.textContent = s;
