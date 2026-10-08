@@ -126,6 +126,8 @@
   .select-input:disabled { opacity: 0.5; }
 
   .hint { font-size: 12px; color: var(--text-dim); }
+  .chart-dl { display: inline-flex; gap: 6px; align-items: center; margin-left: auto; }
+  .chart-dl button { font-size: 11px; padding: 3px 8px; }
   .error-msg { font-size: 12px; color: var(--err); margin-top: 6px; }
 
   .session-list { display: flex; flex-direction: column; gap: 8px; }
@@ -527,6 +529,10 @@
       <select id="ofl-add-variable-select" class="select-input" onchange="oflAddColumn()" disabled>
         <option value="">Add a variable...</option>
       </select>
+      <span class="chart-dl">
+        <button class="btn-ghost" onclick="oflDownloadMainPlot('png')" title="save this chart as an image">PNG</button>
+        <button class="btn-ghost" onclick="oflDownloadMainPlot('csv')" title="save the plotted values">CSV</button>
+      </span>
     </div>
     <div class="dv-legend" id="ofl-plot-legend"></div>
     <div class="plot-header">
@@ -633,6 +639,10 @@
         <label class="explore-section-title">distribution</label>
         <div class="explore-toolbar">
           <select id="explore-hist-select" class="select-input" onchange="oflRenderHistogram()"></select>
+          <span class="chart-dl">
+            <button class="btn-ghost" onclick="oflDownloadExplore('hist', 'png')" title="save this chart as an image">PNG</button>
+            <button class="btn-ghost" onclick="oflDownloadExplore('hist', 'csv')" title="save the histogram bins">CSV</button>
+          </span>
         </div>
         <div class="explore-plot-canvas-wrap">
           <canvas id="explore-hist-canvas" class="explore-plot-canvas"></canvas>
@@ -647,6 +657,10 @@
           <select id="explore-scatter-x-select" class="select-input" onchange="oflRenderScatter()"></select>
           <span class="hint">vs.</span>
           <select id="explore-scatter-y-select" class="select-input" onchange="oflRenderScatter()"></select>
+          <span class="chart-dl">
+            <button class="btn-ghost" onclick="oflDownloadExplore('scatter', 'png')" title="save this chart as an image">PNG</button>
+            <button class="btn-ghost" onclick="oflDownloadExplore('scatter', 'csv')" title="save the plotted pairs">CSV</button>
+          </span>
         </div>
         <div class="explore-plot-canvas-wrap">
           <canvas id="explore-scatter-canvas" class="explore-plot-canvas"></canvas>
@@ -1522,14 +1536,23 @@ function altProfileBuildGrid() {
     const status = document.createElement('div');
     status.className = 'alt-profile-chart-status';
 
+    const dl = document.createElement('div');
+    dl.className = 'chart-dl';
+    dl.style.justifyContent = 'center';
+    dl.style.display = 'flex';
+    dl.style.margin = '0 0 6px 0';
+    dl.innerHTML = `<button class="btn-ghost" onclick="altProfileDownload('vertical', ${f.index}, 'png')" title="save this chart as an image">PNG</button>` +
+      `<button class="btn-ghost" onclick="altProfileDownload('vertical', ${f.index}, 'csv')" title="save the binned values">CSV</button>`;
+
     wrap.appendChild(title);
+    wrap.appendChild(dl);
     wrap.appendChild(canvasWrap);
     wrap.appendChild(status);
     grid.appendChild(wrap);
 
     const controller = createProfileController(canvasId, tooltipId);
     controller.setEmptyMessage('Add a variable');
-    return { flight: f, controller, statusEl: status, wrapEl: wrap };
+    return { flight: f, controller, statusEl: status, wrapEl: wrap, canvas: canvasWrap.querySelector('canvas'), titleEl: title };
   });
 
   const routeGrid = document.getElementById('route-grid');
@@ -1551,14 +1574,23 @@ function altProfileBuildGrid() {
     const status = document.createElement('div');
     status.className = 'alt-profile-chart-status';
 
+    const dl = document.createElement('div');
+    dl.className = 'chart-dl';
+    dl.style.justifyContent = 'center';
+    dl.style.display = 'flex';
+    dl.style.margin = '0 0 6px 0';
+    dl.innerHTML = `<button class="btn-ghost" onclick="altProfileDownload('horizontal', ${f.index}, 'png')" title="save this chart as an image">PNG</button>` +
+      `<button class="btn-ghost" onclick="altProfileDownload('horizontal', ${f.index}, 'csv')" title="save the binned values">CSV</button>`;
+
     wrap.appendChild(title);
+    wrap.appendChild(dl);
     wrap.appendChild(canvasWrap);
     wrap.appendChild(status);
     routeGrid.appendChild(wrap);
 
     const controller = createTransectController(canvasId, tooltipId);
     controller.setEmptyMessage('Add a variable');
-    return { flight: f, controller, statusEl: status, titleEl: title, wrapEl: wrap };
+    return { flight: f, controller, statusEl: status, titleEl: title, wrapEl: wrap, canvas: canvasWrap.querySelector('canvas') };
   });
 }
 
@@ -1806,6 +1838,77 @@ async function altProfileRenderAll() {
     statusEl.textContent = 'Could not reach the local app server.';
     statusEl.style.color = 'var(--err)';
   }
+}
+
+// ---------- Downloads: every chart on this page as PNG or CSV ----------
+function oflFileStem(kind) {
+  return safeFilename(`${oflState.session || 'session'}_${oflState.date || ''}_${kind}`);
+}
+
+function oflDownloadMainPlot(what) {
+  const series = oflPlot.getSeries();
+  if (!series.length) return;
+  const columns = series.map((s) => s.column).join(', ');
+  if (what === 'png') {
+    exportCanvasPng(document.getElementById('ofl-plot-canvas'), oflFileStem('plot') + '.png',
+      `${oflState.session} ${formatRunDate(oflState.date)} - ${columns}`);
+    return;
+  }
+  const rows = [];
+  series.forEach((s) => s.points.forEach((p) => rows.push([p.t, s.column, p.v])));
+  rows.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  downloadTextFile(oflFileStem('plot') + '.csv', csvFromRows(['time', 'column', 'value'], rows));
+}
+
+function altProfileDownload(kind, flightIndex, what) {
+  const charts = kind === 'vertical' ? altProfileCharts : altProfileRouteCharts;
+  const c = charts.find((x) => x.flight.index === flightIndex);
+  if (!c) return;
+  const series = c.controller.getSeries();
+  if (!series.length) return;
+  const stem = oflFileStem(`flight${flightIndex + 1}_${kind}`);
+  if (what === 'png') {
+    exportCanvasPng(c.canvas, stem + '.png', `${oflState.session} ${formatRunDate(oflState.date)} - ${c.titleEl.textContent}`);
+    return;
+  }
+  const rows = [];
+  if (kind === 'vertical') {
+    series.forEach((s) => s.bins.forEach((b) => rows.push([
+      flightIndex + 1, s.column, b.altitude, b.mean, b.std, b.median, b.p25, b.p75, b.min, b.max, b.n])));
+    downloadTextFile(stem + '.csv', csvFromRows(
+      ['flight', 'column', 'altitude_m', 'mean', 'std', 'median', 'p25', 'p75', 'min', 'max', 'n'], rows));
+  } else {
+    series.forEach((s) => s.bins.forEach((b) => rows.push([
+      flightIndex + 1, s.column, b.distance, b.from, b.to, b.mean, b.std, b.median, b.p25, b.p75, b.min, b.max, b.n])));
+    downloadTextFile(stem + '.csv', csvFromRows(
+      ['flight', 'column', 'distance_m', 'from_m', 'to_m', 'mean', 'std', 'median', 'p25', 'p75', 'min', 'max', 'n'], rows));
+  }
+}
+
+function oflDownloadExplore(kind, what) {
+  if (kind === 'hist') {
+    const { edges, counts } = oflHist.getData();
+    if (!counts.length) return;
+    const column = document.getElementById('explore-hist-select').value || 'variable';
+    const stem = oflFileStem(`histogram_${column}`);
+    if (what === 'png') {
+      exportCanvasPng(document.getElementById('explore-hist-canvas'), stem + '.png', `${oflState.session} ${formatRunDate(oflState.date)} - distribution of ${column}`);
+      return;
+    }
+    const rows = counts.map((n, i) => [edges[i], edges[i + 1], n]);
+    downloadTextFile(stem + '.csv', csvFromRows(['bin_from', 'bin_to', 'count'], rows));
+    return;
+  }
+  const { points, regression, xLabel, yLabel } = oflScatter.getData();
+  if (!points.length) return;
+  const stem = oflFileStem(`scatter_${xLabel}_vs_${yLabel}`);
+  if (what === 'png') {
+    exportCanvasPng(document.getElementById('explore-scatter-canvas'), stem + '.png',
+      `${oflState.session} ${formatRunDate(oflState.date)} - ${yLabel} vs ${xLabel}` +
+      (regression ? ` (slope ${regression.slope.toFixed(4)}, intercept ${regression.intercept.toFixed(4)})` : ''));
+    return;
+  }
+  downloadTextFile(stem + '.csv', csvFromRows([xLabel, yLabel], points.map((p) => [p.x, p.y])));
 }
 
 // ---------- Explore: statistics / correlation / distribution / relationship ----------

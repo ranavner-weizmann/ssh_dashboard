@@ -516,6 +516,7 @@ function createStaticPlotController(canvasId, tooltipId, zoomResetBtnId) {
       viewMax = null;
       draw();
     },
+    getSeries() { return series; },
     draw,
   };
 }
@@ -653,6 +654,7 @@ function createHistogramController(canvasId, tooltipId) {
       emptyMessage = message;
       draw();
     },
+    getData() { return { edges, counts }; },
     draw,
   };
 }
@@ -826,6 +828,7 @@ function createScatterController(canvasId, tooltipId) {
       emptyMessage = message;
       draw();
     },
+    getData() { return { points, regression, xLabel, yLabel }; },
     draw,
   };
 }
@@ -840,6 +843,30 @@ function createScatterController(canvasId, tooltipId) {
 // series, or scaled independently per series - each to its own mean±std
 // range - when several are overlaid, same "relative when mismatched
 // units are stacked together" rule drawOverlayPlot uses.
+// The altitude axis of a vertical profile runs on fixed 20 m ticks (0, 20,
+// 40 ... 200) matching the hover levels, from the lowest to the highest
+// bin rounded out to the tick; a very tall range steps up to 50 or 100 m
+// so the labels stay readable. Shared by the drawing and the hover.
+const PROFILE_TICK_M = 20;
+
+function profileAltitudeAxis(series) {
+  let lo = Infinity, hi = -Infinity;
+  series.forEach((s) => s.bins.forEach((b) => {
+    if (b.altitude < lo) lo = b.altitude;
+    if (b.altitude > hi) hi = b.altitude;
+  }));
+  let step = PROFILE_TICK_M;
+  let minY = Math.floor(lo / step) * step;
+  let maxY = Math.ceil(hi / step) * step;
+  if (maxY <= minY) maxY = minY + step;
+  while ((maxY - minY) / step > 14) {
+    step = step === 20 ? 50 : step * 2;
+    minY = Math.floor(lo / step) * step;
+    maxY = Math.ceil(hi / step) * step;
+  }
+  return { minY, maxY, step };
+}
+
 function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
   const { ctx, width, height } = getCanvasContext(canvas);
   ctx.clearRect(0, 0, width, height);
@@ -853,12 +880,7 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
   const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
   const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
 
-  let minY = Infinity, maxY = -Infinity;
-  withBins.forEach((s) => s.bins.forEach((b) => {
-    if (b.altitude < minY) minY = b.altitude;
-    if (b.altitude > maxY) maxY = b.altitude;
-  }));
-  if (minY === maxY) { minY -= 1; maxY += 1; } else { const pad = (maxY - minY) * 0.08; minY -= pad; maxY += pad; }
+  const { minY, maxY, step } = profileAltitudeAxis(withBins);
   const yFor = (y) => PLOT_PADDING.top + plotH - ((y - minY) / (maxY - minY)) * plotH;
 
   const single = withBins.length === 1;
@@ -871,23 +893,21 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
     s._xFor = (x) => PLOT_PADDING.left + ((x - minX) / (maxX - minX)) * plotW;
   });
 
-  // Altitude gridlines - the shared axis, so always real values (never a
-  // fabricated shared unit across series).
-  const gridLines = 4;
+  // Altitude gridlines at every tick (20 m by default) - the shared axis,
+  // so always real metres (never a fabricated shared unit across series).
   ctx.strokeStyle = getCssVar('--panel-border');
   ctx.lineWidth = 1;
   ctx.fillStyle = getCssVar('--text-dim');
   ctx.font = '11px ' + getCssVar('--mono');
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  for (let i = 0; i <= gridLines; i++) {
-    const y = Math.round(PLOT_PADDING.top + (plotH * i) / gridLines) + 0.5;
+  for (let v = minY; v <= maxY + 1e-9; v += step) {
+    const y = Math.round(yFor(v)) + 0.5;
     ctx.beginPath();
     ctx.moveTo(PLOT_PADDING.left, y);
     ctx.lineTo(width - PLOT_PADDING.right, y);
     ctx.stroke();
-    const label = minY + ((maxY - minY) * (gridLines - i)) / gridLines;
-    ctx.fillText(label.toFixed(1), PLOT_PADDING.left - 8, y - 0.5);
+    ctx.fillText(String(Math.round(v)), PLOT_PADDING.left - 8, y - 0.5);
   }
 
   withBins.forEach((s) => {
@@ -1006,7 +1026,7 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`${yLabel} →`, 0, 0);
+  ctx.fillText(`${yLabel} (m) →`, 0, 0);
   ctx.restore();
 }
 
@@ -1036,12 +1056,7 @@ function createProfileController(canvasId, tooltipId) {
     const rect = canvas.getBoundingClientRect();
     const my = e.clientY - rect.top;
 
-    let minY = Infinity, maxY = -Infinity;
-    withBins.forEach((s) => s.bins.forEach((b) => {
-      if (b.altitude < minY) minY = b.altitude;
-      if (b.altitude > maxY) maxY = b.altitude;
-    }));
-    if (minY === maxY) { minY -= 1; maxY += 1; }
+    const { minY, maxY } = profileAltitudeAxis(withBins);
     const plotH = rect.height - PLOT_PADDING.top - PLOT_PADDING.bottom;
 
     if (my < PLOT_PADDING.top - 10 || my > PLOT_PADDING.top + plotH + 10) {
@@ -1093,6 +1108,7 @@ function createProfileController(canvasId, tooltipId) {
       emptyMessage = message;
       draw();
     },
+    getSeries() { return series; },
     draw,
   };
 }
@@ -1306,6 +1322,67 @@ function createTransectController(canvasId, tooltipId) {
       emptyMessage = message;
       draw();
     },
+    getSeries() { return series; },
     draw,
   };
+}
+
+
+// ---------- Downloads: a chart as PNG, its numbers as CSV ----------
+// The canvases are drawn at device-pixel resolution with a transparent
+// background, so the PNG is composed on an offscreen canvas: panel
+// background, a caption line, then the chart as rendered.
+function exportCanvasPng(canvas, filename, caption) {
+  const dpr = window.devicePixelRatio || 1;
+  const captionH = caption ? Math.round(22 * dpr) : 0;
+  const out = document.createElement('canvas');
+  out.width = canvas.width;
+  out.height = canvas.height + captionH;
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = getCssVar('--panel') || '#ffffff';
+  ctx.fillRect(0, 0, out.width, out.height);
+  if (caption) {
+    ctx.fillStyle = getCssVar('--text') || '#000';
+    ctx.font = `${Math.round(12 * dpr)}px ${getCssVar('--sans') || 'sans-serif'}`;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(caption, Math.round(10 * dpr), Math.round(captionH / 2));
+  }
+  ctx.drawImage(canvas, 0, captionH);
+  out.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, 'image/png');
+}
+
+function downloadTextFile(filename, text, mime) {
+  const blob = new Blob([text], { type: mime || 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function csvCell(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function csvFromRows(header, rows) {
+  return [header.map(csvCell).join(','), ...rows.map((r) => r.map(csvCell).join(','))].join('\n') + '\n';
+}
+
+function safeFilename(s) {
+  return String(s).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '');
 }
