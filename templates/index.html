@@ -3556,10 +3556,14 @@ function drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, format
 
   points.forEach((p) => { if (p._t === undefined) p._t = parseTsMs(p.t); });
   altPoints.forEach((p) => { if (p._t === undefined) p._t = parseTsMs(p.t); });
+  // The time axis follows the variable only: the drone telemetry usually
+  // starts well before the instrument does, so the altitude is clipped
+  // to the variable's own span rather than stretching the axis back to
+  // the start of the telemetry.
   let t0 = Math.min(...points.map((p) => p._t));
   let t1 = Math.max(...points.map((p) => p._t));
-  altPoints.forEach((p) => { if (p._t < t0) t0 = p._t; if (p._t > t1) t1 = p._t; });
   if (t1 === t0) t1 = t0 + 1;
+  altPoints = altPoints.filter((p) => p._t >= t0 && p._t <= t1);
   const xForT = (t) => PLOT_PADDING.left + ((t - t0) / (t1 - t0)) * plotW;
   points.forEach((p) => { p._x = xForT(p._t); });
 
