@@ -1326,6 +1326,9 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
+            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
+              <input type="checkbox" id="plot-alt-overlay-1"> + altitude (m)
+            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -1361,6 +1364,9 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
+            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
+              <input type="checkbox" id="plot-alt-overlay-2"> + altitude (m)
+            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -1396,6 +1402,9 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
+            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
+              <input type="checkbox" id="plot-alt-overlay-3"> + altitude (m)
+            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -1431,6 +1440,9 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
+            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
+              <input type="checkbox" id="plot-alt-overlay-4"> + altitude (m)
+            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -1466,6 +1478,9 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
+            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
+              <input type="checkbox" id="plot-alt-overlay-5"> + altitude (m)
+            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -1501,6 +1516,9 @@
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
+            <label class="hint" style="margin: 0; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="draw the drone's altitude_agl_m on this plot, in metres on a second axis">
+              <input type="checkbox" id="plot-alt-overlay-6"> + altitude (m)
+            </label>
           </div>
           <div class="plot-header">
             <div>
@@ -3482,33 +3500,183 @@ function drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue, emptyMessag
   }
 }
 
+// With the "+ altitude" box ticked, the sensor series and the drone's
+// altitude_agl_m are drawn together against real time (the plain plot
+// spaces samples by index, which cannot line up two series of different
+// rates): the sensor on the left axis in its own unit, altitude on the
+// right axis in metres, in the second series colour. Each point gets an
+// _x so the hover can find the nearest sample by screen position.
+function altitudeAtTime(altPoints, tMs) {
+  if (!altPoints.length) return null;
+  let lo = 0, hi = altPoints.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (altPoints[mid]._t < tMs) lo = mid + 1; else hi = mid;
+  }
+  const cands = [altPoints[lo], altPoints[Math.max(0, lo - 1)]];
+  let best = cands[0];
+  cands.forEach((c) => { if (Math.abs(c._t - tMs) < Math.abs(best._t - tMs)) best = c; });
+  return Math.abs(best._t - tMs) <= 10000 ? best.v : null;   // nothing within 10 s: no altitude
+}
+
+function drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, formatValue, unit) {
+  const { ctx, width, height } = getCanvasContext(canvas);
+  ctx.clearRect(0, 0, width, height);
+  if (!points.length) {
+    ctx.fillStyle = getCssVar('--text-dim');
+    ctx.font = '13px ' + getCssVar('--sans');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('No data yet', width / 2, height / 2);
+    return;
+  }
+  const RIGHT_AXIS = 44;
+  const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right - RIGHT_AXIS;
+  const plotH = height - PLOT_PADDING.top - PLOT_PADDING.bottom;
+
+  points.forEach((p) => { if (p._t === undefined) p._t = parseTsMs(p.t); });
+  altPoints.forEach((p) => { if (p._t === undefined) p._t = parseTsMs(p.t); });
+  let t0 = Math.min(...points.map((p) => p._t));
+  let t1 = Math.max(...points.map((p) => p._t));
+  altPoints.forEach((p) => { if (p._t < t0) t0 = p._t; if (p._t > t1) t1 = p._t; });
+  if (t1 === t0) t1 = t0 + 1;
+  const xForT = (t) => PLOT_PADDING.left + ((t - t0) / (t1 - t0)) * plotW;
+  points.forEach((p) => { p._x = xForT(p._t); });
+
+  const range = (vals) => {
+    let a = Math.min(...vals), b = Math.max(...vals);
+    if (a === b) { a -= 1; b += 1; } else { const pad = (b - a) * 0.1; a -= pad; b += pad; }
+    return [a, b];
+  };
+  const [minV, maxV] = range(points.map((p) => p.v));
+  const yFor = (v) => PLOT_PADDING.top + plotH - ((v - minV) / (maxV - minV)) * plotH;
+  const haveAlt = altPoints.length > 0;
+  const [minA, maxA] = haveAlt ? range(altPoints.map((p) => p.v)) : [0, 1];
+  const yForAlt = (v) => PLOT_PADDING.top + plotH - ((v - minA) / (maxA - minA)) * plotH;
+
+  const accent = getCssVar('--accent');
+  const altColor = getCssVar('--series-2') || '#eb6834';
+
+  // gridlines + left (sensor) and right (altitude, m) labels
+  const gridLines = 4;
+  ctx.strokeStyle = getCssVar('--panel-border');
+  ctx.lineWidth = 1;
+  ctx.font = '11px ' + getCssVar('--mono');
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i <= gridLines; i++) {
+    const y = Math.round(PLOT_PADDING.top + (plotH * (gridLines - i)) / gridLines) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(PLOT_PADDING.left, y);
+    ctx.lineTo(PLOT_PADDING.left + plotW, y);
+    ctx.stroke();
+    const v = minV + ((maxV - minV) * i) / gridLines;
+    ctx.fillStyle = accent;
+    ctx.textAlign = 'right';
+    ctx.fillText(formatValue(v) + (i === gridLines && unit ? ' ' + unit : ''), PLOT_PADDING.left - 8, y - 0.5);
+    if (haveAlt) {
+      const a = minA + ((maxA - minA) * i) / gridLines;
+      ctx.fillStyle = altColor;
+      ctx.textAlign = 'left';
+      ctx.fillText(a.toFixed(0) + (i === gridLines ? ' m' : ''), PLOT_PADDING.left + plotW + 8, y - 0.5);
+    }
+  }
+
+  // altitude first (behind), then the sensor series
+  if (haveAlt) {
+    ctx.beginPath();
+    altPoints.forEach((p, i) => {
+      const x = xForT(p._t), y = yForAlt(p.v);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = altColor;
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const y = yFor(p.v);
+    if (i === 0) ctx.moveTo(p._x, y); else ctx.lineTo(p._x, y);
+  });
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  const last = points[points.length - 1];
+  ctx.beginPath(); ctx.arc(last._x, yFor(last.v), 6, 0, Math.PI * 2); ctx.fillStyle = getCssVar('--panel'); ctx.fill();
+  ctx.beginPath(); ctx.arc(last._x, yFor(last.v), 4, 0, Math.PI * 2); ctx.fillStyle = accent; ctx.fill();
+
+  ctx.fillStyle = getCssVar('--text-dim');
+  ctx.font = '11px ' + getCssVar('--mono');
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+  ctx.fillText(plotTimeOnly(points[0].t), PLOT_PADDING.left, height - 6);
+  ctx.textAlign = 'right';
+  ctx.fillText(plotTimeOnly(last.t), PLOT_PADDING.left + plotW, height - 6);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = altColor;
+  ctx.fillText('altitude (m) →', PLOT_PADDING.left + plotW / 2, height - 6);
+
+  if (hoverIndex !== null && points[hoverIndex]) {
+    const hp = points[hoverIndex];
+    ctx.beginPath();
+    ctx.moveTo(hp._x, PLOT_PADDING.top);
+    ctx.lineTo(hp._x, PLOT_PADDING.top + plotH);
+    ctx.strokeStyle = getCssVar('--text-dim');
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(hp._x, yFor(hp.v), 4, 0, Math.PI * 2); ctx.fillStyle = getCssVar('--panel'); ctx.fill();
+    ctx.beginPath(); ctx.arc(hp._x, yFor(hp.v), 3, 0, Math.PI * 2); ctx.fillStyle = accent; ctx.fill();
+    const alt = altitudeAtTime(altPoints, hp._t);
+    if (alt !== null) {
+      ctx.beginPath(); ctx.arc(hp._x, yForAlt(alt), 3, 0, Math.PI * 2); ctx.fillStyle = altColor; ctx.fill();
+    }
+  }
+}
+
 // getPoints/formatTooltipValue are callbacks (rather than fixed values)
 // since the caller's data can change out from under a long-lived hover
 // listener (a new poll landing, or the user picking a different file).
+// formatTooltipValue receives the whole point so an overlay can add the
+// altitude at that moment. Points carrying _x (overlay mode) are matched
+// by screen position; otherwise by sample index as before.
 function attachPlotHover(canvas, tooltip, getPoints, formatTooltipValue, onHoverIndexChange) {
   canvas.addEventListener('mousemove', (e) => {
     const points = getPoints();
     if (!points.length) return;
     const rect = canvas.getBoundingClientRect();
     const n = points.length;
-    const { plotW, xForIndex } = plotXY(points, rect.width, rect.height, 0, 1);
-    const relX = (e.clientX - rect.left) - PLOT_PADDING.left;
-    let idx = n === 1 ? 0 : Math.round((relX / plotW) * (n - 1));
-    idx = Math.max(0, Math.min(n - 1, idx));
+    const mouseX = e.clientX - rect.left;
+    let idx;
+    let xOfIdx;
+    if (points[0]._x !== undefined) {
+      idx = 0;
+      let best = Infinity;
+      points.forEach((p, i) => { const d = Math.abs(p._x - mouseX); if (d < best) { best = d; idx = i; } });
+      xOfIdx = points[idx]._x;
+    } else {
+      const { plotW, xForIndex } = plotXY(points, rect.width, rect.height, 0, 1);
+      const relX = mouseX - PLOT_PADDING.left;
+      idx = n === 1 ? 0 : Math.round((relX / plotW) * (n - 1));
+      idx = Math.max(0, Math.min(n - 1, idx));
+      xOfIdx = xForIndex(idx);
+    }
     onHoverIndexChange(idx);
 
     const p = points[idx];
     tooltip.innerHTML = '';
     const valueEl = document.createElement('div');
     valueEl.className = 'tt-value';
-    valueEl.textContent = formatTooltipValue(p.v);
+    valueEl.textContent = formatTooltipValue(p);
     const timeEl = document.createElement('div');
     timeEl.className = 'tt-time';
     timeEl.textContent = plotTimeOnly(p.t);
     tooltip.appendChild(valueEl);
     tooltip.appendChild(timeEl);
 
-    tooltip.style.left = xForIndex(idx) + 'px';
+    tooltip.style.left = xOfIdx + 'px';
     tooltip.style.top = '0px';
     tooltip.style.display = 'block';
   });
@@ -3604,8 +3772,11 @@ function createPlotController(suffix, defaultSensor) {
   const canvas = document.getElementById('plot-canvas' + suffix);
   const tooltip = document.getElementById('plot-tooltip' + suffix);
 
+  const altCheckEl = document.getElementById('plot-alt-overlay' + suffix);
+
   let currentSensor = defaultSensor;
   let points = [];
+  let altPoints = [];
   let pollInterval = null;
   let hoverIndex = null;
 
@@ -3614,8 +3785,17 @@ function createPlotController(suffix, defaultSensor) {
     return v.toFixed(decimals);
   }
 
+  function overlayOn() {
+    return !!(altCheckEl && altCheckEl.checked) && currentSensor !== 'altitude_agl';
+  }
+
   function draw() {
-    drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue);
+    if (overlayOn()) {
+      drawOverlayTimeSeriesPlot(canvas, points, altPoints, hoverIndex, formatValue, statUnitEl.textContent);
+    } else {
+      points.forEach((p) => { delete p._x; });
+      drawTimeSeriesPlot(canvas, points, hoverIndex, formatValue);
+    }
   }
 
   function updateStat() {
@@ -3628,9 +3808,29 @@ function createPlotController(suffix, defaultSensor) {
 
   async function fetchData() {
     try {
-      const res = await fetch('/plot_data?sensor=' + encodeURIComponent(currentSensor)
-        + '&window=' + encodeURIComponent(currentPlotWindowS()));
+      const window = encodeURIComponent(currentPlotWindowS());
+      const res = await fetch('/plot_data?sensor=' + encodeURIComponent(currentSensor) + '&window=' + window);
       const data = await res.json();
+
+      // The altitude overlay is a second series from the drone telemetry,
+      // fetched with the same window; a failure there (no telemetry file
+      // yet) just leaves the overlay empty and is noted in the status.
+      let altNote = '';
+      if (overlayOn()) {
+        try {
+          const altRes = await fetch('/plot_data?sensor=altitude_agl&window=' + window);
+          const altData = await altRes.json();
+          altPoints = altData.ok ? (altData.points || []) : [];
+          altNote = altData.ok
+            ? ` · + altitude (${altPoints.length} samples)`
+            : ` · altitude: ${altData.error}`;
+        } catch (e) {
+          altPoints = [];
+          altNote = ' · altitude unavailable';
+        }
+      } else {
+        altPoints = [];
+      }
 
       if (data.ok) {
         points = data.points || [];
@@ -3639,7 +3839,7 @@ function createPlotController(suffix, defaultSensor) {
           ? ` (${points.length} shown of ${data.total_in_window})`
           : '';
         statusEl.textContent = points.length
-          ? `${data.csv_file} · ${data.total_in_window ?? points.length} samples · ${currentPlotWindowLabel()}${thinned}`
+          ? `${data.csv_file} · ${data.total_in_window ?? points.length} samples · ${currentPlotWindowLabel()}${thinned}${altNote}`
           : `Connected, but no samples in ${currentPlotWindowLabel()} yet...`;
         statusEl.style.color = 'var(--text-dim)';
       } else {
@@ -3681,11 +3881,21 @@ function createPlotController(suffix, defaultSensor) {
   attachPlotHover(
     canvas, tooltip,
     () => points,
-    (v) => `${formatValue(v)} ${statUnitEl.textContent}`,
+    (p) => {
+      let text = `${formatValue(p.v)} ${statUnitEl.textContent}`;
+      if (overlayOn()) {
+        const alt = altitudeAtTime(altPoints, p._t !== undefined ? p._t : parseTsMs(p.t));
+        text += alt === null ? ' · altitude: no sample' : ` · altitude ${alt.toFixed(1)} m`;
+      }
+      return text;
+    },
     (idx) => { hoverIndex = idx; draw(); },
   );
 
   selectEl.addEventListener('change', onSensorChange);
+  if (altCheckEl) {
+    altCheckEl.addEventListener('change', () => { hoverIndex = null; fetchData(); });
+  }
 
   function refetch() {
     points = [];
