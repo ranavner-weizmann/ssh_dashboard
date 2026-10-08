@@ -85,7 +85,7 @@ function paddedRange(lo, hi, frac) {
 // gets its own axis. rangeOf(series) -> [lo, hi] of what that series draws.
 // A group with one series takes that series' colour, so axis labels say
 // which line they belong to; a shared group uses the neutral text colour.
-function axisGroupsFor(seriesList, rangeOf, singleColor) {
+function axisGroupsFor(seriesList, rangeOf, singleColor, maxTicks) {
   const groups = [];
   const byKey = new Map();
   seriesList.forEach((s, idx) => {
@@ -103,8 +103,18 @@ function axisGroupsFor(seriesList, rangeOf, singleColor) {
     g.indices.push(idx);
   });
   groups.forEach((g) => {
-    const [lo, hi] = paddedRange(g.lo, g.hi);
-    g.min = lo; g.max = hi;
+    // The axis runs from the round tick at or just below the data's low end
+    // to the one at or just above its high end, so the data spreads over
+    // the whole axis and both ends are labelled.
+    const [lo, hi] = paddedRange(g.lo, g.hi, 0.03);
+    const t = niceTicks(lo, hi, maxTicks || 5);
+    const step = t.ticks.length > 1 ? t.ticks[1] - t.ticks[0] : (hi - lo) || 1;
+    g.min = Math.floor(lo / step + 1e-9) * step;
+    g.max = Math.ceil(hi / step - 1e-9) * step;
+    if (g.max <= g.min) g.max = g.min + step;
+    g.decimals = t.decimals;
+    g.ticks = [];
+    for (let v = g.min; v <= g.max + step * 1e-6; v += step) g.ticks.push(Number(v.toFixed(t.decimals)));
     g.color = g.indices.length === 1
       ? (seriesList.length === 1 ? singleColor : (seriesList[g.indices[0]].color || singleColor))
       : getCssVar('--text-dim');
@@ -440,8 +450,8 @@ function drawOverlayPlot(canvas, series, hoverMs, emptyMessage, viewWindow) {
   ctx.font = '11px ' + getCssVar('--mono');
   ctx.textBaseline = 'middle';
   groups.forEach((g, gi) => {
-    const { ticks, decimals } = niceTicks(g.min, g.max, 5);
-    const dec = Math.max(decimals, gi === 0 && single ? (nonEmpty[0].decimals ?? 0) : 0);
+    const ticks = g.ticks;
+    const dec = Math.max(g.decimals, gi === 0 && single ? (nonEmpty[0].decimals ?? 0) : 0);
     ticks.forEach((v, ti) => {
       const y = Math.round(g.yFor(v)) + 0.5;
       if (gi === 0) {
@@ -1131,7 +1141,7 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
   const groups = axisGroupsFor(withBins, (s) => [
     Math.min(...s.bins.map((b) => b.mean - b.std)),
     Math.max(...s.bins.map((b) => b.mean + b.std)),
-  ], accent);
+  ], accent, (width - PLOT_PADDING.left - PLOT_PADDING.right) < 300 ? 3 : 5);
 
   const plotW = width - PLOT_PADDING.left - PLOT_PADDING.right;
   const legendEntries = profileLegendEntries(withBins, single, accent);
@@ -1163,7 +1173,7 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
   // value axes: group 0 along the bottom, others along the top
   ctx.textBaseline = 'alphabetic';
   groups.forEach((g, gi) => {
-    const { ticks, decimals: dec } = niceTicks(g.min, g.max, plotW < 300 ? 3 : 5);
+    const ticks = g.ticks, dec = g.decimals;
     ctx.fillStyle = g.color;
     const yText = gi === 0 ? height - 6 : topPad - 6 - (gi - 1) * PROFILE_TOP_AXIS_H;
     ticks.forEach((v, ti) => {
@@ -1396,7 +1406,7 @@ function drawTransectLines(canvas, series, xLabel, decimals, hoverDistance, xMax
   // value axes: group 0 on the left, others on the right
   ctx.textBaseline = 'middle';
   groups.forEach((g, gi) => {
-    const { ticks, decimals: dec } = niceTicks(g.min, g.max, 5);
+    const ticks = g.ticks, dec = g.decimals;
     ctx.fillStyle = g.color;
     ticks.forEach((v, ti) => {
       const y = Math.round(g.yFor(v)) + 0.5;
