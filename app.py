@@ -806,6 +806,13 @@ def _read_local_csv(base_dir, relpath):
     return raw, None
 
 
+IMET_HUNDREDTHS_TO_C = (("imet_temp", "imet_temp_C"), ("imet_hum_temp", "imet_hum_temp_C"))
+
+# Raw columns the offline pickers never offer: the iMet's hundredths-of-a-
+# degree fields, which the merged day always carries in degC as *_C.
+OFFLINE_HIDDEN_COLUMNS = {"imet_temp", "imet_hum_temp"}
+
+
 def _merge_day(session_name, date, dest_dir=None):
     """
     Concatenates every run's merged_data_*.csv on `date` into one CSV,
@@ -899,6 +906,12 @@ def _merge_day(session_name, date, dest_dir=None):
                 union.append(col)
     time_col = headers[0][2][0]
     out_fields = [time_col, "_source_run"] + [c for c in union if c != time_col]
+    # The iMet reports temperature in hundredths of a degree; newer runs
+    # carry imet_temp_C / imet_hum_temp_C from the logger, older ones do
+    # not. Add them here when missing so every merged day has them.
+    for raw_col, c_col in IMET_HUNDREDTHS_TO_C:
+        if raw_col in union and c_col not in out_fields:
+            out_fields.append(c_col)
 
     total_rows = 0
     skipped_rows = 0
@@ -916,6 +929,11 @@ def _merge_day(session_name, date, dest_dir=None):
                         continue
                     record = dict(zip(this_header, row))
                     record["_source_run"] = run
+                    for raw_col, c_col in IMET_HUNDREDTHS_TO_C:
+                        if c_col in out_fields and not record.get(c_col):
+                            v = _parse_numeric(record.get(raw_col))
+                            if v is not None:
+                                record[c_col] = f"{v / 100.0:.2f}"
                     if time_col not in record:
                         record[time_col] = row[0]
                     writer.writerow(record)
@@ -1155,10 +1173,12 @@ def offline_merged_columns(name, date):
         if not rows:
             continue
         columns = rows[0]
+        numeric = _compute_column_numeric(columns, rows[1:])
+        keep = [i for i, c in enumerate(columns) if c not in OFFLINE_HIDDEN_COLUMNS]
         files.append({
             "file": relpath,
-            "columns": columns,
-            "column_numeric": _compute_column_numeric(columns, rows[1:]),
+            "columns": [columns[i] for i in keep],
+            "column_numeric": [numeric[i] for i in keep],
         })
     return jsonify({"ok": True, "files": files})
 
@@ -1757,6 +1777,10 @@ HOVER_WINDOW_SECONDS = 5          # altitude must stay flat over +- this many se
 HOVER_MAX_RANGE_M = 2.0           # ... to within this many metres to count as hovering
 SENSOR_TO_DRONE_MAX_GAP_SECONDS = 5   # telemetry is 1 Hz; a sensor reading further than this from any kept altitude sample is dropped
 PROFILE_MAX_RADIUS_M = 60.0       # the profile is over once the drone first gets this far from the launch point (the transit out)
+# Readings that cannot physically be negative; a value below zero from
+# these columns is an instrument artefact and is left out of the binned
+# profiles and routes.
+NONNEGATIVE_COLUMN_RE = re.compile(r"Ozone_ppb$")
 
 
 def _bin_altitude_profile(points, bin_size=ALTITUDE_BIN_SIZE_M):
@@ -1946,6 +1970,8 @@ def offline_merged_altitude_profile(name, date):
                     continue
                 for column in columns:
                     val = _parse_numeric(row.get(column))
+                    if val is not None and val < 0 and NONNEGATIVE_COLUMN_RE.search(column):
+                        continue
                     if val is not None:
                         sensor_series[column].append((ts, val))
     except Exception as e:
@@ -2248,6 +2274,8 @@ def offline_merged_transect(name, date):
                     continue
                 for column in columns:
                     val = _parse_numeric(row.get(column))
+                    if val is not None and val < 0 and NONNEGATIVE_COLUMN_RE.search(column):
+                        continue
                     if val is not None:
                         sensor_series[column].append((ts, val))
     except Exception as e:

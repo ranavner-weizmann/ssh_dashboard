@@ -1176,12 +1176,23 @@ function drawProfileLines(canvas, series, yLabel, decimals, hoverAltitude) {
     const ticks = g.ticks, dec = g.decimals;
     ctx.fillStyle = g.color;
     const yText = gi === 0 ? height - 6 : topPad - 6 - (gi - 1) * PROFILE_TOP_AXIS_H;
+    // The unit goes after the last tick only if it does not run into the
+    // previous tick's label on this (often narrow) chart; the legend
+    // carries the unit anyway.
+    const labels = ticks.map((v) => v.toFixed(Math.min(dec, 4)));
+    let unitText = g.unit ? ' ' + g.unit : '';
+    if (unitText && ticks.length >= 2) {
+      const n = ticks.length;
+      const gap = g.xFor(ticks[n - 1]) - g.xFor(ticks[n - 2]);
+      const need = ctx.measureText(labels[n - 1] + unitText).width + ctx.measureText(labels[n - 2]).width / 2 + 6;
+      if (gap < need) unitText = '';
+    }
     ticks.forEach((v, ti) => {
       const x = g.xFor(v);
       const isLast = ti === ticks.length - 1;
       ctx.textAlign = ti === 0 ? 'left' : isLast ? 'right' : 'center';
       const tx = ti === 0 ? Math.max(x, PLOT_PADDING.left) : isLast ? Math.min(x, width - PLOT_PADDING.right) : x;
-      ctx.fillText(v.toFixed(Math.min(dec, 4)) + (isLast && g.unit ? ' ' + g.unit : ''), tx, yText);
+      ctx.fillText(labels[ti] + (isLast ? unitText : ''), tx, yText);
       ctx.beginPath();
       const y0 = gi === 0 ? topPad + plotH : topPad;
       ctx.moveTo(Math.round(x) + 0.5, y0);
