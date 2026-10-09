@@ -83,9 +83,12 @@
 
   .plot-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(4, 1fr);
     gap: 12px;
     margin-bottom: 14px;
+  }
+  @media (max-width: 1500px) {
+    .plot-row { grid-template-columns: repeat(2, 1fr); }
   }
 
   .plot-row > .panel {
@@ -347,7 +350,7 @@
   .plot-canvas-wrap {
     position: relative;
     width: 100%;
-    height: 170px;
+    height: 110px;
   }
 
   .plot-canvas-el {
@@ -1338,6 +1341,7 @@
               <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="partector2pro_mass">Mass (Partector2Pro)</option>
               <option value="miniaeth">Ångström exp. (MiniAeth)</option>
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
@@ -1373,6 +1377,7 @@
               <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="partector2pro_mass">Mass (Partector2Pro)</option>
               <option value="miniaeth">Ångström exp. (MiniAeth)</option>
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
@@ -1408,6 +1413,7 @@
               <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="partector2pro_mass">Mass (Partector2Pro)</option>
               <option value="miniaeth">Ångström exp. (MiniAeth)</option>
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
@@ -1443,6 +1449,7 @@
               <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="partector2pro_mass">Mass (Partector2Pro)</option>
               <option value="miniaeth" selected>Ångström exp. (MiniAeth)</option>
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
@@ -1477,7 +1484,8 @@
               <option value="pops">PM2.5 (POPS)</option>
               <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
-              <option value="partector2pro" selected>Particle Conc. (Partector2Pro)</option>
+              <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="partector2pro_mass" selected>Mass (Partector2Pro)</option>
               <option value="miniaeth">Ångström exp. (MiniAeth)</option>
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
@@ -1513,6 +1521,7 @@
               <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="partector2pro_mass">Mass (Partector2Pro)</option>
               <option value="miniaeth">Ångström exp. (MiniAeth)</option>
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
@@ -1528,6 +1537,41 @@
           <div class="plot-canvas-wrap">
             <canvas id="plot-canvas-6" class="plot-canvas-el"></canvas>
             <div class="plot-tooltip" id="plot-tooltip-6"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="plot-toolbar">
+            <label style="margin-bottom: 0;">live plot</label>
+            <select id="plot-sensor-select-7" class="select-input">
+              <option value="pom">Ozone (POM)</option>
+              <option value="imet">Temperature (iMet)</option>
+              <option value="imet_rh">Relative Humidity (iMet)</option>
+              <option value="cavity">Inline Pressure (Cavity)</option>
+              <option value="teca">Tec Current</option>
+              <option value="tect">Tec Temperature</option>
+              <option value="rhi">RH inline</option>
+              <option value="intensity">Max Intensity</option>
+              <option value="trisonica">Wind Speed (Trisonica)</option>
+              <option value="pops">PM2.5 (POPS)</option>
+              <option value="pops_pm1">PM1 (POPS)</option>
+              <option value="pops_conc">Particle Conc. (POPS)</option>
+              <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
+              <option value="partector2pro_mass">Mass (Partector2Pro)</option>
+              <option value="miniaeth">Ångström exp. (MiniAeth)</option>
+              <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
+              <option value="altitude_agl" selected>Altitude AGL (Drone)</option>
+            </select>
+          </div>
+          <div class="plot-header">
+            <div>
+              <span class="plot-stat-value" id="plot-stat-value-7">--</span>
+              <span class="plot-stat-unit" id="plot-stat-unit-7"></span>
+            </div>
+            <div class="hint" id="plot-status-7"></div>
+          </div>
+          <div class="plot-canvas-wrap">
+            <canvas id="plot-canvas-7" class="plot-canvas-el"></canvas>
+            <div class="plot-tooltip" id="plot-tooltip-7"></div>
           </div>
         </div>
       </div>
@@ -3371,7 +3415,7 @@ function playTimerBeep() {
 // their old precision under pops_conc / miniaeth_bc.
 const PLOT_DECIMALS = {
   pom: 1, imet: 2, cavity: 1, teca: 3, tect: 2, rhi: 1, intensity: 0,
-  trisonica: 2, pops: 2, pops_pm1: 2, pops_conc: 1, partector2pro: 0, miniaeth: 2, miniaeth_bc: 1,
+  trisonica: 2, pops: 2, pops_pm1: 2, pops_conc: 1, partector2pro: 0, partector2pro_mass: 1, miniaeth: 2, miniaeth_bc: 1,
   altitude_agl: 2, imet_rh: 1,
 };
 
@@ -3930,8 +3974,9 @@ const plotControllers = [
   createPlotController('-2', 'imet'),
   createPlotController('-3', 'pops'),
   createPlotController('-4', 'miniaeth'),
-  createPlotController('-5', 'partector2pro'),
+  createPlotController('-5', 'partector2pro_mass'),
   createPlotController('-6', 'trisonica'),
+  createPlotController('-7', 'altitude_agl'),
 ];
 
 function applyPlotWindow(seconds) {
