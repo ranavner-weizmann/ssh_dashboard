@@ -83,14 +83,17 @@
 
   .plot-row {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
-    margin-bottom: 14px;
-  }
-  @media (max-width: 1500px) {
-    .plot-row { grid-template-columns: repeat(2, 1fr); }
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 12px;
   }
 
+  /* Compact live-plot panels: three per row, tighter padding, smaller
+     readout, so the whole set fits one screen. */
+  .plot-row > .panel { padding: 10px 12px; }
+  .plot-row .plot-toolbar { margin-bottom: 6px; gap: 8px; }
+  .plot-row .plot-header { margin: 4px 0; }
+  .plot-row .plot-stat-value { font-size: 18px; }
   .plot-row > .panel {
     margin-bottom: 0;
     /* A <canvas>'s width/height attributes (the dpr-scaled pixel buffer
@@ -127,7 +130,7 @@
       grid-template-columns: 1fr;
     }
     .plot-row {
-      grid-template-columns: 1fr;
+      grid-template-columns: repeat(2, 1fr);
     }
     .debug-row {
       grid-template-columns: 1fr;
