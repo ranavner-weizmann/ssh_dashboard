@@ -5216,6 +5216,34 @@ def _run_span_s(run_dir_name, points):
 # stops working (self-healing against rotation, not just an optimization).
 _plot_path_cache = {}
 
+# A live plot is only live while its file is still being written. The
+# window below is cut relative to the file's newest sample (so it works
+# whatever the Pi's clock says), which means an old file - last flight's
+# telemetry when the PSDK is off, a finished run - would otherwise keep
+# showing its final minutes as if they were now. A file counts as stale
+# once its mtime has not moved for PLOT_STALE_UNCHANGED_S of our own
+# polling, or (both clocks being NTP-synced) was last written
+# PLOT_STALE_CLOCK_S ago; the plot is then returned empty with stale_s.
+PLOT_STALE_UNCHANGED_S = 90
+PLOT_STALE_CLOCK_S = 600
+_plot_live_seen = {}            # csv_path -> (mtime, PC time that mtime was first seen)
+
+
+def _plot_stale_s(csv_path, file_mtime):
+    """Seconds since the file was last written if it no longer counts as live, else None."""
+    if not file_mtime:
+        return None
+    now = time.time()
+    seen = _plot_live_seen.get(csv_path)
+    if seen is None or seen[0] != file_mtime:
+        seen = (file_mtime, now)
+        _plot_live_seen[csv_path] = seen
+    unchanged_s = now - seen[1]
+    clock_age_s = now - file_mtime
+    if unchanged_s >= PLOT_STALE_UNCHANGED_S or clock_age_s >= PLOT_STALE_CLOCK_S:
+        return max(unchanged_s, clock_age_s)
+    return None
+
 
 # ---------- Remote CSV cache: tail first, fetch only what is needed ----------
 #
@@ -5740,6 +5768,20 @@ def plot_data():
         # str is immutable: grab a snapshot and parse outside the SFTP lock
         # so other requests are not held up by CPU work.
         header, start, text = entry.header, entry.start, entry.text
+        file_mtime = entry.mtime
+
+    stale_s = _plot_stale_s(csv_path, file_mtime)
+    if stale_s is not None:
+        # Nothing is being written: show an empty plot rather than the end
+        # of an old file. A drone flight writes a new telemetry file, so
+        # forget the path and look for the newest one again next poll.
+        if spec.get("source") == "drone_telemetry":
+            _plot_path_cache.pop(sensor, None)
+        return jsonify({
+            "ok": True, "sensor": sensor, "label": spec["label"], "unit": spec["unit"],
+            "run_dir": run_dir_name, "csv_file": os.path.basename(csv_path), "window_s": window_s,
+            "total_in_window": 0, "run_span_s": 0, "points": [], "live": False, "stale_s": stale_s,
+        })
 
     points, col_err = _plot_points(sensor, csv_path, header, start, text, spec)
     if col_err:
@@ -5759,6 +5801,7 @@ def plot_data():
         "total_in_window": total_in_window,
         "run_span_s": run_span_s,
         "points": points,
+        "live": True,
     })
 
 

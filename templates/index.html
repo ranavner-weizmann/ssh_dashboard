@@ -1441,7 +1441,7 @@
             <select id="plot-sensor-select-4" class="select-input">
               <option value="pom">Ozone (POM)</option>
               <option value="imet">Temperature (iMet)</option>
-              <option value="imet_rh">Relative Humidity (iMet)</option>
+              <option value="imet_rh" selected>Relative Humidity (iMet)</option>
               <option value="cavity">Inline Pressure (Cavity)</option>
               <option value="teca">Tec Current</option>
               <option value="tect">Tec Temperature</option>
@@ -1453,7 +1453,7 @@
               <option value="pops_conc">Particle Conc. (POPS)</option>
               <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
               <option value="partector2pro_mass">Mass (Partector2Pro)</option>
-              <option value="miniaeth" selected>Ångström exp. (MiniAeth)</option>
+              <option value="miniaeth">Ångström exp. (MiniAeth)</option>
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
             </select>
@@ -1487,8 +1487,8 @@
               <option value="pops">PM2.5 (POPS)</option>
               <option value="pops_pm1">PM1 (POPS)</option>
               <option value="pops_conc">Particle Conc. (POPS)</option>
-              <option value="partector2pro">Particle Conc. (Partector2Pro)</option>
-              <option value="partector2pro_mass" selected>Mass (Partector2Pro)</option>
+              <option value="partector2pro" selected>Particle Conc. (Partector2Pro)</option>
+              <option value="partector2pro_mass">Mass (Partector2Pro)</option>
               <option value="miniaeth">Ångström exp. (MiniAeth)</option>
               <option value="miniaeth_bc">Black Carbon (MiniAeth)</option>
               <option value="altitude_agl">Altitude AGL (Drone)</option>
@@ -3818,6 +3818,14 @@ function syncPlotWindowControls() {
 restorePlotWindow();
 syncPlotWindowControls();
 
+function plotAgeText(seconds) {
+  const s = Math.max(0, Math.round(seconds || 0));
+  if (s < 90) return `${s} s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
 function createPlotController(suffix, defaultSensor) {
   const selectEl = document.getElementById('plot-sensor-select' + suffix);
   const statValueEl = document.getElementById('plot-stat-value' + suffix);
@@ -3877,9 +3885,9 @@ function createPlotController(suffix, defaultSensor) {
           const altRes = await fetch('/plot_data?sensor=altitude_agl&window=' + window);
           const altData = await altRes.json();
           altPoints = altData.ok ? (altData.points || []) : [];
-          altNote = altData.ok
-            ? ` · + altitude (${altPoints.length} samples)`
-            : ` · altitude: ${altData.error}`;
+          altNote = !altData.ok ? ` · altitude: ${altData.error}`
+            : altData.live === false ? ` · altitude: not live (last written ${plotAgeText(altData.stale_s)} ago)`
+            : ` · + altitude (${altPoints.length} samples)`;
         } catch (e) {
           altPoints = [];
           altNote = ' · altitude unavailable';
@@ -3888,7 +3896,14 @@ function createPlotController(suffix, defaultSensor) {
         altPoints = [];
       }
 
-      if (data.ok) {
+      if (data.ok && data.live === false) {
+        // The file is no longer being written (PSDK off, run finished):
+        // an empty plot, not the tail of an old file.
+        points = [];
+        statUnitEl.textContent = data.unit || '';
+        statusEl.textContent = `${data.csv_file} · not live: last written ${plotAgeText(data.stale_s)} ago${altNote}`;
+        statusEl.style.color = 'var(--text-dim)';
+      } else if (data.ok) {
         points = data.points || [];
         statUnitEl.textContent = data.unit || '';
         const thinned = data.total_in_window > points.length
@@ -3976,8 +3991,8 @@ const plotControllers = [
   createPlotController('-1', 'pom'),
   createPlotController('-2', 'imet'),
   createPlotController('-3', 'pops'),
-  createPlotController('-4', 'miniaeth'),
-  createPlotController('-5', 'partector2pro_mass'),
+  createPlotController('-4', 'imet_rh'),
+  createPlotController('-5', 'partector2pro'),
   createPlotController('-6', 'trisonica'),
   createPlotController('-7', 'altitude_agl'),
 ];
