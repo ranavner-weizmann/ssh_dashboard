@@ -5595,6 +5595,13 @@ PLOT_SENSORS = {
         "unit": "µg/m³",
         "scale": 1.0,
     },
+    "partector2pro_ldsa": {
+        "label": "LDSA (Partector2Pro)",
+        "csv_prefix": "partector2pro_data_",
+        "value_column": "ldsa_um2_cm3",
+        "unit": "µm²/cm³",
+        "scale": 1.0,
+    },
     # AAE_fit is the logger's own 5-wavelength absorption Angstrom exponent
     # (uri_aplogger/derived.py), appended to every MA200 row; dimensionless.
     # The instrument's own smoothed "AAE" column is also in the CSV.
