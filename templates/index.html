@@ -60,8 +60,8 @@
     max-width: 720px;
   }
 
-  /* Top strip: the panels the user reaches for constantly (timer, notes,
-     time sync) go first so they're glanceable without scrolling. */
+  /* Top strip: the panels the user reaches for constantly (time sync and
+     run buttons, notes, data) go first so they're glanceable without scrolling. */
   .top-strip {
     display: grid;
     gap: 12px;
@@ -681,12 +681,6 @@
     margin-top: 10px;
   }
 
-  .button-row .btn-equal {
-    flex: 1;
-    width: auto;
-    min-width: 160px;
-  }
-
   .sensor-panel {
     max-width: 420px;
   }
@@ -884,37 +878,6 @@
     overflow-y: auto;
   }
 
-  .timer-display {
-    font-family: var(--mono);
-    font-size: 30px;
-    font-weight: 600;
-    text-align: center;
-    color: var(--text);
-    padding: 6px 0 2px 0;
-    letter-spacing: 0.02em;
-  }
-  /* Now that .top-strip stretches this panel to match its (taller)
-     siblings, let the countdown itself grow into and center within
-     whatever extra room that leaves, instead of the box just ending in
-     a stretch of blank space below the Pause/Reset buttons. */
-  .timer-panel {
-    display: flex;
-    flex-direction: column;
-  }
-  .timer-panel .timer-display {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .timer-display.done {
-    color: var(--accent);
-  }
-  .timer-preset.active {
-    color: var(--accent);
-    border-color: var(--accent);
-  }
-
   /* MODAL */
   .modal-overlay {
     display: none;
@@ -1042,20 +1005,15 @@
   }
   .clock-drift-warning.active, .timezone-mismatch-warning.active { display: block; }
 
-  .btn-sync {
-    width: 100%;
-    background: #dce8f5;
-    border: 1px solid var(--accent-dim);
-    color: var(--accent);
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    padding: 9px 14px;
-    border-radius: 8px;
-    margin-top: 4px;
+  /* The pre-flight buttons, stacked in the order they're used. Each block
+     keeps its own status hint directly under its button. */
+  .run-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 10px;
   }
-  .btn-sync:hover { background: #cbdef1; border-color: var(--accent); }
-  .btn-sync:disabled { opacity: 0.5; cursor: not-allowed; }
+  .run-steps .hint:empty { display: none; }
 
   .btn-danger {
     width: 100%;
@@ -1194,43 +1152,12 @@
 
     <div id="tab-operation" class="tab-panel active">
       <div class="top-strip top-strip-primary">
-        <div class="panel timer-panel">
-          <label style="margin-bottom: 8px;">timer</label>
-          <div class="button-row">
-            <button class="btn-ghost timer-preset" onclick="startTimerPreset(30, this)">30s</button>
-            <button class="btn-ghost timer-preset" onclick="startTimerPreset(60, this)">1m</button>
-            <button class="btn-ghost timer-preset" onclick="startTimerPreset(90, this)">1m 30s</button>
-            <button class="btn-ghost timer-preset" onclick="startTimerPreset(180, this)">3m</button>
-            <button class="btn-ghost timer-preset" onclick="startTimerPreset(300, this)">5m</button>
-          </div>
-          <div class="row" style="margin-top: 10px; align-items: flex-end;">
-            <div class="field" style="margin-bottom: 0;">
-              <label for="timer-custom-input">custom (mm:ss or seconds)</label>
-              <input type="text" id="timer-custom-input" placeholder="2:30" autocomplete="off">
-            </div>
-            <button class="btn-ghost" style="width: auto; white-space: nowrap;" onclick="startTimerCustom()">Start</button>
-          </div>
-          <div class="timer-display" id="timer-display">--:--</div>
-          <div class="button-row" style="margin-top: 0;">
-            <button class="btn-ghost" id="timer-pause-btn" onclick="toggleTimerPause()" disabled>Pause</button>
-            <button class="btn-ghost" id="timer-reset-btn" onclick="resetTimer()" disabled>Reset</button>
-          </div>
-          <div class="hint" id="timer-status"></div>
-        </div>
-
+        <!-- Pre-flight, top to bottom in the order you do it: check the
+             clocks, sync, start PSDK, start the sensors. Clocks and buttons
+             share a panel because a clock warning is what greys out the
+             run buttons, so the cause sits right above the effect. -->
         <div class="panel">
-          <label for="note-text">new note</label>
-          <textarea id="note-text" placeholder="What's happening on the system right now..."></textarea>
-          <div class="submit-row">
-            <button class="btn-primary" id="save-btn" onclick="saveNote()" style="width:auto;">Save note</button>
-          </div>
-          <div class="hint" id="save-status"></div>
-          <label style="margin-top: 14px; margin-bottom: 8px;">session log</label>
-          <div class="log" id="log"></div>
-        </div>
-
-        <div class="panel">
-          <label style="margin-bottom: 8px;">time sync</label>
+          <label style="margin-bottom: 8px;">time sync &amp; run</label>
           <div class="time-row">
             <span class="time-label">local machine</span>
             <span class="time-value" id="mac-time-display">--:--:--</span>
@@ -1254,10 +1181,38 @@
             Disable it first over SSH with <code>sudo timedatectl set-ntp false</code>,
             then sync again.
           </div>
-          <button class="btn-sync" id="sync-time-btn" onclick="syncTime()">Sync Time</button>
-          <div class="hint" id="sync-time-status"></div>
+          <div class="run-steps">
+            <div>
+              <button class="btn-primary" id="sync-time-btn" onclick="syncTime()">Sync Time</button>
+              <div class="hint" id="sync-time-status"></div>
+            </div>
+            <div>
+              <button class="btn-primary" id="capp-btn" onclick="runCApp()">PSDK Initialization</button>
+              <div class="hint" id="capp-status"></div>
+              <div id="capp-output" class="output-panel"></div>
+            </div>
+            <div>
+              <button class="btn-primary" id="runall-btn" onclick="runAllSensors()">Run All Sensors</button>
+              <button class="btn-ghost" id="stop-runall-btn" onclick="stopRunAllSensors()" style="width: 100%; margin-top: 8px;">Stop Run All</button>
+              <div class="hint" id="runall-status">Starts the remote <code>drone_air_system/uri_aplogger/runall.py</code> script using the Pi-side venv.</div>
+            </div>
+          </div>
+        </div>
 
-          <button class="btn-download" id="vscode-ssh-btn" style="margin-top: 14px;" onclick="openVSCodeSSH()">Open SSH connection with VS Code</button>
+        <div class="panel">
+          <label for="note-text">new note</label>
+          <textarea id="note-text" placeholder="What's happening on the system right now..."></textarea>
+          <div class="submit-row">
+            <button class="btn-primary" id="save-btn" onclick="saveNote()" style="width:auto;">Save note</button>
+          </div>
+          <div class="hint" id="save-status"></div>
+          <label style="margin-top: 14px; margin-bottom: 8px;">session log</label>
+          <div class="log" id="log"></div>
+        </div>
+
+        <div class="panel">
+          <label style="margin-bottom: 8px;">data</label>
+          <button class="btn-download" id="vscode-ssh-btn" onclick="openVSCodeSSH()">Open SSH connection with VS Code</button>
 
           <button class="btn-download" id="download-btn" style="margin-top: 14px;" onclick="startDownload()">⬇ Download Data</button>
           <div class="progress-bar-track" id="progress-bar-track">
@@ -1274,20 +1229,6 @@
           <div class="hint" id="backup-status"></div>
           <div id="backup-results"></div>
         </div>
-      </div>
-
-      <div class="panel">
-        <label style="margin-bottom: 8px;">run sensors / psdk</label>
-        <div class="button-row">
-          <button class="btn-primary btn-equal" id="runall-btn" onclick="runAllSensors()">Run All Sensors</button>
-          <button class="btn-primary btn-equal" id="capp-btn" onclick="runCApp()">PSDK Initialization</button>
-        </div>
-        <div class="button-row" style="margin-top: 8px;">
-          <button class="btn-ghost" id="stop-runall-btn" onclick="stopRunAllSensors()">Stop Run All</button>
-        </div>
-        <div class="hint" id="runall-status">Starts the remote <code>drone_air_system/uri_aplogger/runall.py</code> script using the Pi-side venv.</div>
-        <div class="hint" id="capp-status"></div>
-        <div id="capp-output" class="output-panel"></div>
       </div>
 
       <!-- One time frame for all six live plots below: fixed presets from
@@ -3250,10 +3191,6 @@ document.addEventListener('keydown', (e) => {
       submitBackupDetails();
     }
   }
-  if (e.key === 'Enter' && document.activeElement === document.getElementById('timer-custom-input')) {
-    e.preventDefault();
-    startTimerCustom();
-  }
   // Enter saves the note; Shift+Enter still inserts a newline, same as
   // chat apps - a note is usually one quick line, but this doesn't shut
   // the door on a longer, multi-line one.
@@ -3262,147 +3199,6 @@ document.addEventListener('keydown', (e) => {
     saveNote();
   }
 });
-
-// ---------- Timer ----------
-
-let timerInterval = null;
-let timerRemaining = 0;
-let timerPaused = false;
-
-function formatTimer(sec) {
-  sec = Math.max(0, Math.round(sec));
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
-
-function startTimerPreset(seconds, btn) {
-  document.querySelectorAll('.timer-preset').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-  startTimerWithSeconds(seconds);
-}
-
-function parseTimerInput(raw) {
-  if (raw.includes(':')) {
-    const parts = raw.split(':');
-    if (parts.length !== 2) return null;
-    const m = parseInt(parts[0], 10);
-    const s = parseInt(parts[1], 10);
-    if (isNaN(m) || isNaN(s)) return null;
-    return m * 60 + s;
-  }
-  const s = parseInt(raw, 10);
-  return isNaN(s) ? null : s;
-}
-
-function startTimerCustom() {
-  const input = document.getElementById('timer-custom-input');
-  const statusEl = document.getElementById('timer-status');
-  const raw = input.value.trim();
-
-  if (!raw) {
-    statusEl.textContent = 'Enter a time (e.g. 2:30 or 90).';
-    statusEl.style.color = 'var(--err)';
-    return;
-  }
-
-  const seconds = parseTimerInput(raw);
-  if (seconds === null || seconds <= 0) {
-    statusEl.textContent = 'Could not parse that time - use mm:ss or a number of seconds.';
-    statusEl.style.color = 'var(--err)';
-    return;
-  }
-
-  document.querySelectorAll('.timer-preset').forEach(b => b.classList.remove('active'));
-  startTimerWithSeconds(seconds);
-}
-
-function startTimerWithSeconds(seconds) {
-  clearInterval(timerInterval);
-  timerRemaining = seconds;
-  timerPaused = false;
-
-  const display = document.getElementById('timer-display');
-  display.textContent = formatTimer(timerRemaining);
-  display.classList.remove('done');
-  document.getElementById('timer-status').textContent = '';
-
-  const pauseBtn = document.getElementById('timer-pause-btn');
-  pauseBtn.disabled = false;
-  pauseBtn.textContent = 'Pause';
-  document.getElementById('timer-reset-btn').disabled = false;
-
-  timerInterval = setInterval(tickTimer, 1000);
-}
-
-function tickTimer() {
-  if (timerPaused) return;
-  timerRemaining -= 1;
-  if (timerRemaining <= 0) {
-    document.getElementById('timer-display').textContent = '0:00';
-    finishTimer();
-    return;
-  }
-  document.getElementById('timer-display').textContent = formatTimer(timerRemaining);
-}
-
-function toggleTimerPause() {
-  if (!timerInterval) return;
-  timerPaused = !timerPaused;
-  document.getElementById('timer-pause-btn').textContent = timerPaused ? 'Resume' : 'Pause';
-}
-
-function resetTimer() {
-  clearInterval(timerInterval);
-  timerInterval = null;
-  timerRemaining = 0;
-  timerPaused = false;
-
-  document.querySelectorAll('.timer-preset').forEach(b => b.classList.remove('active'));
-  const display = document.getElementById('timer-display');
-  display.textContent = '--:--';
-  display.classList.remove('done');
-  document.getElementById('timer-status').textContent = '';
-
-  document.getElementById('timer-pause-btn').disabled = true;
-  document.getElementById('timer-pause-btn').textContent = 'Pause';
-  document.getElementById('timer-reset-btn').disabled = true;
-}
-
-function finishTimer() {
-  clearInterval(timerInterval);
-  timerInterval = null;
-
-  document.getElementById('timer-display').classList.add('done');
-  const statusEl = document.getElementById('timer-status');
-  statusEl.textContent = "Time's up!";
-  statusEl.style.color = 'var(--accent)';
-  document.getElementById('timer-pause-btn').disabled = true;
-
-  playTimerBeep();
-}
-
-function playTimerBeep() {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const playTone = (delay) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = 880;
-      gain.gain.value = 0.15;
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(ctx.currentTime + delay);
-      osc.stop(ctx.currentTime + delay + 0.25);
-    };
-    playTone(0);
-    playTone(0.35);
-    playTone(0.7);
-  } catch (e) {
-    // Web Audio unavailable - the visual "Time's up!" state still shows.
-  }
-}
 
 // ---------- Live Plot ----------
 // Two independent plot instances (side by side), each with its own
