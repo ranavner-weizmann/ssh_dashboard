@@ -878,6 +878,37 @@
     overflow-y: auto;
   }
 
+  .timer-display {
+    font-family: var(--mono);
+    font-size: 30px;
+    font-weight: 600;
+    text-align: center;
+    color: var(--text);
+    padding: 6px 0 2px 0;
+    letter-spacing: 0.02em;
+  }
+  /* Now that .top-strip stretches this panel to match its (taller)
+     siblings, let the countdown itself grow into and center within
+     whatever extra room that leaves, instead of the box just ending in
+     a stretch of blank space below the Pause/Reset buttons. */
+  .timer-panel {
+    display: flex;
+    flex-direction: column;
+  }
+  .timer-panel .timer-display {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .timer-display.done {
+    color: var(--accent);
+  }
+  .timer-preset.active {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
   /* MODAL */
   .modal-overlay {
     display: none;
@@ -1525,6 +1556,29 @@
             <canvas id="plot-canvas-7" class="plot-canvas-el"></canvas>
             <div class="plot-tooltip" id="plot-tooltip-7"></div>
           </div>
+        </div>
+        <div class="panel timer-panel">
+          <label style="margin-bottom: 8px;">timer</label>
+          <div class="button-row">
+            <button class="btn-ghost timer-preset" onclick="startTimerPreset(30, this)">30s</button>
+            <button class="btn-ghost timer-preset" onclick="startTimerPreset(60, this)">1m</button>
+            <button class="btn-ghost timer-preset" onclick="startTimerPreset(90, this)">1m 30s</button>
+            <button class="btn-ghost timer-preset" onclick="startTimerPreset(180, this)">3m</button>
+            <button class="btn-ghost timer-preset" onclick="startTimerPreset(300, this)">5m</button>
+          </div>
+          <div class="row" style="margin-top: 10px; align-items: flex-end;">
+            <div class="field" style="margin-bottom: 0;">
+              <label for="timer-custom-input">custom (mm:ss or seconds)</label>
+              <input type="text" id="timer-custom-input" placeholder="2:30" autocomplete="off">
+            </div>
+            <button class="btn-ghost" style="width: auto; white-space: nowrap;" onclick="startTimerCustom()">Start</button>
+          </div>
+          <div class="timer-display" id="timer-display">--:--</div>
+          <div class="button-row" style="margin-top: 0;">
+            <button class="btn-ghost" id="timer-pause-btn" onclick="toggleTimerPause()" disabled>Pause</button>
+            <button class="btn-ghost" id="timer-reset-btn" onclick="resetTimer()" disabled>Reset</button>
+          </div>
+          <div class="hint" id="timer-status"></div>
         </div>
       </div>
     </div>
@@ -3193,6 +3247,10 @@ document.addEventListener('keydown', (e) => {
       submitBackupDetails();
     }
   }
+  if (e.key === 'Enter' && document.activeElement === document.getElementById('timer-custom-input')) {
+    e.preventDefault();
+    startTimerCustom();
+  }
   // Enter saves the note; Shift+Enter still inserts a newline, same as
   // chat apps - a note is usually one quick line, but this doesn't shut
   // the door on a longer, multi-line one.
@@ -3201,6 +3259,147 @@ document.addEventListener('keydown', (e) => {
     saveNote();
   }
 });
+
+// ---------- Timer ----------
+
+let timerInterval = null;
+let timerRemaining = 0;
+let timerPaused = false;
+
+function formatTimer(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function startTimerPreset(seconds, btn) {
+  document.querySelectorAll('.timer-preset').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  startTimerWithSeconds(seconds);
+}
+
+function parseTimerInput(raw) {
+  if (raw.includes(':')) {
+    const parts = raw.split(':');
+    if (parts.length !== 2) return null;
+    const m = parseInt(parts[0], 10);
+    const s = parseInt(parts[1], 10);
+    if (isNaN(m) || isNaN(s)) return null;
+    return m * 60 + s;
+  }
+  const s = parseInt(raw, 10);
+  return isNaN(s) ? null : s;
+}
+
+function startTimerCustom() {
+  const input = document.getElementById('timer-custom-input');
+  const statusEl = document.getElementById('timer-status');
+  const raw = input.value.trim();
+
+  if (!raw) {
+    statusEl.textContent = 'Enter a time (e.g. 2:30 or 90).';
+    statusEl.style.color = 'var(--err)';
+    return;
+  }
+
+  const seconds = parseTimerInput(raw);
+  if (seconds === null || seconds <= 0) {
+    statusEl.textContent = 'Could not parse that time - use mm:ss or a number of seconds.';
+    statusEl.style.color = 'var(--err)';
+    return;
+  }
+
+  document.querySelectorAll('.timer-preset').forEach(b => b.classList.remove('active'));
+  startTimerWithSeconds(seconds);
+}
+
+function startTimerWithSeconds(seconds) {
+  clearInterval(timerInterval);
+  timerRemaining = seconds;
+  timerPaused = false;
+
+  const display = document.getElementById('timer-display');
+  display.textContent = formatTimer(timerRemaining);
+  display.classList.remove('done');
+  document.getElementById('timer-status').textContent = '';
+
+  const pauseBtn = document.getElementById('timer-pause-btn');
+  pauseBtn.disabled = false;
+  pauseBtn.textContent = 'Pause';
+  document.getElementById('timer-reset-btn').disabled = false;
+
+  timerInterval = setInterval(tickTimer, 1000);
+}
+
+function tickTimer() {
+  if (timerPaused) return;
+  timerRemaining -= 1;
+  if (timerRemaining <= 0) {
+    document.getElementById('timer-display').textContent = '0:00';
+    finishTimer();
+    return;
+  }
+  document.getElementById('timer-display').textContent = formatTimer(timerRemaining);
+}
+
+function toggleTimerPause() {
+  if (!timerInterval) return;
+  timerPaused = !timerPaused;
+  document.getElementById('timer-pause-btn').textContent = timerPaused ? 'Resume' : 'Pause';
+}
+
+function resetTimer() {
+  clearInterval(timerInterval);
+  timerInterval = null;
+  timerRemaining = 0;
+  timerPaused = false;
+
+  document.querySelectorAll('.timer-preset').forEach(b => b.classList.remove('active'));
+  const display = document.getElementById('timer-display');
+  display.textContent = '--:--';
+  display.classList.remove('done');
+  document.getElementById('timer-status').textContent = '';
+
+  document.getElementById('timer-pause-btn').disabled = true;
+  document.getElementById('timer-pause-btn').textContent = 'Pause';
+  document.getElementById('timer-reset-btn').disabled = true;
+}
+
+function finishTimer() {
+  clearInterval(timerInterval);
+  timerInterval = null;
+
+  document.getElementById('timer-display').classList.add('done');
+  const statusEl = document.getElementById('timer-status');
+  statusEl.textContent = "Time's up!";
+  statusEl.style.color = 'var(--accent)';
+  document.getElementById('timer-pause-btn').disabled = true;
+
+  playTimerBeep();
+}
+
+function playTimerBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const playTone = (delay) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.value = 0.15;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + delay);
+      osc.stop(ctx.currentTime + delay + 0.25);
+    };
+    playTone(0);
+    playTone(0.35);
+    playTone(0.7);
+  } catch (e) {
+    // Web Audio unavailable - the visual "Time's up!" state still shows.
+  }
+}
 
 // ---------- Live Plot ----------
 // Two independent plot instances (side by side), each with its own
