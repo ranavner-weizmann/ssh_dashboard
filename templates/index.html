@@ -1108,6 +1108,7 @@
       <span id="status-text">disconnected</span>
       <span id="header-host"></span>
       <span id="header-cpu"></span>
+      <span id="header-temp"></span>
       <button class="btn-ghost btn-status-disconnect" id="header-disconnect-btn" onclick="disconnectSession()" style="display: none;">Disconnect</button>
     </div>
   </div>
@@ -1800,6 +1801,7 @@ function showConnectView() {
   document.getElementById('connect-view').classList.add('active');
   document.getElementById('header-host').textContent = '';
   document.getElementById('header-cpu').textContent = '';
+  document.getElementById('header-temp').textContent = '';
   document.getElementById('header-disconnect-btn').style.display = 'none';
   connectedHost = null;
   connectedUsername = null;
@@ -4590,6 +4592,7 @@ async function refreshPiTime() {
   const ntpWarning = document.getElementById('ntp-warning');
   const driftWarning = document.getElementById('clock-drift-warning');
   const cpuDisplay = document.getElementById('header-cpu');
+  const tempDisplay = document.getElementById('header-temp');
   const piTzDisplay = document.getElementById('pi-timezone-display');
   const tzWarning = document.getElementById('timezone-mismatch-warning');
 
@@ -4605,6 +4608,9 @@ async function refreshPiTime() {
       cpuDisplay.textContent = (data.cpu_percent === null || data.cpu_percent === undefined)
         ? ''
         : `· cpu ${data.cpu_percent}%`;
+      tempDisplay.textContent = (data.cpu_temp_c === null || data.cpu_temp_c === undefined)
+        ? ''
+        : `· ${data.cpu_temp_c}°C`;
 
       if (typeof data.pi_epoch === 'number') {
         const driftSeconds = Math.abs((Date.now() / 1000) - data.pi_epoch);
@@ -4645,6 +4651,7 @@ async function refreshPiTime() {
       ntpWarning.classList.remove('active');
       driftWarning.classList.remove('active');
       cpuDisplay.textContent = '';
+      tempDisplay.textContent = '';
       clockOutOfSync = false;
       piTzDisplay.textContent = 'checking...';
       piTzDisplay.classList.add('stale');
@@ -4655,6 +4662,7 @@ async function refreshPiTime() {
     piDisplay.classList.add('stale');
     driftWarning.classList.remove('active');
     cpuDisplay.textContent = '';
+    tempDisplay.textContent = '';
     clockOutOfSync = false;
     piTzDisplay.textContent = '(error checking)';
     piTzDisplay.classList.add('stale');

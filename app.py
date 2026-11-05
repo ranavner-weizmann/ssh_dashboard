@@ -4216,10 +4216,24 @@ def _parse_cpu_percent(top_output):
     return round(100 - float(match.group(1)), 1)
 
 
+def _parse_cpu_temp(thermal_output):
+    """
+    Parses the kernel's thermal_zone0 reading (millidegrees C, e.g. "51234")
+    into degrees C. Returns None (instead of raising) if the file was
+    missing or unreadable - same nice-to-have reasoning as _parse_cpu_percent.
+    """
+    try:
+        return round(int(thermal_output.strip()) / 1000, 1)
+    except ValueError:
+        return None
+
+
 def _get_pi_time_info(ssh):
     """
     Reads the Pi's current date/time, whether NTP sync is active (via
-    timedatectl), and its current CPU usage (via top). Returns a dict;
+    timedatectl), and its current CPU usage (via top) and temperature (via
+    the kernel's thermal zone, which needs no sudo or video group, unlike
+    vcgencmd). Returns a dict;
     raises on SSH/command failure so callers can report a clear
     connection-level error.
 
@@ -4245,6 +4259,8 @@ def _get_pi_time_info(ssh):
     # apparent clock drift, even when the two clocks are actually in sync.
     stdin, stdout, stderr = ssh.exec_command(
         "top -bn1 | grep -m1 '^%Cpu'; "
+        "echo '---temp---'; "
+        "cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null; "
         "echo '---time---'; "
         "timedatectl show --property=NTP --property=NTPSynchronized --property=Timezone; "
         "date '+%Y-%m-%d %H:%M:%S %Z'; "
@@ -4258,7 +4274,8 @@ def _get_pi_time_info(ssh):
     if exit_status != 0:
         raise RuntimeError(err_text or "timedatectl/date command failed on the remote host.")
 
-    cpu_part, _, time_part = out_text.partition("---time---")
+    stats_part, _, time_part = out_text.partition("---time---")
+    cpu_part, _, temp_part = stats_part.partition("---temp---")
 
     info = {}
     pi_datetime_str = None
@@ -4288,6 +4305,7 @@ def _get_pi_time_info(ssh):
         "ntp_active": ntp_active,
         "ntp_synchronized": ntp_synced,
         "cpu_percent": _parse_cpu_percent(cpu_part),
+        "cpu_temp_c": _parse_cpu_temp(temp_part),
     }
 
 
